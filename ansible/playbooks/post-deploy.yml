@@ -1,0 +1,12 @@
+---
+- name: In thông tin truy cập (read-only)
+  hosts: master
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Thông tin Icinga Web 2
+      ansible.builtin.debug:
+        msg:
+          - "Icinga Web 2: http://{{ ansible_host | default(inventory_hostname) }}:{{ icingaweb2_http_port }}/authentication/login"
+          - "Admin user: {{ icingaweb2_admin_user }}"

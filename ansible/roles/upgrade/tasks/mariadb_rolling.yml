@@ -1,0 +1,228 @@
+---
+# Rolling MariaDB/Galera image upgrade. The calling play MUST use serial: 1.
+# MariaDB's documented procedure is stop -> replace -> start ->
+# mariadb-upgrade -> wait for Synced, one node at a time. The official image
+# performs mariadb-upgrade because _start_container.yml sets
+# MARIADB_AUTO_UPGRADE=1.
+
+- name: (mariadb rolling) Assert the caller is serializing one Galera node
+  ansible.builtin.assert:
+    that: ansible_play_batch | length == 1
+    fail_msg: >-
+      MariaDB rolling upgrade must run with serial: 1; current batch is
+      {{ ansible_play_batch }}.
+
+- name: (mariadb rolling) Set node paths
+  ansible.builtin.set_fact:
+    mariadb_etc: "{{ icinga_etc_dir }}/mariadb"
+    mariadb_data: "{{ icinga_base_dir }}/mariadb/data"
+
+- name: (mariadb rolling) Inspect the running container
+  community.docker.docker_container_info:
+    name: mariadb
+  register: _mariadb_current_container
+
+- name: (mariadb rolling) Require an existing healthy MariaDB container
+  ansible.builtin.assert:
+    that:
+      - _mariadb_current_container.exists
+      - _mariadb_current_container.container.State.Status == 'running'
+      - >-
+        (_mariadb_current_container.container.State.Health.Status
+         | default('healthy')) == 'healthy'
+    fail_msg: >-
+      {{ inventory_hostname }} is not a healthy running MariaDB node. Recover
+      the cluster before attempting a rolling upgrade.
+
+- name: (mariadb rolling) Read current server version and Galera state
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - mariadb
+      - mariadb
+      - --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf
+      - -N
+      - -e
+      - >-
+        SELECT VERSION();
+        SHOW STATUS WHERE Variable_name IN
+        ('wsrep_cluster_size','wsrep_cluster_status',
+         'wsrep_local_state_comment','wsrep_ready');
+  register: _mariadb_before
+  changed_when: false
+
+- name: (mariadb rolling) Require a fully healthy cluster before this node
+  ansible.builtin.assert:
+    that:
+      - "'Primary' in _mariadb_before.stdout"
+      - "'Synced' in _mariadb_before.stdout"
+      - "'ON' in _mariadb_before.stdout"
+      - >-
+        (_mariadb_before.stdout_lines
+         | select('search', 'wsrep_cluster_size')
+         | first | default('0 0')).split()[-1] | int == galera_count | int
+    fail_msg: >-
+      Cluster is not fully healthy before upgrading {{ inventory_hostname }}:
+      {{ _mariadb_before.stdout_lines }}
+  when: (galera_count | int) >= 3
+
+- name: (mariadb rolling) Pull target image before disrupting the node
+  community.docker.docker_image:
+    name: "{{ images.mariadb }}"
+    source: pull
+
+- name: (mariadb rolling) Inspect target image
+  community.docker.docker_image_info:
+    name: "{{ images.mariadb }}"
+  register: _mariadb_target_image
+
+- name: (mariadb rolling) Read target server version without starting it
+  ansible.builtin.command:
+    argv: [docker, run, --rm, "{{ images.mariadb }}", mariadbd, --version]
+  register: _mariadb_target_version_cmd
+  changed_when: false
+
+- name: (mariadb rolling) Read current Galera provider package version
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - mariadb
+      - dpkg-query
+      - -W
+      - '-f=${Version}'
+      - galera-4
+  register: _mariadb_current_galera_cmd
+  changed_when: false
+
+- name: (mariadb rolling) Read target Galera provider package version
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - "{{ images.mariadb }}"
+      - dpkg-query
+      - -W
+      - '-f=${Version}'
+      - galera-4
+  register: _mariadb_target_galera_cmd
+  changed_when: false
+
+- name: (mariadb rolling) Parse current and target versions
+  ansible.builtin.set_fact:
+    _mariadb_current_version: >-
+      {{ _mariadb_before.stdout_lines[0]
+         | regex_search('^[0-9]+\.[0-9]+\.[0-9]+') }}
+    _mariadb_target_version: >-
+      {{ _mariadb_target_version_cmd.stdout
+         | regex_search('[0-9]+\.[0-9]+\.[0-9]+(?=-MariaDB)') }}
+    _mariadb_current_series: >-
+      {{ _mariadb_before.stdout_lines[0]
+         | regex_search('^[0-9]+\.[0-9]+') }}
+    _mariadb_target_series: >-
+      {{ _mariadb_target_version_cmd.stdout
+         | regex_search('[0-9]+\.[0-9]+(?=\.[0-9]+-MariaDB)') }}
+    _mariadb_current_galera_version: >-
+      {{ _mariadb_current_galera_cmd.stdout
+         | regex_search('[0-9]+\.[0-9]+\.[0-9]+') }}
+    _mariadb_target_galera_version: >-
+      {{ _mariadb_target_galera_cmd.stdout
+         | regex_search('[0-9]+\.[0-9]+\.[0-9]+') }}
+
+- name: (mariadb rolling) Validate upgrade direction and series approval
+  ansible.builtin.assert:
+    that:
+      - _mariadb_current_version | length > 0
+      - _mariadb_target_version | length > 0
+      - _mariadb_current_galera_version | length > 0
+      - _mariadb_target_galera_version | length > 0
+      - _mariadb_target_version is version(_mariadb_current_version, '>=')
+      - >-
+        _mariadb_target_galera_version is
+        version(_mariadb_current_galera_version, '>=')
+      - >-
+        _mariadb_current_series == _mariadb_target_series or
+        (mariadb_allow_rolling_series_upgrade | bool)
+    fail_msg: >-
+      Refusing MariaDB {{ _mariadb_current_version }} ->
+      {{ _mariadb_target_version }} on {{ inventory_hostname }}. Downgrades are
+      unsafe, including a Galera provider downgrade
+      {{ _mariadb_current_galera_version }} ->
+      {{ _mariadb_target_galera_version }}. A series change also requires an
+      explicit compatibility review and
+      mariadb_allow_rolling_series_upgrade=true.
+
+- name: (mariadb rolling) Decide whether this node needs replacement
+  ansible.builtin.set_fact:
+    _mariadb_node_needs_upgrade: >-
+      {{ _mariadb_current_container.container.Image !=
+         _mariadb_target_image.images[0].Id or
+         'MARIADB_AUTO_UPGRADE=1' not in
+         (_mariadb_current_container.container.Config.Env | default([])) }}
+
+- name: >-
+    (mariadb rolling) Replace this node only, then let the image run
+    mariadb-upgrade
+  ansible.builtin.include_role:
+    name: mariadb
+    tasks_from: _start_container
+  vars:
+    mariadb_container_command: mariadbd
+  when: _mariadb_node_needs_upgrade | bool
+
+- name: (mariadb rolling) Wait for SQL after node replacement
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - mariadb
+      - mariadb
+      - --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf
+      - -N
+      - -e
+      - SELECT 1;
+  register: _mariadb_sql_ready
+  changed_when: false
+  retries: 36
+  delay: 5
+  until: _mariadb_sql_ready.rc == 0
+
+- name: (mariadb rolling) Read upgraded version, upgrade marker and state
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - mariadb
+      - bash
+      - -ec
+      - >-
+        mariadb --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf
+        -N -e "SELECT VERSION(); SHOW STATUS WHERE Variable_name IN
+        ('wsrep_cluster_size','wsrep_cluster_status',
+        'wsrep_local_state_comment','wsrep_ready');";
+        printf 'upgrade_info\t'; cat /var/lib/mysql/mariadb_upgrade_info
+  register: _mariadb_after
+  changed_when: false
+  retries: 36
+  delay: 5
+  until:
+    - _mariadb_after.rc == 0
+    - (galera_count | int) < 3 or 'Primary' in _mariadb_after.stdout
+    - (galera_count | int) < 3 or 'Synced' in _mariadb_after.stdout
+    - (galera_count | int) < 3 or 'ON' in _mariadb_after.stdout
+    - >-
+      (galera_count | int) < 3 or
+      (_mariadb_after.stdout_lines
+       | select('search', 'wsrep_cluster_size')
+       | first | default('0 0')).split()[-1] | int == galera_count | int
+
+- name: (mariadb rolling) Verify this node is on the target version
+  ansible.builtin.assert:
+    that:
+      - _mariadb_after.stdout_lines[0].startswith(_mariadb_target_version)
+      - "('upgrade_info\t' ~ _mariadb_target_version) in _mariadb_after.stdout"
+    fail_msg: >-
+      {{ inventory_hostname }} did not finish its MariaDB upgrade to
+      {{ _mariadb_target_version }}: {{ _mariadb_after.stdout_lines }}

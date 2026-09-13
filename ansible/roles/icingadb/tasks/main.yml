@@ -1,0 +1,135 @@
+---
+# Role icingadb: import schema icingadb (một lần) + chạy daemon đồng bộ Redis->MariaDB.
+# Chạy trên master. HA (2 master): cả hai daemon cùng DB, tự bầu leader.
+# Config render override-aware (deploy node -> target node, giống kolla — design.md mục 4.1).
+
+# ---------- Import schema (idempotent, chỉ 1 lần trên master[0]) ----------
+# Image icingadb là DISTROLESS (không có sh/cat) → dùng docker cp để lấy schema.
+# BUG đã gặp thật (2026-07-22, lần đầu dùng icingadb:1.2.1 — icinga-2025.2, khác hẳn 1.5.1 đã quen
+# dùng cả session): 1.5.1 đóng gói ở /schema/mysql/schema.sql (thẳng), nhưng 1.2.1 đóng gói ở
+# /mysql.schema.sql.bz2 (NÉN, tại ROOT, KHÔNG có /schema/). 2 bản đóng gói khác nhau thật — không
+# suy đoán, đã xác nhận bằng docker cp thử trực tiếp. Container distroless không có bunzip2 bên
+# trong -> phải copy file .bz2 ra host rồi giải nén bằng python3 (luôn có sẵn, Ansible managed node
+# yêu cầu) thay vì cài thêm gói bzip2.
+- name: Trích schema icingadb từ image ra host (docker cp, thử /schema/ trước, fallback .bz2 ở root)
+  ansible.builtin.shell: |
+    set -e
+    cid=$(docker create {{ images.icingadb }})
+    if docker cp "$cid:/schema/mysql/schema.sql" {{ icinga_base_dir }}/icingadb/schema.sql 2>/dev/null; then
+      :
+    else
+      docker cp "$cid:/mysql.schema.sql.bz2" {{ icinga_base_dir }}/icingadb/schema.sql.bz2
+      python3 -c "
+    import bz2, shutil
+    with bz2.open('{{ icinga_base_dir }}/icingadb/schema.sql.bz2') as f_in, open('{{ icinga_base_dir }}/icingadb/schema.sql', 'wb') as f_out:
+        shutil.copyfileobj(f_in, f_out)
+    "
+      rm -f {{ icinga_base_dir }}/icingadb/schema.sql.bz2
+    fi
+    docker rm -v "$cid" >/dev/null
+  args:
+    creates: "{{ icinga_base_dir }}/icingadb/schema.sql"
+  when: inventory_hostname == ca_host
+
+- name: Kiểm tra schema icingadb đã import chưa
+  # retries/until: DB (đặc biệt Galera) có thể đang restart/rejoin đúng lúc role này chạy (vd handler
+  # "Reload mariadb" từ role mariadb vừa notify trong CÙNG lần deploy) — đã gặp thật (2026-07-22):
+  # "ERROR 2002: Can't connect to server" vì galera1 còn "health: starting" sau restart. rc != 0 chỉ
+  # nghĩa là CHƯA kết nối được (connection), không liên quan tới việc schema đã import hay chưa
+  # (COUNT trả về 0 vẫn là rc=0 hợp lệ) — retry đúng cho tới khi kết nối được, không phải tới khi có bảng.
+  #
+  # Dùng user 'icingadb' (KHÔNG phải root) — 2026-07-23, theo yêu cầu người dùng: nhánh
+  # icinga_database_type=external không được đụng tới root của DB ngoài (DBA tự tạo database/user/
+  # grant sẵn theo hướng dẫn ở roles/prechecks, xem "Hướng dẫn tạo schema DB ngoài"). User
+  # 'icingadb' có GRANT ALL trên chính DB của nó (cả managed_db lẫn external đều vậy) nên đủ quyền
+  # SELECT information_schema.tables + CREATE TABLE — không cần root cho cả 2 nhánh, đồng nhất luôn.
+  #
+  # _mariadb_ssl_flag: tuỳ chọn qua db_client_skip_ssl (mặc định false, xem group_vars/all.yml +
+  # giải thích BUG THẬT ở roles/icingaweb2/tasks/main.yml): client mariadb bản mới mặc định yêu cầu
+  # TLS, MariaDB tự cài tay (external) thường không bật TLS -> "SSL is required, but the server does
+  # not support it" nếu không bật db_client_skip_ssl: true trong globals.yml.
+  ansible.builtin.shell: >
+    docker run --rm --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingadb -p{{ icingadb_db_password }}
+    -N -e "SELECT COUNT(*) FROM information_schema.tables
+           WHERE table_schema='icingadb' AND table_name='host';"
+  register: idb_schema_check
+  retries: 24
+  delay: 5
+  until: idb_schema_check.rc == 0
+  changed_when: false
+  no_log: true
+  when: inventory_hostname == ca_host
+
+- name: Import schema icingadb (nếu chưa có bảng)
+  ansible.builtin.shell: >
+    docker run --rm -i --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingadb -p{{ icingadb_db_password }} icingadb
+    < {{ icinga_base_dir }}/icingadb/schema.sql
+  args:
+    executable: /bin/bash
+  no_log: true
+  when:
+    - inventory_hostname == ca_host
+    - idb_schema_check.stdout | default('0') | trim == '0'
+
+# ---------- Config (override-aware) + daemon ----------
+- name: Tạo thư mục config trên target node
+  ansible.builtin.file:
+    path: "{{ icinga_etc_dir }}/icingadb"
+    state: directory
+    owner: "1001"
+    group: "1001"
+    mode: "0750"
+
+# Tầng "theo nhóm" (2026-07-23) — chèn GIỮA per-host và global, xem giải thích đầy đủ ở
+# roles/icinga2/tasks/render_config_item.yml (cùng cơ chế, áp dụng lại y hệt ở đây).
+- name: Xác định nguồn config.yml (override per-host > per-group > per-service > template)
+  ansible.builtin.set_fact:
+    _icingadb_cfg_src: >-
+      {{ (q('first_found', dict(
+            files=[deploy_config_dir + '/icingadb/' + inventory_hostname + '/config.yml']
+                  + (group_names | reject('in', ['all', 'ungrouped', 'all_hosts'])
+                                  | map('regex_replace', '^(.*)$', deploy_config_dir + '/icingadb/group_\1/config.yml')
+                                  | list)
+                  + [deploy_config_dir + '/icingadb/config.yml'],
+            skip=true)) | first) | default('', true) }}
+
+# icingadb daemon chạy uid 1001 (icinga trong image distroless) -> config phải 1001 đọc được.
+- name: Copy override config.yml (nếu có)
+  ansible.builtin.copy:
+    src: "{{ _icingadb_cfg_src }}"
+    dest: "{{ icinga_etc_dir }}/icingadb/config.yml"
+    owner: "1001"
+    group: "1001"
+    mode: "0640"
+  when: _icingadb_cfg_src | length > 0
+  no_log: true
+  notify: Reload icingadb
+
+- name: Render template mặc định config.yml (không có override)
+  ansible.builtin.template:
+    src: config.yml.j2
+    dest: "{{ icinga_etc_dir }}/icingadb/config.yml"
+    owner: "1001"
+    group: "1001"
+    mode: "0640"
+  when: _icingadb_cfg_src | length == 0
+  no_log: true
+  notify: Reload icingadb
+
+- name: Khởi động container icingadb (host network)
+  community.docker.docker_container:
+    name: icingadb
+    image: "{{ images.icingadb }}"
+    state: started
+    restart_policy: unless-stopped
+    network_mode: host
+    volumes:
+      - "{{ icinga_etc_dir }}/icingadb/config.yml:/etc/icingadb/config.yml:ro"
+    healthcheck:
+      test: ["CMD", "icingadb", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  register: _icingadb_container

@@ -1,0 +1,142 @@
+---
+- name: Bỏ qua phase3 khi chỉ backup (phòng trường hợp play vẫn chạy)
+  ansible.builtin.meta: end_play
+  when: icinga_action == 'backup'
+
+# PHASE 3/3 — chạy ở PLAY RIÊNG, SAU KHI Phase 2 đã hoàn tất TOÀN BỘ (mọi node join đã
+# wsrep_local_state_comment=Synced). Lúc này cụm đã là 3 THÀNH VIÊN ĐỘC LẬP thật — node đầu restart
+# 1 mình để bỏ cờ --wsrep-new-cluster không còn mất quorum (2 node kia vẫn giữ đa số/Primary trong
+# lúc nó restart), an toàn để rejoin qua IST. Đây chính là thứ tự kolla-ansible dùng
+# ("Restart bootstrap mariadb service" luôn là PLAY CUỐI CÙNG, sau "Start mariadb services").
+
+- name: (cluster) Bỏ cờ --wsrep-new-cluster khỏi node đầu (chỉ khi Phase 1 vừa fresh-bootstrap nó)
+  ansible.builtin.include_tasks: _start_container.yml
+  vars:
+    mariadb_container_command: "mariadbd"
+  when:
+    - mariadb_cluster_mode | bool
+    - inventory_hostname == mariadb_bootstrap_host
+    - not hostvars[mariadb_bootstrap_host].mariadb_grastate.stat.exists
+
+- name: (cluster) Chờ node đầu SELECT 1 được lại sau khi bỏ cờ
+  ansible.builtin.command: >
+    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+  register: mariadb_bootstrap_ping2
+  retries: 24
+  delay: 5
+  until: mariadb_bootstrap_ping2.rc == 0
+  changed_when: false
+  no_log: true
+  when:
+    - mariadb_cluster_mode | bool
+    - inventory_hostname == mariadb_bootstrap_host
+    - not hostvars[mariadb_bootstrap_host].mariadb_grastate.stat.exists
+
+- name: (cluster) Chờ node đầu wsrep_local_state_comment=Synced lại sau khi bỏ cờ
+  ansible.builtin.command: >
+    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }}
+    -N -e "SHOW STATUS LIKE 'wsrep_local_state_comment'"
+  register: mariadb_bootstrap_synced2
+  retries: 24
+  delay: 5
+  until: >-
+    mariadb_bootstrap_synced2.rc == 0 and
+    'Synced' in (mariadb_bootstrap_synced2.stdout | default(''))
+  changed_when: false
+  no_log: true
+  when:
+    - mariadb_cluster_mode | bool
+    - inventory_hostname == mariadb_bootstrap_host
+    - not hostvars[mariadb_bootstrap_host].mariadb_grastate.stat.exists
+
+- name: (cluster) Đọc wsrep_cluster_size + wsrep_ready thật (xác nhận cluster form đúng)
+  ansible.builtin.command: >
+    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }}
+    -N -e "SHOW STATUS LIKE 'wsrep_%';"
+  register: wsrep_status
+  changed_when: false
+  no_log: true
+  when: mariadb_cluster_mode | bool
+
+- name: (cluster) In cảnh báo nếu wsrep_cluster_size khác số node khai báo trong [galera]
+  ansible.builtin.debug:
+    msg: >-
+      wsrep_cluster_size thật trên {{ inventory_hostname }} =
+      {{ (wsrep_status.stdout_lines | select('search', 'wsrep_cluster_size') | list | first | default('')).split()[-1] | default('?') }}
+      (kỳ vọng {{ galera_count }}).
+  when: mariadb_cluster_mode | bool
+
+# ---------- Tạo database + user + grant (1 LẦN trên node bootstrap — Galera tự replicate DDL) ----------
+# Đặt cuối Phase 3 (không phải ngay sau khi node đầu sống) — đợi CẢ CỤM ổn định hẳn (kể cả bước bỏ
+# cờ) mới ghi dữ liệu, tránh ghi DDL vào lúc cụm còn đang tái cấu hình.
+- name: Xây danh sách database/service do stack quản lý
+  ansible.builtin.set_fact:
+    _managed_db_services: >-
+      {{ [
+           {'name': 'icingadb', 'database': 'icingadb', 'password': icingadb_db_password},
+           {'name': 'icingaweb2', 'database': 'icingaweb2', 'password': icingaweb2_db_password}
+         ] + ([{'name': 'director', 'database': 'director', 'password': director_db_password}]
+              if 'director' in (enable_icingaweb2_modules | default([])) else []) }}
+  no_log: true
+  when: inventory_hostname == mariadb_bootstrap_host
+
+- name: Kiểm tra credential và grant hiện tại của từng service DB
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - mariadb
+      - mariadb
+      - -h127.0.0.1
+      - "-u{{ item.name }}"
+      - "-p{{ item.password }}"
+      - -N
+      - "{{ item.database }}"
+      - -e
+      - "SHOW GRANTS FOR CURRENT_USER;"
+  loop: "{{ _managed_db_services | default([]) }}"
+  register: _managed_db_auth_checks
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: inventory_hostname == mariadb_bootstrap_host
+
+- name: Dừng consumer DB trước khi rotate credential
+  ansible.builtin.command:
+    argv: [docker, stop, icingadb, icingaweb2]
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['master'] }}"
+  register: _db_consumers_stopped_for_rotation
+  changed_when: _db_consumers_stopped_for_rotation.stdout | trim | length > 0
+  failed_when: false
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - >-
+      (_managed_db_auth_checks.results | default([])
+       | selectattr('rc', 'ne', 0) | list | length) > 0
+
+- name: Tạo/sửa database, credential và grant khi trạng thái chưa đúng
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - mariadb
+      - mariadb
+      - "-uroot"
+      - "-p{{ mariadb_root_password }}"
+      - -e
+      - >-
+        CREATE DATABASE IF NOT EXISTS `{{ item.item.database }}` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+        CREATE USER IF NOT EXISTS '{{ item.item.name }}'@'%' IDENTIFIED BY '{{ item.item.password }}';
+        ALTER USER '{{ item.item.name }}'@'%' IDENTIFIED BY '{{ item.item.password }}';
+        GRANT ALL ON `{{ item.item.database }}`.* TO '{{ item.item.name }}'@'%';
+        FLUSH PRIVILEGES;
+  loop: "{{ _managed_db_auth_checks.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - >-
+      item.rc != 0 or
+      ('ON `' ~ item.item.database ~ '`.*' not in (item.stdout | default('')))
+  no_log: true

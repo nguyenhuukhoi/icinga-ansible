@@ -1,0 +1,29 @@
+/* {{ ansible_managed }}
+ * Host/Service monitor bởi zone satellite "{{ sat_zone.name }}" — mặc định RỖNG.
+ *
+ * Khác tính năng "client" (command-endpoint, chạy trong zone master): đây là Host/Service THẬT chạy
+ * BỞI satellite (vd SSH ra host ngoài cluster) — xem design.md mục 9.4.
+ *
+ * Cách thêm 1 host bị monitor qua zone satellite này:
+ *   1. Đặt override tại:
+ *        {{ deploy_config_dir }}/icinga2/zones.d/{{ sat_zone.name }}/hosts.conf
+ *      (đè hẳn nội dung file này — không merge).
+ *   2. Dùng CheckCommand SSH có sẵn: by_ssh_disk / by_ssh_load / by_ssh_mem (xem
+ *      ssh-checks.conf, ghi bởi role, KHÔNG cần override) — hoặc ITL "by_ssh" gốc nếu cần tuỳ biến.
+ *      Private key SSH đọc từ deploy_config_dir/icinga2/ssh/id_monitor (deploy node) — Ansible tự
+ *      đồng bộ ra mọi node icinga2, mount vào container tại /data/etc/icinga2/ssh/id_monitor.
+ *   Ví dụ nội dung override:
+ *        object Host "ext-212" {
+ *          address = "10.10.10.212"
+ *          check_command = "by_ssh_disk"
+ *          vars.ssh_user = "ubuntu"
+ *        }
+ *        object Service "disk" {
+ *          host_name = "ext-212"
+ *          check_command = "by_ssh_disk"
+ *          vars.ssh_user = "ubuntu"
+ *        }
+ *   3. icinga-ansible reconfigure — ghi trên ca_host, Icinga2 tự đồng bộ xuống mọi satellite trong
+ *      zone "{{ sat_zone.name }}" (zone cha "master" đẩy config xuống zone con — không cần Ansible
+ *      tự copy sang từng satellite).
+ */

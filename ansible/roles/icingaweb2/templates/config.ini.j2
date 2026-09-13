@@ -1,0 +1,10 @@
+; {{ ansible_managed }}
+[global]
+show_stacktraces = "1"
+config_backend   = "db"
+config_resource  = "icingaweb2_db"
+timezone         = "{{ icingaweb2_timezone }}"
+
+[logging]
+log   = "syslog"
+level = "ERROR"

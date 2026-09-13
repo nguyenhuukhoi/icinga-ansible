@@ -1,0 +1,77 @@
+# =============================================================================
+# remove-master.yml — Gỡ 1 master khỏi cluster (design 12.4). PHÁ HUỶ trên host bị gỡ.
+# Dùng: icinga-ansible remove-master -e target_host=<tên trong inventory> -e confirm=yes
+#
+# CHỈ xoá container + dữ liệu TRÊN HOST BỊ GỠ. Không tự sửa file inventory (inventory tĩnh,
+# Ansible chỉ đọc 1 lần lúc start — không thể vừa đọc vừa tự sửa giữa chừng có ý nghĩa).
+# Sau khi chạy playbook này, PHẢI tự tay:
+#   1) Xoá host khỏi [master] (và [all_hosts] nếu không dùng cho vai trò khác) trong inventory.
+#   2) Chạy lại `icinga-ansible reconfigure` để các master/satellite còn lại render lại zones.conf
+#      (không còn endpoint vừa gỡ) + tự reload (nhờ handler "Reload icinga2").
+# Nếu host bị gỡ là ca_host (CA gốc): PHẢI đảm bảo ca_host mới (master[0] sau khi sửa inventory)
+# đã có CA (nhân bản qua CA HA — design 9.2) trước khi gỡ, nếu không cluster mất khả năng ký cert mới.
+# =============================================================================
+- name: Chặn nếu chưa xác nhận / thiếu target_host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    confirm: false
+    target_host: ""
+  tasks:
+    - name: Kiểm tra tham số bắt buộc
+      ansible.builtin.fail:
+        msg: >-
+          remove-master cần: -e target_host=<tên host trong inventory, vd master2> -e confirm=yes.
+          Đây là thao tác PHÁ HUỶ container+dữ liệu icinga2/redis/icingadb/web TRÊN HOST ĐÓ.
+      when: not (confirm | bool) or (target_host | default('')) | length == 0
+
+- name: Xoá container + dữ liệu trên master bị gỡ
+  hosts: "{{ target_host }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Xác nhận host này thật sự thuộc [master] (an toàn — tránh gõ nhầm target_host)
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname in groups['master']
+          - groups['master'] | length > 1
+          - inventory_hostname != ca_host
+        fail_msg: >-
+          Chỉ được gỡ master không phải ca_host khi cụm còn ít nhất một master khác. Nếu cần gỡ CA
+          hiện tại, hãy đưa master đã có bản sao CA lên đầu nhóm [master], chạy reconfigure/check,
+          rồi mới chạy remove-master với inventory đã đổi thứ tự.
+
+    - name: Dừng & xoá container icinga2/redis/icingadb/web trên host này
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: absent
+        force_kill: true
+      loop: [icingaweb2, icingadb, icingadb-redis, icinga2]
+      ignore_errors: true
+
+    - name: Xoá dữ liệu cục bộ ({{ icinga_base_dir }}) — để add lại sạch sau này nếu cần
+      ansible.builtin.file:
+        path: "{{ icinga_base_dir }}"
+        state: absent
+
+    - name: Tạo lại thư mục gốc rỗng
+      ansible.builtin.file:
+        path: "{{ icinga_base_dir }}"
+        state: directory
+        mode: "0755"
+
+- name: Nhắc việc còn lại (đọc kỹ trước khi coi remove-master đã xong)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg:
+          - "Đã xoá container + dữ liệu trên '{{ target_host }}'."
+          - "VIỆC CÒN LẠI (tự làm, chưa tự động):"
+          - "  1) Xoá '{{ target_host }}' khỏi [master] (và [all_hosts] nếu cần) trong file inventory."
+          - "  2) Chạy: icinga-ansible reconfigure -i <inventory> — để master/satellite còn lại"
+          - "     render lại zones.conf (hết endpoint '{{ target_host }}') + tự reload."

@@ -1,0 +1,28 @@
+/* {{ ansible_managed }} — API user cho Icinga Web 2 (deploy config chung, dùng bởi các lệnh CLI/API
+ * chung của dự án — vd icinga-ansible tự query API để verify, các action ack/downtime/reschedule
+ * nếu Icinga Web core cần). */
+object ApiUser "icingaweb2" {
+  password = "{{ icinga2_api_user_password }}"
+  permissions = [ "*" ]
+}
+
+/* API user RIÊNG cho module Director (2026-07, theo khuyến nghị chính thức của Icinga Director —
+ * https://icinga.com/docs/icinga-director/latest/doc/04-Getting-started/ dùng đúng tên "director"
+ * tách biệt khỏi API user khác) — khai riêng để tách bạch audit trail (request nào tới từ Director
+ * kickstart/deploy, request nào từ nơi khác), KHÔNG dùng chung "icingaweb2" nữa. Dùng khi khai
+ * Kickstart trong module Director (Configuration > Kickstart wizard): endpoint "https://<host>:5665",
+ * user "director", password lấy từ icinga2_director_api_user_password (passwords.yml) — xem
+ * "In thông tin truy cập" (post-deploy) để lấy lại giá trị đã sinh. */
+object ApiUser "director" {
+  password = "{{ icinga2_director_api_user_password }}"
+  permissions = [ "*" ]
+}
+
+/* API user RIÊNG cho Command Transport của Icinga DB Web (Acknowledge/Downtime/Reschedule/Comment
+ * gửi từ dashboard) — theo đúng permissions khuyến nghị chính thức
+ * (https://icinga.com/docs/icinga-db-web/latest/doc/03-Configuration/): CHỈ 4 quyền cần thiết, KHÔNG
+ * dùng "*" (least-privilege thật, khác Director/icingaweb2 vốn cần full quyền để deploy config). */
+object ApiUser "icingadb-web" {
+  password = "{{ icingadb_web_api_user_password }}"
+  permissions = [ "actions/*", "objects/query/*", "objects/modify/*", "status/query" ]
+}

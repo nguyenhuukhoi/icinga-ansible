@@ -1,0 +1,124 @@
+---
+# Backup: mariadb-backup (hot) qua docker exec + snapshot volume CA/PKI.
+# Chạy trên galera[0] (P1) — P4 sẽ chọn node không nhận write chính.
+#
+# backup_tag (tuỳ chọn, "-e backup_tag=pre-upgrade"): gắn nhãn bản backup này + ghi thêm file con trỏ
+# LATEST_<TAG> (nội dung = timestamp) vào mariadb_backup.destination — để playbook khác (rollback) tìm
+# đúng "bản pre-upgrade mới nhất" mà không cần biết trước timestamp. Không set = backup thường theo
+# lịch, không ghi con trỏ.
+
+- name: Chỉ backup trên node DB chính
+  ansible.builtin.set_fact:
+    do_backup: "{{ inventory_hostname == (groups['galera'][0]) }}"
+    # BẮT BUỘC dùng biến MỚI (backup_tag_norm), KHÔNG được gán lại "backup_tag" — "-e backup_tag=..."
+    # là extra-var, có độ ưu tiên CAO NHẤT trong Ansible, set_fact KHÔNG ghi đè được dù task chạy "ok"
+    # không báo lỗi gì (bug thật đã gặp, 2026-07-22: cứ đọc lại {{ backup_tag }} sau set_fact vẫn ra
+    # giá trị GỐC "pre-upgrade" có gạch ngang, làm LATEST_PRE-UPGRADE lệch tên với chỗ restore.yml đọc
+    # cứng LATEST_PRE_UPGRADE gạch dưới). Chuẩn hoá '-' -> '_' vào biến riêng để tránh hẳn vấn đề này.
+    backup_tag_norm: "{{ (backup_tag | default('')) | replace('-', '_') }}"
+
+- name: Tạo thư mục đích backup
+  ansible.builtin.file:
+    path: "{{ mariadb_backup.destination }}"
+    state: directory
+    mode: "0700"
+  when: do_backup | bool
+
+- name: Đặt timestamp
+  ansible.builtin.set_fact:
+    backup_ts: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+  when: do_backup | bool
+
+- name: Đặt tên file backup (có tag hoặc không)
+  ansible.builtin.set_fact:
+    backup_filename: "db-{{ (backup_tag_norm ~ '-') if backup_tag_norm | length > 0 else '' }}{{ backup_ts }}.xb.gz"
+  when: do_backup | bool
+
+- name: Full backup bằng mariadb-backup (stream ra file nén)
+  ansible.builtin.shell: >
+    umask 077 && docker exec mariadb sh -c
+    'mariadb-backup --backup --stream=xbstream
+    --user=root --password={{ mariadb_root_password }}'
+    | gzip > {{ mariadb_backup.destination }}/{{ backup_filename }}
+  args:
+    executable: /bin/bash
+  no_log: true
+  when: do_backup | bool
+
+- name: Ghi con trỏ LATEST_<TAG> (chỉ khi có backup_tag — vd rollback dùng để tìm bản pre-upgrade)
+  ansible.builtin.copy:
+    content: "{{ backup_ts }}"
+    dest: "{{ mariadb_backup.destination }}/LATEST_{{ backup_tag_norm | upper }}"
+    mode: "0600"
+  when:
+    - do_backup | bool
+    - backup_tag_norm | length > 0
+
+# BUG THẬT ĐÃ GẶP (2026-07-24, phát hiện lúc verify tính năng backup-full/restore-pki mới): CA thật
+# nằm ở "ca_host" (master đầu tiên), KHÔNG phải "galera[0]" — 2 vai trò hoàn toàn độc lập, có thể là
+# 2 host khác nhau (đúng trường hợp này: DB tách riêng khỏi master). Bản cũ archive
+# "{{ icinga_base_dir }}/icinga2/pki" NGAY TRÊN galera[0] — thư mục này do roles/common tạo RỖNG
+# trên MỌI host (kể cả node DB thuần), chỉ được roles/icinga2 ĐIỀN dữ liệu thật
+# (when: inventory_hostname == ca_host) — nên trên 1 node DB không phải ca_host, kết quả là archive
+# 1 thư mục RỖNG (~69 byte, không có lỗi/cảnh báo gì cả) — silent, tưởng có backup PKI nhưng thực ra
+# không. Fix: delegate_to đúng ca_host.
+- name: Đảm bảo thư mục đích backup tồn tại trên ca_host (cho PKI snapshot delegate bên dưới)
+  ansible.builtin.file:
+    path: "{{ mariadb_backup.destination }}"
+    state: directory
+    mode: "0700"
+  delegate_to: "{{ ca_host }}"
+  when:
+    - do_backup | bool
+    - ca_host | length > 0
+
+- name: "Snapshot CA/PKI (state ngoài DB — mục 10.5) — chạy TRÊN ca_host, không phải galera[0]"
+  community.general.archive:
+    path: "{{ icinga_base_dir }}/icinga2/pki"
+    dest: "{{ mariadb_backup.destination }}/pki-{{ backup_ts }}.tar.gz"
+    format: gz
+    mode: "0600"
+  delegate_to: "{{ ca_host }}"
+  when:
+    - do_backup | bool
+    - ca_host | length > 0
+
+- name: Xoá bản DB backup cũ hơn retention_days (trên galera[0])
+  ansible.builtin.find:
+    paths: "{{ mariadb_backup.destination }}"
+    age: "{{ mariadb_backup.retention_days }}d"
+    patterns: ["db-*.xb.gz"]
+  register: old_db_backups
+  when: do_backup | bool
+
+- name: Dọn bản DB backup cũ
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ old_db_backups.files | default([]) }}"
+  loop_control: { label: "{{ item.path }}" }
+  when: do_backup | bool
+
+# Dọn PKI archive cũ RIÊNG trên ca_host — cùng lý do delegate_to ở trên (pki-*.tar.gz giờ nằm trên
+# ca_host, không phải galera[0], nên phải dọn đúng chỗ, không thì tích luỹ vô hạn không retention).
+- name: Xoá bản PKI archive cũ hơn retention_days (trên ca_host)
+  ansible.builtin.find:
+    paths: "{{ mariadb_backup.destination }}"
+    age: "{{ mariadb_backup.retention_days }}d"
+    patterns: ["pki-*.tar.gz"]
+  register: old_pki_backups
+  delegate_to: "{{ ca_host }}"
+  when:
+    - do_backup | bool
+    - ca_host | length > 0
+
+- name: Dọn bản PKI archive cũ
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ old_pki_backups.files | default([]) }}"
+  loop_control: { label: "{{ item.path }}" }
+  delegate_to: "{{ ca_host }}"
+  when:
+    - do_backup | bool
+    - ca_host | length > 0

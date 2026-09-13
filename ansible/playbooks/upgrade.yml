@@ -1,0 +1,99 @@
+# =============================================================================
+# upgrade.yml — nâng cấp rolling theo icinga_image_versions MỚI trong globals.yml (design.md 13.3).
+# UX: người dùng sửa tag trong globals.yml -> chạy 'icinga-ansible upgrade'. Trình tự an toàn:
+#   1) Backup DB (+CA/PKI) gắn nhãn pre-upgrade  -> rollback được nếu fail (icinga-ansible rollback).
+#   2) Rolling MariaDB/Galera serial:1, health gate đủ cluster trước/sau từng node.
+#   3) Dừng icingadb daemon + migrate schema icingadb/icingaweb2 (chỉ DB nào CẦN, dò thật).
+#   4) Redeploy toàn stack ở version MỚI (tái dùng site playbook — icinga2 rolling serial:1 sẵn có).
+#   5) Postcheck THẬT (mọi Galera node ready, container healthy, web 200) — fail rõ nếu chưa khỏe.
+# Nếu bất kỳ bước nào fail -> dừng ngay; sửa globals.yml về tag cũ rồi 'icinga-ansible rollback'.
+# =============================================================================
+
+- name: Upgrade — chặn external DB vì tool không sở hữu backup/restore DB đó
+  hosts: "{{ groups['master'][0] }}"
+  become: false
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Upgrade tự động chỉ hỗ trợ managed_db
+      ansible.builtin.assert:
+        that: icinga_database_type == 'managed_db'
+        fail_msg: >-
+          upgrade tự động hiện chỉ hỗ trợ managed_db. Với external DB, DBA phải backup và migrate
+          schema theo change plan riêng; tool sẽ không dùng root hoặc giả vờ đã có backup.
+
+# --- 1. Backup pre-upgrade (chạy trên galera, backup.yml tự lọc galera[0]) --------------------
+- name: Upgrade — backup pre-upgrade
+  hosts: galera
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Backup DB + snapshot CA/PKI, nhãn pre-upgrade
+      ansible.builtin.include_role:
+        name: mariadb
+        tasks_from: backup
+      vars:
+        backup_tag: pre-upgrade
+
+# --- 2. MariaDB/Galera rolling upgrade -------------------------------------------------------
+# Non-endpoint nodes are processed first (reverse inventory); galera[0], which
+# is the default db_host, is replaced last. serial:1 is a hard safety boundary
+# and is asserted again inside mariadb_rolling.yml.
+- name: Upgrade — MariaDB/Galera one node at a time
+  hosts: galera
+  order: reverse_inventory
+  serial: 1
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Rolling upgrade MariaDB and wait for full cluster recovery
+      ansible.builtin.include_role:
+        name: upgrade
+        tasks_from: mariadb_rolling
+      when: icinga_database_type == 'managed_db'
+
+# --- 3. Dừng icingadb daemon + migrate schema (trước khi daemon bản mới khởi động) ------------
+- name: Upgrade — dừng icingadb + migrate schema
+  hosts: master
+  become: true
+  gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Dừng icingadb daemon trên mọi master (schema phải khớp daemon — dừng trước khi migrate)
+      community.docker.docker_container:
+        name: icingadb
+        state: stopped
+      ignore_errors: true
+
+    - name: Migrate schema (chỉ DB nào cần) — chạy 1 lần trên ca_host
+      ansible.builtin.include_role:
+        name: upgrade
+        tasks_from: migrate_schema
+      when: inventory_hostname == ca_host
+
+# --- 4. Redeploy toàn stack ở version MỚI (tái dùng site playbook, KHÔNG viết lại logic deploy) --
+- ansible.builtin.import_playbook: ../icinga-ansible.yml
+  vars:
+    # Host đã bootstrap trước khi upgrade; không restart Docker/chrony/proxy
+    # ở giữa maintenance window.
+    icinga_skip_bootstrap: true
+
+# --- 5. Postcheck THẬT ------------------------------------------------------------------------
+- name: Upgrade — postcheck
+  hosts: master
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Postcheck trên ca_host
+      ansible.builtin.include_role:
+        name: upgrade
+        tasks_from: postcheck
+      when: inventory_hostname == ca_host

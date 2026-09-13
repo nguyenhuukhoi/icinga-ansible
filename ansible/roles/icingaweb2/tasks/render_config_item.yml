@@ -1,0 +1,62 @@
+---
+# Include dùng lại cho từng file config icingaweb2 — override-aware (design.md mục 4.1).
+# Tham số: cfg.relpath (đường dẫn tương đối dưới icingaweb2/), cfg.template (file .j2 nguồn).
+# CHỈ mount TỪNG FILE riêng (không mount đè cả thư mục /data/etc/icingaweb2) — vì thư mục đó còn
+# chứa enabledModules/ (symlink do `icingacli module enable` ghi trực tiếp vào DATA mount lúc
+# chạy) — mount đè cả thư mục sẽ làm running container thấy khác chỗ với lệnh module-enable one-off,
+# gãy hoàn toàn việc bật module. Xem bài học tương tự ở role icinga2 (zones.d).
+#
+# SEED 1 LẦN, không đè lại (2026-07-22, theo yêu cầu người dùng: "sửa trên web UI mà không bị mất").
+# Khác mọi role khác trong dự án (nơi override/template LUÔN re-render mỗi `reconfigure`) — ở đây
+# `force: false` khiến 2 task copy/template bên dưới CHỈ ghi nếu đích CHƯA tồn tại. Kết hợp với việc
+# mount RW (không phải `ro`, xem "Khởi động container icingaweb2" trong main.yml — khác hẳn mọi file
+# per-file khác trong dự án), Icinga Web (chạy trong container, uid `web_uid`) tự ghi trực tiếp được
+# vào các file này khi người dùng thao tác qua UI (vd Configuration > Resources > New Resource) — và
+# KHÔNG bị Ansible ghi đè lại ở lần `reconfigure` sau.
+# ĐÁNH ĐỔI THẬT: đổi mật khẩu DB trong globals.yml/passwords.yml rồi `reconfigure` sẽ KHÔNG tự áp
+# dụng vào các file này nữa (vì đã seed xong, Ansible không đụng lại) — phải tự sửa tay qua UI hoặc
+# sửa trực tiếp file trên node.
+# Tầng "theo nhóm" (2026-07-23) — chèn GIỮA per-host và global, xem giải thích đầy đủ ở
+# roles/icinga2/tasks/render_config_item.yml (cùng cơ chế, áp dụng lại y hệt ở đây).
+- name: "Xác định nguồn cho {{ cfg.relpath }}"
+  ansible.builtin.set_fact:
+    _web_cfg_src: >-
+      {{ (q('first_found', dict(
+            files=[deploy_config_dir + '/icingaweb2/' + inventory_hostname + '/' + cfg.relpath]
+                  + (group_names | reject('in', ['all', 'ungrouped', 'all_hosts'])
+                                  | map('regex_replace', '^(.*)$', deploy_config_dir + '/icingaweb2/group_\1/' + cfg.relpath)
+                                  | list)
+                  + [deploy_config_dir + '/icingaweb2/' + cfg.relpath],
+            skip=true)) | first) | default('', true) }}
+
+- name: "Đảm bảo thư mục cha cho {{ cfg.relpath }}"
+  ansible.builtin.file:
+    path: "{{ (icinga_etc_dir + '/icingaweb2/' + cfg.relpath) | dirname }}"
+    state: directory
+    owner: "{{ web_uid }}"
+    group: "{{ web_uid }}"
+    mode: "0770"
+
+- name: "Seed override -> {{ cfg.relpath }} (1 lần, không đè nếu node đã có)"
+  ansible.builtin.copy:
+    src: "{{ _web_cfg_src }}"
+    dest: "{{ icinga_etc_dir }}/icingaweb2/{{ cfg.relpath }}"
+    owner: "{{ web_uid }}"
+    group: "{{ web_uid }}"
+    mode: "0660"
+    force: false
+  when: _web_cfg_src | length > 0
+  no_log: true
+  notify: Reload icingaweb2
+
+- name: "Seed template mặc định -> {{ cfg.relpath }} (1 lần, không đè nếu node đã có)"
+  ansible.builtin.template:
+    src: "{{ cfg.template }}"
+    dest: "{{ icinga_etc_dir }}/icingaweb2/{{ cfg.relpath }}"
+    owner: "{{ web_uid }}"
+    group: "{{ web_uid }}"
+    mode: "0660"
+    force: false
+  when: _web_cfg_src | length == 0
+  no_log: true
+  notify: Reload icingaweb2

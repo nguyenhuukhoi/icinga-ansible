@@ -1,0 +1,73 @@
+---
+# plan.yml — dry-run: dò image đang CHẠY (docker inspect) vs image ĐÍCH (globals.yml icinga_image_versions)
+# + schema DB cần migrate hay không. Chạy 1 lần trên ca_host. READ-ONLY (chỉ có thể pull image đích để
+# đọc schema — không recreate container nào, không đổi DB).
+
+- name: (plan) Dò image đang chạy — icinga2/icingadb/icingaweb2/icingadb-redis (ca_host)
+  community.docker.docker_container_info:
+    name: "{{ item }}"
+  register: _plan_master_imgs
+  loop: [icinga2, icingadb, icingaweb2, icingadb-redis]
+  loop_control: { label: "{{ item }}" }
+
+- name: (plan) Dò image mariadb đang chạy (galera[0])
+  community.docker.docker_container_info:
+    name: mariadb
+  register: _plan_db_img
+  delegate_to: "{{ groups['galera'][0] }}"
+  when: icinga_database_type == 'managed_db'
+
+- name: (plan) Gom bảng CURRENT -> TARGET
+  ansible.builtin.set_fact:
+    _plan_rows: >-
+      {{ [
+        {'svc': 'icinga2',        'cur': (_plan_master_imgs.results[0].container.Config.Image | default('?')), 'tgt': images.icinga2},
+        {'svc': 'icingadb',       'cur': (_plan_master_imgs.results[1].container.Config.Image | default('?')), 'tgt': images.icingadb},
+        {'svc': 'icingaweb2',     'cur': (_plan_master_imgs.results[2].container.Config.Image | default('?')), 'tgt': images.icingaweb2},
+        {'svc': 'icingadb-redis', 'cur': (_plan_master_imgs.results[3].container.Config.Image | default('?')), 'tgt': images.icingadb_redis},
+        {'svc': 'mariadb',        'cur': (_plan_db_img.container.Config.Image | default('?')), 'tgt': images.mariadb}
+      ] }}
+
+# --- schema icingadb: hiện tại (DB) vs version đích lớn nhất trong file upgrade bundle ---
+- name: (plan) icingadb schema hiện tại (DB)
+  ansible.builtin.command: >
+    docker run --rm --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uroot -p{{ mariadb_root_password }}
+    -N -e "SELECT COALESCE(MAX(version),0) FROM icingadb.icingadb_schema;"
+  register: _plan_idb_cur
+  changed_when: false
+  no_log: true
+
+- name: (plan) icingadb — version đích lớn nhất trong file upgrade bundle
+  ansible.builtin.set_fact:
+    _plan_idb_files: >-
+      {{ (_plan_idb_files | default([])) + [
+           (lookup('file', item)
+             | regex_search('INSERT\s+INTO\s+icingadb_schema[^;]*VALUES\s*\(\s*([0-9]+)', '\1')
+             | first | int) ] }}
+  loop: "{{ query('fileglob', role_path + '/files/icingadb-upgrades/*.sql') }}"
+  loop_control: { label: "{{ item | basename }}" }
+
+- name: (plan) icingaweb2 schema hiện tại (DB)
+  ansible.builtin.command: >
+    docker run --rm --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uroot -p{{ mariadb_root_password }}
+    -N -e "SELECT version FROM icingaweb2.icingaweb_schema ORDER BY id DESC LIMIT 1;"
+  register: _plan_iweb_cur
+  changed_when: false
+  no_log: true
+
+- name: (plan) IN KẾ HOẠCH NÂNG CẤP
+  ansible.builtin.debug:
+    msg: |-
+      ============ UPGRADE PLAN (dry-run, không đổi gì) ============
+      {% for r in _plan_rows %}
+      {{ "%-15s"|format(r.svc) }} {{ r.cur }}  ->  {{ r.tgt }}   {{ '(ĐỔI)' if r.cur != r.tgt else '(giữ nguyên)' }}
+      {% endfor %}
+
+      Schema DB (dò THẬT, không suy từ version image):
+        icingadb    hiện tại: {{ _plan_idb_cur.stdout | trim }}   đích(bundle max): {{ (_plan_idb_files | default([0]) + [0]) | max }}   -> {{ 'CẦN migrate' if ((_plan_idb_files | default([0]) + [0]) | max) > (_plan_idb_cur.stdout | trim | int) else 'không cần' }}
+        icingaweb2  hiện tại: {{ _plan_iweb_cur.stdout | trim }}   (file upgrade lấy từ image đích lúc chạy 'upgrade')
+
+      Chạy 'icinga-ansible upgrade' để thực thi (tự backup pre-upgrade, rollback được nếu fail).
+      =============================================================

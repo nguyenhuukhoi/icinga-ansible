@@ -1,0 +1,191 @@
+# =============================================================================
+# globals.yml — TEMPLATE mặc định. KHÔNG sửa file này.
+# CLI ('icinga-ansible init-config') copy file này thành /etc/icinga-ansible/globals.yml
+# (đường dẫn OS cố định, tách biệt với repo — giống /etc/kolla/globals.yml của kolla-ansible).
+# Sửa cấu hình thật ở /etc/icinga-ansible/globals.yml, không sửa ở đây.
+# =============================================================================
+
+###############################################################################
+# Chung
+###############################################################################
+base_distro: "ubuntu"                          # ubuntu 24.04 / 26.04
+network_interface: "eth0"                       # interface mặc định để bind
+icinga_internal_vip_address: ""                 # VIP web (443) khi có loadbalancer; để trống nếu không
+
+# Proxy — để trống nếu host có internet trực tiếp. Khi khai proxy_http, áp dụng cho:
+#   (1) apt/get_url lúc bootstrap-servers (cài Docker Engine, gói OS)
+#   (2) Docker daemon (pull image icinga2/icingadb/icingaweb2/mariadb/redis...)
+# KHÔNG áp dụng lại proxy cho traffic nội bộ cluster (10.0.0.0/24, localhost...) — xem no_proxy.
+proxy_http:  ""       # vd "http://proxy.example.internal:3128"
+proxy_https: ""       # thường trùng proxy_http (proxy HTTP forward-proxy cho cả HTTPS)
+proxy_no_proxy: "localhost,127.0.0.1,::1"   # thêm subnet nội bộ nếu cần, vd ",10.0.0.0/24"
+
+# (tuỳ chọn, 2026-09-13) Override proxy RIÊNG cho từng nhóm vai trò (master/satellite/galera/client)
+# — dùng khi các nhóm nằm ở mạng khác nhau, mỗi mạng ra Internet qua 1 proxy riêng, hoặc 1 nhóm
+# không cần proxy dù nhóm khác cần. Field nào không khai trong 1 nhóm rơi về đúng
+# proxy_http/proxy_https/proxy_no_proxy ở trên (không cần khai đủ cả 3 field mỗi nhóm).
+# Để trống ({}) nếu mọi nhóm dùng chung 1 proxy — hành vi mặc định, không đổi gì so với trước.
+proxy_group_overrides: {}
+# vd:
+# proxy_group_overrides:
+#   satellite:                                          # satellite ở DC/VLAN khác, proxy riêng
+#     http:  "http://proxy-dc2.example.internal:3128"
+#     https: "http://proxy-dc2.example.internal:3128"
+#     no_proxy: "localhost,127.0.0.1,::1,10.1.0.0/24"   # subnet nội bộ RIÊNG của DC2 (khác global)
+#   galera:                                              # DB nội bộ, không qua proxy dù global có khai
+#     http:  ""
+#     https: ""
+#     no_proxy: ""    # KHÔNG bắt buộc — không khai thì rơi về proxy_no_proxy global như 2 field kia
+
+# --- Version image: khai THẲNG tag từng thành phần ---------------------------------------
+# KHÔNG có "bộ phiên bản" gộp sẵn — Icinga phát hành từng thành phần độc lập, không có bundle có
+# tên chính thức. Đây là latest-stable kiểm tra từ tài liệu chính thức (2026-09-08). Muốn nâng cấp: sửa
+# tag ở đây rồi chạy 'icinga-ansible upgrade' (backup pre-upgrade tự chạy, rollback được — mục 13).
+# Cách dò latest stable: hub.docker.com/r/icinga/<icinga2|icingadb|icingaweb2>/tags ; mariadb/redis
+# là image official (LTS mới nhất / dòng 7.x Icinga DB hỗ trợ).
+icinga_image_versions:
+  icinga2:        "2.16.5"
+  icingadb:       "1.5.1"
+  icingadb_redis: "7.4.11"                       # latest security patch cùng series 7.4 (2026-08)
+  icingaweb2:     "2.14.0"
+  mariadb:        "12.3.3"                       # LTS, rolling 11.8.9 -> 12.3.3 đã verify
+
+# Minor/patch updates inside the same MariaDB series need no override. Set true
+# only for a reviewed/documented Galera source-target path; do not skip an
+# intermediate LTS. The role also blocks a Galera provider downgrade. Rollback
+# uses a physical pre-upgrade backup.
+mariadb_allow_rolling_series_upgrade: false
+
+# --- Image tuỳ biến (vd icinga2 thêm python3/openstacksdk cho check OpenStack — design.md mục 9.6) --
+# icinga-ansible KHÔNG tự build image — tự build/push bằng cách nào cũng được (Dockerfile tự viết,
+# CI riêng...), lên 1 registry RIÊNG của bạn (Harbor tự dựng hoặc registry khác), rồi khai 2 biến dưới
+# để cụm PULL đúng image đó thay vì image gốc.
+custom_image_registry: ""            # vd "10.10.10.151:8081/icinga" (host:port + namespace/project)
+# custom_image_overrides: rỗng (mặc định) = mọi image dùng bản gốc. Ghi đè image nào tuỳ ý (đúng key
+# icinga2/icingadb/icingaweb2/icingadb_redis/mariadb), giá trị là "basename:tag" bạn tự đặt (ghép SAU
+# custom_image_registry) — không ép suffix/quy ước nào, vd:
+# custom_image_overrides:
+#   icinga2: "icinga2:2.16.5-custom"
+custom_image_overrides: {}
+
+# Registry & tag image
+docker_registry: ""                             # "" = Docker Hub / icinga official
+docker_namespace: "icinga"
+
+###############################################################################
+# Icinga 2 core
+###############################################################################
+icinga2_api_port: 5665
+enable_icinga2_features:                         # KHÔNG có ido-* (bị chặn)
+  - "icingadb"
+  - "checker"
+  - "notification"
+  - "api"
+  - "mainlog"
+
+# Feature tích hợp (Icinga 2 không có "module", chỉ feature). Để trống nếu chưa cần.
+enable_icinga2_integration_features: []
+#  - "graphite"
+#  - "influxdb2"
+
+# Zone "master" — KHÔNG khai ở globals.yml, TỰ SINH từ inventory nhóm [master] (mỗi host trong
+# [master] -> 1 Endpoint, tất cả gộp vào đúng 1 Zone "master" trong zones.conf, xem design.md mục
+# 9.1). Vd inventory có master1+master2 -> zones.conf tự có Zone "master" { endpoints = ["master1",
+# "master2"] } — không có cờ nào ở đây để "bật/tắt", chỉ cần liệt kê host vào nhóm [master] trong
+# inventory. satellite_zones bên dưới mới là chỗ khai ZONE CON (satellite) — zone cha luôn là
+# "master" mặc định.
+
+# Satellite: mỗi phần tử là 1 zone con của "master". "members" phải khớp tên host trong
+# inventory (nhóm [satellite]). Để trống ([]) nếu không có satellite. Satellite KHÔNG chạy
+# redis/icingadb/web — chỉ container icinga2 (design.md mục 8.3).
+#
+# CÓ satellite thì XOÁ dòng "satellite_zones: []" bên dưới, rồi bỏ "#" ở khối ví dụ muốn dùng.
+# LƯU Ý: KHÔNG được giữ cả 2 (dòng "[]" lẫn khối ví dụ) cùng lúc — "satellite_zones: []" đã tự khai
+# xong giá trị ngay trên dòng đó, thêm list item thụt lề bên dưới nữa là SAI cú pháp YAML (lỗi
+# parse ngay khi chạy, không chờ tới lúc apply).
+#
+# Ví dụ 1 — 1 zone con "dc-hcm" gồm 2 satellite (HA trong zone, mất 1 vẫn còn 1 hoạt động):
+#   satellite_zones:
+#     - name: "dc-hcm"
+#       members: ["sat01", "sat02"]
+#       parent: "master"
+#
+# Ví dụ 2 — 2 zone con riêng biệt theo khu vực (mỗi zone 1 satellite, không HA từng zone):
+#   satellite_zones:
+#     - name: "dc-hanoi"
+#       members: ["sat01"]
+#       parent: "master"
+#     - name: "dc-saigon"
+#       members: ["sat02"]
+#       parent: "master"
+satellite_zones: []
+
+###############################################################################
+# Icinga DB (Redis + daemon) — thay IDO/PDO
+###############################################################################
+icingadb_redis_port: 6380
+icingadb_db_name: "icingadb"
+
+###############################################################################
+# Web (Apache2)
+###############################################################################
+icingaweb2_web_server: "apache2"                 # cố định
+icingaweb2_http_port: 8080                        # image official serve Apache trên 8080
+icingaweb2_https_port: 443
+icingaweb2_enable_tls: false                      # TLS 443 = việc P6 (chưa cấu hình vhost/cert)
+icingaweb2_timezone: "Asia/Ho_Chi_Minh"           # timezone hiển thị mặc định trong Web UI (config.ini [global] timezone)
+
+# Module Icinga Web 2 muốn bật (chỉ quyết định BẬT CÁI NÀO, không quyết định version)
+enable_icingaweb2_modules:
+  - "icingadb"                                   # BẮT BUỘC
+  # - "director"                                 # bật sau khi verify core (cần DB + migration)
+
+# Cài Linuxfabrik monitoring plugins trên các host trong [all_hosts] để CPU/RAM/disk có thể được
+# gọi từ Icinga master qua check_by_ssh. Opt-in để không thay đổi host của deployment hiện hữu.
+enable_check_by_ssh_target_plugins: false
+
+# Object do Director quản lý. Để rỗng mặc định; inventory/extra-vars của từng môi trường mới khai.
+director_managed_hosts: []
+director_managed_services: []
+
+# (nâng cao) version module web đi THEO image icingaweb2 (module build sẵn trong image) — thường
+# để trống. Chỉ khai nếu muốn nạp chồng 1 module bản khác image (P6, chưa hiện thực).
+icingaweb2_module_versions: {}
+#  director: "1.12.1"
+
+###############################################################################
+# Database
+###############################################################################
+icinga_database_type: "managed_db"               # "managed_db" (tự deploy Galera) | "external"
+
+# --- external ---
+# DB CÓ SẴN, do bên khác (DBA/team hạ tầng) quản lý — icinga-ansible KHÔNG BAO GIỜ dùng root của
+# DB này (không dựng/không tự cấp quyền). Trước khi deploy, DBA phải tự CREATE DATABASE/USER/GRANT
+# cho 3 user: icingadb, icingaweb2, director (chỉ cần nếu bật module director) — mật khẩu khớp
+# icingadb_db_password/icingaweb2_db_password/director_db_password trong passwords.yml. Nếu chưa
+# chuẩn bị, lệnh 'prechecks' sẽ tự phát hiện và in nguyên văn SQL cần đưa cho DBA.
+external_db:
+  host: ""
+  port: 3306
+
+# --- managed_db ---
+# Điểm kết nối DB mà icingadb/icingaweb2 trỏ vào khi icinga_database_type=managed_db. Để trống "host"
+# = tự suy ra IP của galera[0] (ansible_host) như trước — hành vi cũ, không đổi gì nếu không khai.
+# Điền "host" khi cần trỏ đích danh (vd VIP/proxy đặt trước cluster Galera, hoặc 1 IP khác node đầu
+# tiên trong [galera]). "port" mặc định 3306 (cổng MariaDB chuẩn), chỉ đổi nếu proxy dùng cổng khác.
+managed_db:
+  host: ""
+  port: 3306
+
+mariadb_galera_cluster_name: "icinga_galera"
+mariadb_backup:
+  enabled: true
+  schedule: "0 2 * * *"
+  retention_days: 14
+  destination: "/var/backups/icinga-db"
+
+# Client mariadb (dùng để check/import schema, chạy trong docker) mặc định TỰ THƯƠNG LƯỢNG TLS nếu
+# server hỗ trợ — false = giữ nguyên hành vi đó. Chỉ đổi thành true khi DB (thường là external, tự
+# cài tay) KHÔNG bật TLS mà client vẫn đòi hỏi, báo lỗi "SSL is required, but the server does not
+# support it". KHÔNG bật sẵn cho mọi trường hợp — tránh âm thầm tắt TLS với DB có hỗ trợ.
+db_client_skip_ssl: false

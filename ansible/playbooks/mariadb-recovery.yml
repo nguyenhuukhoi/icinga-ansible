@@ -1,0 +1,53 @@
+# =============================================================================
+# mariadb-recovery.yml — 2 chế độ, chọn qua -e recovery_mode=restore-backup|recover-cluster.
+#   restore-backup   : PHÁ HUỶ dữ liệu hiện tại, ghi đè bằng 1 bản mariadb-backup (xem restore.yml).
+#   recover-cluster  : cứu cụm Galera chết mà KHÔNG cần backup, dữ liệu vẫn giữ nguyên (xem
+#                       recover-cluster.yml).
+# Cả 2 đều PHÁ HUỶ/gián đoạn ở mức khác nhau -> chặn cứng nếu thiếu -e confirm=yes.
+# File này nằm trong playbooks/ (không cùng cấp ansible/icinga-ansible.yml) nên group_vars/all.yml
+# không tự nạp -> khai rõ vars_files, đúng mẫu destroy.yml.
+# =============================================================================
+- name: MariaDB recovery — chặn external DB trước khi play [galera] bị skip im lặng
+  hosts: "{{ groups['master'][0] }}"
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Recovery tự động chỉ hỗ trợ managed_db
+      ansible.builtin.assert:
+        that:
+          - icinga_database_type == 'managed_db'
+          - (groups['galera'] | default([]) | length) > 0
+        fail_msg: >-
+          mariadb-recovery chỉ quản lý managed_db có node trong [galera]. External DB thuộc quy trình
+          backup/recovery của DBA và không được phép trả thành công rỗng.
+
+- name: MariaDB recovery (restore-backup hoặc recover-cluster)
+  hosts: galera
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    confirm: false
+    recovery_mode: ""
+  tasks:
+    - name: Chặn nếu recovery_mode không hợp lệ
+      ansible.builtin.fail:
+        msg: >-
+          Cần chỉ định -e recovery_mode=restore-backup hoặc -e recovery_mode=recover-cluster.
+          Xem design.md mục 10.4 để biết khác nhau giữa 2 chế độ.
+      when: recovery_mode not in ['restore-backup', 'recover-cluster']
+      run_once: true
+
+    - name: Restore từ backup
+      ansible.builtin.include_role:
+        name: mariadb
+        tasks_from: restore
+      when: recovery_mode == 'restore-backup'
+
+    - name: Cứu cụm chết (không cần backup)
+      ansible.builtin.include_role:
+        name: mariadb
+        tasks_from: recover-cluster
+      when: recovery_mode == 'recover-cluster'

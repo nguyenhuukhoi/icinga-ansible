@@ -1,0 +1,233 @@
+---
+# Disaster recovery when the only surviving artifact is a physical MariaDB
+# backup. Run this AFTER mariadb-recovery has restored the backup. The first
+# temporary deploy creates a new CA and a temporary Icinga DB environment ID;
+# this playbook replaces that ID with the one stored in the restored DB and
+# clears Redis before Icinga 2 is started again. Icinga DB/Web remain stopped
+# until the final deploy reconciles service credentials from passwords.yml.
+#
+# This cannot reconstruct Icinga configuration, secrets or the old CA private
+# key. Those inputs must be recreated before the final deploy.
+
+- name: DB-only recovery | validate request
+  hosts: "{{ groups['master'][0] }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    confirm: false
+    recover_environment_id: ""
+  tasks:
+    - name: Require explicit acknowledgement and a managed database
+      ansible.builtin.assert:
+        that:
+          - confirm | bool
+          - icinga_database_type == 'managed_db'
+          - (groups['master'] | default([]) | length) >= 1
+          - (groups['galera'] | default([]) | length) >= 1
+        fail_msg: >-
+          recover-db-only is disruptive and only supports a restored managed_db.
+          Run it with -e confirm=yes after mariadb-recovery restore-backup has
+          completed. External databases must be recovered by their DBA.
+
+- name: DB-only recovery | stop all database publishers and consumers
+  hosts: master
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Stop Web, Icinga DB and Icinga 2 before changing environment identity
+      ansible.builtin.command:
+        argv: [docker, stop, icingaweb2, icingadb, icinga2]
+      register: _db_only_stopped
+      changed_when: _db_only_stopped.stdout | trim | length > 0
+      failed_when: false
+
+- name: DB-only recovery | discover the environment identity from restored DB
+  hosts: "{{ groups['galera'][0] }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    recover_environment_id: ""
+  tasks:
+    - name: Read environment IDs from the restored Icinga DB database
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - mariadb
+          - mariadb
+          - "-uroot"
+          - "-p{{ mariadb_root_password }}"
+          - --batch
+          - --skip-column-names
+          - icingadb
+          - -e
+          - "SELECT LOWER(HEX(id)) FROM environment ORDER BY id;"
+      register: _db_only_env_query
+      changed_when: false
+      no_log: true
+
+    - name: Normalize environment IDs found in the restored database
+      ansible.builtin.set_fact:
+        _db_only_environment_ids: >-
+          {{ _db_only_env_query.stdout_lines
+             | map('trim') | reject('equalto', '') | unique | list }}
+
+    - name: Require an unambiguous environment ID selection
+      ansible.builtin.assert:
+        that:
+          - _db_only_environment_ids | length > 0
+          - >-
+            (_db_only_environment_ids | length == 1) or
+            (recover_environment_id | default('') | trim | length > 0)
+        fail_msg: >-
+          The restored database contains {{ _db_only_environment_ids | length }}
+          environment IDs: {{ _db_only_environment_ids | join(', ') }}. If more
+          than one exists, identify the old production environment and rerun with
+          -e recover_environment_id=<40-hex-id>. Nothing has been changed yet.
+
+    - name: Select the old production environment ID
+      ansible.builtin.set_fact:
+        _db_only_environment_id: >-
+          {{ (recover_environment_id | trim | lower)
+             if (recover_environment_id | default('') | trim | length > 0)
+             else (_db_only_environment_ids | first) }}
+
+    - name: Validate the selected environment ID
+      ansible.builtin.assert:
+        that:
+          - _db_only_environment_id is match('^[0-9a-f]{40}$')
+          - _db_only_environment_id in _db_only_environment_ids
+        fail_msg: >-
+          Selected environment ID '{{ _db_only_environment_id }}' is invalid or
+          does not exist in the restored database. Nothing has been changed.
+
+- name: DB-only recovery | seed both masters and rebuild Redis state
+  hosts: master
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _db_only_environment_id: >-
+      {{ hostvars[groups['galera'][0]]._db_only_environment_id }}
+    _db_only_env_path: >-
+      {{ icinga_base_dir }}/icinga2/data/var/lib/icinga2/icingadb.env
+  tasks:
+    - name: Verify the temporary deployment data tree exists
+      ansible.builtin.stat:
+        path: "{{ icinga_base_dir }}/icinga2/data/etc/icinga2/icinga2.conf"
+      register: _db_only_data_tree
+
+    - name: Refuse to recover before the temporary deploy has initialized each master
+      ansible.builtin.assert:
+        that: _db_only_data_tree.stat.exists
+        fail_msg: >-
+          {{ inventory_hostname }} has no initialized Icinga 2 data tree. Run
+          bootstrap-servers and the temporary deploy before recover-db-only.
+
+    - name: Check whether a temporary environment ID already exists
+      ansible.builtin.stat:
+        path: "{{ _db_only_env_path }}"
+      register: _db_only_old_env_file
+
+    - name: Preserve the temporary environment ID for audit
+      ansible.builtin.copy:
+        src: "{{ _db_only_env_path }}"
+        dest: "{{ _db_only_env_path }}.before-db-only-recovery"
+        remote_src: true
+        force: false
+        owner: "5665"
+        group: "5665"
+        mode: "0600"
+      when: _db_only_old_env_file.stat.exists
+
+    - name: Seed the restored environment ID as a JSON string
+      ansible.builtin.copy:
+        content: "{{ _db_only_environment_id | to_json }}\n"
+        dest: "{{ _db_only_env_path }}"
+        owner: "5665"
+        group: "5665"
+        mode: "0600"
+
+    - name: Flush temporary Redis streams before publishing the restored identity
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - icingadb-redis
+          - redis-cli
+          - -p
+          - "{{ icingadb_redis_port | string }}"
+          - -a
+          - "{{ icingadb_redis_password }}"
+          - FLUSHALL
+      register: _db_only_redis_flush
+      changed_when: "'OK' in _db_only_redis_flush.stdout"
+      no_log: true
+
+    - name: Start Icinga 2 with the restored environment identity
+      ansible.builtin.command:
+        argv: [docker, start, icinga2]
+      register: _db_only_icinga2_start
+      changed_when: _db_only_icinga2_start.stdout | trim | length > 0
+
+    - name: Wait for Icinga 2 to become healthy
+      ansible.builtin.command:
+        argv: [docker, inspect, --format, "{{ '{{' }}.State.Health.Status{{ '}}' }}", icinga2]
+      register: _db_only_icinga2_health
+      retries: 30
+      delay: 2
+      until: _db_only_icinga2_health.stdout | trim == 'healthy'
+      changed_when: false
+
+    - name: Verify the environment ID from inside each Icinga 2 container
+      ansible.builtin.command:
+        argv: [docker, exec, icinga2, cat, /var/lib/icinga2/icingadb.env]
+      register: _db_only_env_verify
+      changed_when: false
+      failed_when: >-
+        (_db_only_env_verify.stdout | trim | from_json) != _db_only_environment_id
+
+- name: DB-only recovery | final database guard
+  hosts: "{{ groups['galera'][0] }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _db_only_environment_id: >-
+      {{ hostvars[groups['galera'][0]]._db_only_environment_id }}
+  tasks:
+    - name: Confirm the restored environment still exists exactly once
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - mariadb
+          - mariadb
+          - "-uroot"
+          - "-p{{ mariadb_root_password }}"
+          - --batch
+          - --skip-column-names
+          - icingadb
+          - -e
+          - "SELECT COUNT(*) FROM environment WHERE id=UNHEX('{{ _db_only_environment_id }}');"
+      register: _db_only_env_db_verify
+      changed_when: false
+      no_log: true
+      failed_when: _db_only_env_db_verify.stdout | trim != '1'
+
+    - name: Print required next steps
+      ansible.builtin.debug:
+        msg:
+          - "DB-only identity recovery completed for {{ _db_only_environment_id }}."
+          - "Run: icinga-ansible deploy -i <inventory>"
+          - "Then run: icinga-ansible check -i <inventory>"
+          - "Icinga DB/Web remain stopped until deploy rotates/reconciles service credentials."
+          - "The old CA was not recovered; re-enroll every old satellite/agent."

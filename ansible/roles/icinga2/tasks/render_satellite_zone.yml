@@ -1,0 +1,44 @@
+---
+# Include dùng lại cho từng zone satellite — override-aware (design.md mục 9.4), CHỈ chạy trên
+# ca_host. Tham số: sat_zone (1 phần tử của satellite_zones, có .name). Cùng mẫu render_config_item.yml
+# nhưng thư mục đích thay đổi theo TÊN ZONE (satellite_zones có thể có nhiều zone).
+#
+# Ghi vào CÂY icinga_etc_dir (KHÔNG phải ic_etc/data — xem lý do ở comment "mount per-file" trong
+# main.yml) để mount được RO per-file vào container, giống mọi file config khác. Đường dẫn TRONG
+# container vẫn phải là .../zones.d/{{ sat_zone.name }}/hosts.conf (Icinga2 tự quét zones.d/ khi
+# feature "api" bật — path này không tự chọn được).
+
+- name: "Tạo thư mục zones.d/{{ sat_zone.name }} (deploy tree)"
+  ansible.builtin.file:
+    path: "{{ icinga_etc_dir }}/icinga2/zones.d/{{ sat_zone.name }}"
+    state: directory
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0750"
+
+- name: "Xác định override cho zones.d/{{ sat_zone.name }}/hosts.conf"
+  ansible.builtin.set_fact:
+    _sat_hosts_src: >-
+      {{ (q('first_found', dict(
+            files=[deploy_config_dir + '/icinga2/zones.d/' + sat_zone.name + '/hosts.conf'],
+            skip=true)) | first) | default('', true) }}
+
+- name: "Copy override -> zones.d/{{ sat_zone.name }}/hosts.conf"
+  ansible.builtin.copy:
+    src: "{{ _sat_hosts_src }}"
+    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/{{ sat_zone.name }}/hosts.conf"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0640"
+  when: _sat_hosts_src | length > 0
+  notify: Reload icinga2
+
+- name: "Render template mặc định -> zones.d/{{ sat_zone.name }}/hosts.conf"
+  ansible.builtin.template:
+    src: satellite_hosts.conf.j2
+    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/{{ sat_zone.name }}/hosts.conf"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0640"
+  when: _sat_hosts_src | length == 0
+  notify: Reload icinga2

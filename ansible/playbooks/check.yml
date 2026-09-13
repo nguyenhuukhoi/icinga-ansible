@@ -1,0 +1,221 @@
+---
+# Health-check runtime thật. Không render config, không restart/recreate container.
+- name: Check container trên mọi managed host
+  hosts: all_hosts
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Xác định container bắt buộc trên host hiện tại
+      ansible.builtin.set_fact:
+        _expected_containers: >-
+          {{ ((['icinga2', 'icingadb-redis', 'icingadb', 'icingaweb2'] if 'master' in group_names else [])
+              + (['icinga2'] if ('satellite' in group_names or 'client' in group_names) else [])
+              + (['mariadb'] if ('galera' in group_names and icinga_database_type == 'managed_db') else []))
+             | unique | list }}
+
+    - name: Đọc trạng thái container bắt buộc
+      community.docker.docker_container_info:
+        name: "{{ item }}"
+      loop: "{{ _expected_containers }}"
+      register: _container_info
+      no_log: true
+      until:
+        - _container_info.exists | default(false)
+        - (_container_info.container.State.Status | default('missing')) == 'running'
+        - (_container_info.container.State.Health.Status | default('healthy')) == 'healthy'
+      retries: 24
+      delay: 5
+
+    # Không assert trực tiếp trên docker_container_info: object đó chứa toàn bộ
+    # Config.Env của container và có thể làm lộ mật khẩu khi task thất bại.
+    - name: Rút gọn trạng thái container (không chứa environment/secrets)
+      ansible.builtin.set_fact:
+        _container_statuses: >-
+          {{ (_container_statuses | default([])) + [{
+               'name': item.item,
+               'exists': item.exists | default(false),
+               'status': item.container.State.Status | default('missing'),
+               'health': item.container.State.Health.Status | default('not-defined')
+             }] }}
+      loop: "{{ _container_info.results }}"
+      no_log: true
+
+    - name: Container phải tồn tại, running và healthy nếu có healthcheck
+      ansible.builtin.assert:
+        that:
+          - item.exists
+          - item.status == 'running'
+          - item.health in ['healthy', 'not-defined']
+        fail_msg: >-
+          {{ item.name }} trên {{ inventory_hostname }} không khỏe:
+          exists={{ item.exists }}, status={{ item.status }}, health={{ item.health }}
+      loop: "{{ _container_statuses | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+- name: Check sâu Icinga master
+  hosts: master
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Icinga 2 config phải hợp lệ
+      ansible.builtin.command: docker exec icinga2 icinga2 daemon -C
+      changed_when: false
+
+    - name: Icinga 2 API phải trả HTTP 200
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:{{ icinga2_api_port }}/v1/status"
+        user: icingaweb2
+        password: "{{ icinga2_api_user_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+      no_log: true
+
+    - name: Redis phải trả PONG
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - icingadb-redis
+          - redis-cli
+          - -p
+          - "{{ icingadb_redis_port | string }}"
+          - -a
+          - "{{ icingadb_redis_password }}"
+          - ping
+      register: _redis_ping
+      changed_when: false
+      no_log: true
+
+    - name: Xác nhận Redis PONG
+      ansible.builtin.assert:
+        that: _redis_ping.stdout | trim == 'PONG'
+
+    - name: Web login phải trả 200 hoặc 302
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ icingaweb2_http_port }}/authentication/login"
+        status_code: [200, 302]
+
+    - name: Khởi tạo session/cookie cho form login
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ icingaweb2_http_port }}/authentication/login"
+        follow_redirects: none
+        status_code: 302
+      register: _web_login_session
+      no_log: true
+
+    - name: Đọc form login sau cookie check
+      ansible.builtin.uri:
+        url: "{{ _web_login_session.location }}"
+        headers:
+          Cookie: "{{ _web_login_session.set_cookie | regex_replace(',\\s*', '; ') }}"
+        return_content: true
+        status_code: 200
+      register: _web_login_form
+      no_log: true
+
+    - name: Trích CSRF token của form login
+      ansible.builtin.set_fact:
+        _web_login_csrf: >-
+          {{ (_web_login_form.content
+              | regex_findall('value="([^"]+)" name="CSRFToken"')
+              | first) }}
+      no_log: true
+
+    - name: Đăng nhập Web bằng tài khoản admin được quản lý
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ icingaweb2_http_port }}/authentication/login"
+        method: POST
+        follow_redirects: none
+        status_code: [302, 303]
+        headers:
+          Cookie: "{{ _web_login_session.set_cookie | regex_replace(',\\s*', '; ') }}"
+        body_format: form-urlencoded
+        body:
+          CSRFToken: "{{ _web_login_csrf }}"
+          uid: form_login
+          username: "{{ icingaweb2_admin_user }}"
+          password: "{{ icingaweb2_admin_password }}"
+          rememberme: "n"
+          submit_login: Login
+          redirect: ""
+      register: _web_admin_login
+      no_log: true
+
+    - name: Admin login không được bị chuyển ngược về trang đăng nhập
+      ansible.builtin.assert:
+        that:
+          - "'/authentication/login' not in (_web_admin_login.location | default(''))"
+        fail_msg: "Icinga Web 2 nhận POST nhưng từ chối credential admin."
+
+    - name: Icinga DB heartbeat phải mới và config sync phải có dữ liệu
+      ansible.builtin.command: >-
+        docker run --rm --network host {{ images.mariadb }}
+        mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }}
+        -uicingadb -p{{ icingadb_db_password }} -N icingadb
+        -e "SELECT IF(COALESCE(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000-MAX(heartbeat),999999999) < 60000,'OK','STALE') FROM icingadb_instance;
+            SELECT IF(COUNT(*) > 0,'OK','EMPTY') FROM checkcommand;"
+      register: _icingadb_db_health
+      changed_when: false
+      no_log: true
+
+    - name: Xác nhận heartbeat/config sync Icinga DB
+      ansible.builtin.assert:
+        that:
+          - _icingadb_db_health.stdout_lines | length == 2
+          - _icingadb_db_health.stdout_lines[0] == 'OK'
+          - _icingadb_db_health.stdout_lines[1] == 'OK'
+
+    - name: Đọc lỗi nghiêm trọng gần đây của Icinga DB
+      ansible.builtin.command: docker logs --since 5m icingadb
+      register: _icingadb_recent_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Icinga DB không được có fatal/panic hoặc DB retry gần đây
+      ansible.builtin.assert:
+        that:
+          - not ((_icingadb_recent_logs.stdout ~ '\n' ~ _icingadb_recent_logs.stderr) is regex('(?im)(FATAL|panic|Can.t execute query)'))
+        fail_msg: >-
+          Icinga DB có lỗi nghiêm trọng trong 5 phút gần đây; xem `docker logs --since 5m icingadb`.
+
+- name: Check managed MariaDB/Galera
+  hosts: galera
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: MariaDB phải trả lời SELECT 1
+      ansible.builtin.command: >-
+        docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -N -e "SELECT 1;"
+      register: _mariadb_ping
+      changed_when: false
+      no_log: true
+      when: icinga_database_type == 'managed_db'
+
+    - name: Galera phải Primary, ready và đủ node
+      ansible.builtin.command: >-
+        docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -N
+        -e "SHOW STATUS WHERE Variable_name IN ('wsrep_cluster_size','wsrep_cluster_status','wsrep_ready');"
+      register: _galera_status
+      changed_when: false
+      no_log: true
+      when:
+        - icinga_database_type == 'managed_db'
+        - (galera_count | int) >= 3
+
+    - name: Xác nhận trạng thái Galera
+      ansible.builtin.assert:
+        that:
+          - "'wsrep_ready\\tON' in _galera_status.stdout"
+          - "'wsrep_cluster_status\\tPrimary' in _galera_status.stdout"
+          - "('wsrep_cluster_size\\t' ~ (galera_count | string)) in _galera_status.stdout"
+      when:
+        - icinga_database_type == 'managed_db'
+        - (galera_count | int) >= 3

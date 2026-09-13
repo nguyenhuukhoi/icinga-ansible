@@ -1,0 +1,34 @@
+# Inventory mẫu — 2 master (HA icinga2 zone) + 3 node Galera cluster THẬT (10.0.0.11/12/15-17),
+# KHÔNG có satellite (khác "ha-2master-2satellite-galera3"). Đổi IP theo hạ tầng thật của bạn. Thêm
+# 2026-07-23 theo yêu cầu người dùng.
+# Ansible chạy TỪ master1 (control node tự quản) -> master1 dùng ansible_connection=local,
+# các host còn lại SSH qua key mặc định (~/.ssh/id_ed25519) của master1.
+
+[all_hosts]
+master1 ansible_host=10.0.0.11 ansible_connection=local
+master2 ansible_host=10.0.0.12
+galera1 ansible_host=10.0.0.15
+galera2 ansible_host=10.0.0.16
+galera3 ansible_host=10.0.0.17
+
+# ===== Vai trò Icinga =====
+[master]
+master1
+master2
+
+[satellite]
+
+[client]
+
+# ===== Database — 3 node lẻ -> Galera cluster THẬT (không phải standalone) =====
+[galera]
+galera1
+galera2
+galera3
+
+# ===== Load balancer / VIP — để trống, chưa dùng ở đợt này =====
+[loadbalancer]
+
+[icinga:children]
+master
+satellite

@@ -1,0 +1,17 @@
+diff --git a/cinder/api/v3/services.py b/cinder/api/v3/services.py
+--- a/cinder/api/v3/services.py
++++ b/cinder/api/v3/services.py
+@@ -68,7 +68,12 @@ class ServiceController(wsgi.Controller):
+         if 'binary' in req.GET:
+             filters['binary'] = req.GET['binary']
+ 
+-        services = objects.ServiceList.get_all(context, filters)
++        # The API policy is the authorization boundary for this operation.
++        # Use an elevated copy for the database lookup because the service
++        # records are global and the DB API requires an admin context.  This
++        # also allows operators to delegate this read-only API with policy
++        # overrides without relaxing the DB API's internal admin check.
++        services = objects.ServiceList.get_all(context.elevated(), filters)
+         # Get backend state from scheduler
+         if req.api_version_request.matches(mv.BACKEND_STATE_REPORT):
+             backend_state_map = {}

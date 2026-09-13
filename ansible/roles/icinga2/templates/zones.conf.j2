@@ -1,0 +1,39 @@
+/* {{ ansible_managed }} — sinh từ inventory + satellite_zones */
+
+/* ===== Endpoints ===== */
+{% for h in groups['master'] %}
+object Endpoint "{{ h }}" { host = "{{ hostvars[h].ansible_host | default(h) }}" ; port = "{{ icinga2_api_port }}" }
+{% endfor %}
+{% for z in satellite_zones %}
+{% for m in z.members %}
+object Endpoint "{{ m }}" { host = "{{ hostvars[m].ansible_host | default(m) }}" ; port = "{{ icinga2_api_port }}" }
+{% endfor %}
+{% endfor %}
+{% for h in groups['client'] | default([]) %}
+object Endpoint "{{ h }}" { host = "{{ hostvars[h].ansible_host | default(h) }}" ; port = "{{ icinga2_api_port }}" }
+{% endfor %}
+
+/* ===== Master zone ({{ groups['master'] | length }} endpoint) ===== */
+object Zone "master" {
+  endpoints = [ {% for h in groups['master'] %}"{{ h }}"{% if not loop.last %}, {% endif %}{% endfor %} ]
+}
+
+/* ===== Satellite zones (con của master) ===== */
+{% for z in satellite_zones %}
+object Zone "{{ z.name }}" {
+  endpoints = [ {% for m in z.members %}"{{ m }}"{% if not loop.last %}, {% endif %}{% endfor %} ]
+  parent    = "{{ z.parent | default('master') }}"
+}
+{% endfor %}
+
+/* ===== Client zones (1 endpoint/zone — command endpoint, không HA) ===== */
+{% for h in groups['client'] | default([]) %}
+object Zone "{{ h }}" {
+  endpoints = [ "{{ h }}" ]
+  parent    = "master"
+}
+{% endfor %}
+
+/* ===== Global zones ===== */
+object Zone "global-templates" { global = true }
+object Zone "director-global"  { global = true }

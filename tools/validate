@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ANSIBLE_DIR="$ROOT/ansible"
+GLOBALS="$ROOT/etc/examples/globals.yml"
+PASSWORDS="$ROOT/etc/examples/passwords.yml.example"
+
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck "$ROOT/tools/icinga-ansible" "$ROOT/tools/validate"
+else
+  echo "SKIP shellcheck (chưa cài)." >&2
+fi
+
+cd "$ANSIBLE_DIR"
+for playbook in icinga-ansible.yml playbooks/*.yml; do
+  echo "syntax-check: $playbook"
+  ansible-playbook -i inventory/all-in-one "$playbook" --syntax-check \
+    -e "@$GLOBALS" -e "@$PASSWORDS" -e target_host=localhost
+done
+
+echo "Validation OK."

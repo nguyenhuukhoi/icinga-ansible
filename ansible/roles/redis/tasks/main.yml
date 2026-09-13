@@ -1,0 +1,57 @@
+---
+# Role redis: icingadb-redis (Redis bản Icinga). Chỉ chạy trên master.
+# Icinga 2 (feature icingadb) ghi runtime vào đây; icingadb daemon đọc ra.
+
+- name: Đọc cấu hình Redis container hiện tại trước secret rotation
+  community.docker.docker_container_info:
+    name: icingadb-redis
+  register: _redis_current
+  no_log: true
+
+- name: Dừng consumer Redis trước khi rotate credential
+  ansible.builtin.command:
+    argv: [docker, stop, icinga2, icingadb, icingaweb2]
+  register: _redis_consumers_stopped_for_rotation
+  changed_when: _redis_consumers_stopped_for_rotation.stdout | trim | length > 0
+  failed_when: false
+  when:
+    - _redis_current.exists | default(false)
+    - icingadb_redis_password not in (_redis_current.container.Config.Cmd | default([]))
+
+- name: Khởi động container icingadb-redis (host network)
+  community.docker.docker_container:
+    name: icingadb-redis
+    image: "{{ images.icingadb_redis }}"
+    # docker_container so sánh image ID. Hai tag trỏ cùng một digest (vd 7.4 và
+    # 7.4.11) sẽ không recreate, khiến Config.Image vẫn giữ tag nổi cũ và
+    # upgrade-plan báo ĐỔI mãi. Recreate một lần khi tên image mục tiêu đổi để
+    # trạng thái runtime phản ánh đúng version đã pin trong globals.yml.
+    recreate: >-
+      {{ (_redis_current.exists | default(false)) and
+         ((_redis_current.container.Config.Image | default('')) != images.icingadb_redis) }}
+    state: started
+    restart_policy: unless-stopped
+    network_mode: host
+    command: >-
+      redis-server
+      --port {{ icingadb_redis_port }}
+      --requirepass {{ icingadb_redis_password }}
+      --appendonly yes
+    volumes:
+      - "{{ icinga_base_dir }}/icingadb-redis:/data"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "{{ icingadb_redis_port | string }}", "-a", "{{ icingadb_redis_password }}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+  no_log: true
+
+- name: Chờ Redis phản hồi PING
+  ansible.builtin.command: >
+    docker exec icingadb-redis redis-cli -p {{ icingadb_redis_port }} -a {{ icingadb_redis_password }} ping
+  register: redis_ping
+  retries: 10
+  delay: 3
+  until: redis_ping.stdout is defined and 'PONG' in redis_ping.stdout
+  changed_when: false
+  no_log: true

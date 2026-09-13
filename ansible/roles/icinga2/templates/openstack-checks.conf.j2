@@ -1,0 +1,23 @@
+/* {{ ansible_managed }}
+ * CheckCommand for OpenStack service health (compute/volume/network/masakari), multi-cloud
+ * (design.md section 9.7). Runs DIRECTLY inside the icinga2 container (NOT over SSH) via the
+ * openstacksdk venv /opt/icinga-venv (only present on the custom image, see
+ * group_vars/all.yml custom_image_overrides.icinga2). OPT-IN: nodes running the stock image will
+ * return UNKNOWN (missing binary) -- harmless if unused.
+ *
+ * Check script: /usr/lib/nagios/custom-plugins/check_openstack_service.py (roles/icinga2/files/).
+ * Credentials are NOT passed as CheckCommand vars -- the script reads a clouds.yaml-style file
+ * (mounted read-only at /etc/icinga2/conf.d/clouds.yaml, synced from
+ * deploy_config_dir/icinga2/openstack/clouds.yaml, design.md 9.7) and looks up the entry matching
+ * "$openstack_cloud$". This keeps the CheckCommand generic across ANY number of clouds -- adding a
+ * new cloud only means adding an entry to clouds.yaml + a Host/Service in zones.d, no code change.
+ */
+
+object CheckCommand "check_openstack_services" {
+  command = [ "/opt/icinga-venv/bin/python3", "/usr/lib/nagios/custom-plugins/check_openstack_service.py" ]
+  arguments = {
+    "-c" = "$openstack_cloud$"
+    "-s" = "$openstack_service_type$"
+  }
+  timeout = 30s
+}

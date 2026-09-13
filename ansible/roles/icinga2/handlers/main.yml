@@ -1,0 +1,8 @@
+---
+# Container icinga2 KHÔNG tự đọc lại config khi file thay đổi trên host (bind-mount, không có
+# inotify reload built-in trong entrypoint) -> phải chủ động restart khi zones.conf/constants.conf/
+# feature config đổi, nếu không daemon chạy tiếp với config CŨ vô thời hạn (bug thật đã gặp: thêm
+# satellite vào zones.conf nhưng icinga2 trên master không reload, API không thấy endpoint mới).
+- name: Reload icinga2
+  ansible.builtin.command: docker restart icinga2
+  changed_when: true

@@ -1,0 +1,8 @@
+/* {{ ansible_managed }} — feature icingadb: ghi runtime state vào Redis cục bộ. */
+library "icingadb"
+
+object IcingaDB "icingadb" {
+  host = "127.0.0.1"
+  port = {{ icingadb_redis_port }}
+  password = "{{ icingadb_redis_password }}"
+}

@@ -1,0 +1,32 @@
+; {{ ansible_managed }}
+[icingaweb2_db]
+type     = "db"
+db       = "mysql"
+host     = "{{ db_host }}"
+port     = "{{ db_port }}"
+dbname   = "icingaweb2"
+username = "icingaweb2"
+password = "{{ icingaweb2_db_password }}"
+charset  = "utf8mb4"
+
+[icingadb]
+type     = "db"
+db       = "mysql"
+host     = "{{ db_host }}"
+port     = "{{ db_port }}"
+dbname   = "icingadb"
+username = "icingadb"
+password = "{{ icingadb_db_password }}"
+charset  = "utf8mb4"
+{% if 'director' in (enable_icingaweb2_modules | default([])) %}
+
+[director_db]
+type     = "db"
+db       = "mysql"
+host     = "{{ db_host }}"
+port     = "{{ db_port }}"
+dbname   = "director"
+username = "director"
+password = "{{ director_db_password }}"
+charset  = "utf8mb4"
+{% endif %}

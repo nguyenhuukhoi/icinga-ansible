@@ -1,0 +1,46 @@
+# Secrets — KHÔNG commit. Config thật (globals.yml/passwords.yml) sống ở
+# /etc/icinga-ansible (ngoài repo, xem tools/icinga-ansible) nên bình thường không
+# nằm trong cây thư mục này. Rule dưới đây chỉ để chặn lỡ tay tạo config cục bộ trong repo.
+etc/icinga-ansible/
+passwords.yml
+
+# Ansible artefacts
+ansible/.collections/
+ansible/*.retry
+/tmp/icinga-ansible-facts/
+
+# Local overrides
+*.local
+
+# Terraform — state chứa private key (sensitive output), tfvars chứa password OpenStack
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/terraform.tfvars
+terraform/*.auto.tfvars
+ansible/inventory/multinode
+
+# ===== Không push lên public repo (2026-09) — theo yêu cầu người dùng =====
+# monitoring/: kết quả thật của lab (IP/credential hạ tầng OpenStack thật) — không phải phần
+# generic của tool.
+# scripts/: script vận hành riêng của lab này.
+# terraform/: module Terraform riêng của lab này (đã có rule chi tiết ở trên, thêm rule trùm cả
+# thư mục cho chắc — chỉ .tmp/ mới chứa key thật, nhưng cả thư mục này gắn với hạ tầng cụ thể của
+# lab, không phải phần generic của tool).
+/monitoring/
+/scripts/
+/terraform/
+
+# .tmp/ — chứa private key thật (icinga-lab-key) + inventory/config có IP thật của lab. Không phải
+# generic, không được nhắc trong yêu cầu gốc nhưng rõ ràng không nên lên public repo.
+/.tmp/
+
+# Toàn bộ .md ở top-level, TRỪ README/QUICKSTART/DEPLOY-STEP-BY-STEP (theo yêu cầu người dùng) —
+# các file .md khác (design.md, TODO.md, ICINGA-LAB-*.md...) là nhật ký làm việc/lab cụ thể, không
+# phải tài liệu generic của tool. README.md trong thư mục con (vd examples/openstack-rbac/README.md)
+# KHÔNG bị ảnh hưởng vì pattern có "/" ở đầu (chỉ khớp top-level).
+/*.md
+!/README.md
+!/QUICKSTART.md
+!/DEPLOY-STEP-BY-STEP.md

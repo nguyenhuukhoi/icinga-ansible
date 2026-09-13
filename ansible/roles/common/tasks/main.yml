@@ -1,0 +1,170 @@
+---
+# Role common: bootstrap host (Docker, chrony) + chuẩn bị thư mục & mạng docker.
+# - Việc cài đặt gắn tag 'bootstrap' (chạy khi bootstrap-servers).
+# - Việc chuẩn bị dir/network chạy cả trong deploy.
+
+# ---------- BOOTSTRAP: cài gói nền ----------
+- name: (bootstrap) Kiểm tra OS được hỗ trợ
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == "Ubuntu"
+      - ansible_distribution_version in ["24.04", "26.04"]
+    fail_msg: "Chỉ hỗ trợ Ubuntu 24.04 / 26.04 (đang: {{ ansible_distribution }} {{ ansible_distribution_version }})"
+  tags: [bootstrap]
+
+# *_effective (group_vars/all.yml): áp dụng proxy_group_overrides theo đúng nhóm vai trò của HOST
+# NÀY (master/satellite/galera/client) — rơi về proxy_http/https/no_proxy global nếu nhóm không có
+# override riêng. Dùng *_effective ở đây (thay vì proxy_http thẳng) để 1 host thuộc nhóm có override
+# riêng (vd satellite ở DC khác, ra Internet qua proxy khác) nhận đúng proxy của NHÓM ĐÓ.
+- name: (bootstrap) Cấu hình proxy hệ thống (/etc/environment) — chỉ khi khai proxy_http hiệu lực
+  ansible.builtin.blockinfile:
+    path: /etc/environment
+    create: true
+    mode: "0644"
+    marker: "# {mark} icinga-ansible proxy"
+    block: |
+      http_proxy="{{ proxy_http_effective }}"
+      https_proxy="{{ proxy_https_effective }}"
+      HTTP_PROXY="{{ proxy_http_effective }}"
+      HTTPS_PROXY="{{ proxy_https_effective }}"
+      no_proxy="{{ proxy_no_proxy_effective }}"
+      NO_PROXY="{{ proxy_no_proxy_effective }}"
+  when: (proxy_http_effective | default('')) | length > 0
+  tags: [bootstrap]
+
+- name: (bootstrap) Cài chrony + phụ thuộc Docker
+  ansible.builtin.apt:
+    name: [chrony, ca-certificates, curl, gnupg, python3-docker]
+    update_cache: true
+    state: present
+  tags: [bootstrap]
+
+# Plugin nằm trên host bị monitor; Icinga master chỉ gọi executable qua check_by_ssh. Dùng repo
+# DEB đã ký của Linuxfabrik thay vì curl|bash để Ansible quản lý trạng thái và nâng cấp rõ ràng.
+- name: (bootstrap) Chuẩn bị keyring cho Linuxfabrik monitoring plugins
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  when: enable_check_by_ssh_target_plugins | default(false) | bool
+  tags: [bootstrap]
+
+- name: (bootstrap) Tải khoá ký Linuxfabrik monitoring plugins
+  ansible.builtin.get_url:
+    url: https://repo.linuxfabrik.ch/linuxfabrik.key
+    dest: /etc/apt/keyrings/linuxfabrik.asc
+    mode: "0644"
+  when: enable_check_by_ssh_target_plugins | default(false) | bool
+  tags: [bootstrap]
+
+- name: (bootstrap) Khai báo repo Linuxfabrik monitoring plugins
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/linuxfabrik.asc]
+      https://repo.linuxfabrik.ch/monitoring-plugins/ubuntu/
+      {{ ansible_distribution_release }}-release main
+    filename: linuxfabrik-monitoring-plugins
+    state: present
+  when: enable_check_by_ssh_target_plugins | default(false) | bool
+  tags: [bootstrap]
+
+- name: (bootstrap) Cài Linuxfabrik monitoring plugins cho check_by_ssh
+  ansible.builtin.apt:
+    name: linuxfabrik-monitoring-plugins
+    update_cache: true
+    state: present
+  when: enable_check_by_ssh_target_plugins | default(false) | bool
+  tags: [bootstrap]
+
+- name: (bootstrap) Bật & khởi động chrony (đồng bộ giờ — bắt buộc)
+  ansible.builtin.service:
+    name: chrony
+    state: started
+    enabled: true
+  tags: [bootstrap]
+
+- name: (bootstrap) Kiểm tra Docker đã cài chưa
+  ansible.builtin.command: docker --version
+  register: docker_check
+  changed_when: false
+  failed_when: false
+  tags: [bootstrap]
+
+- name: (bootstrap) Cấu hình proxy cho Docker daemon (systemd drop-in) — chỉ khi khai proxy_http hiệu lực
+  when: (proxy_http_effective | default('')) | length > 0
+  tags: [bootstrap]
+  block:
+    - name: Tạo thư mục drop-in docker.service.d
+      ansible.builtin.file:
+        path: /etc/systemd/system/docker.service.d
+        state: directory
+        mode: "0755"
+    - name: Ghi http-proxy.conf cho Docker daemon
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/docker.service.d/http-proxy.conf
+        mode: "0644"
+        content: |
+          [Service]
+          Environment="HTTP_PROXY={{ proxy_http_effective }}"
+          Environment="HTTPS_PROXY={{ proxy_https_effective }}"
+          Environment="NO_PROXY={{ proxy_no_proxy_effective }}"
+      notify:
+        - Reload systemd daemon
+        - Restart docker
+
+- name: (bootstrap) Cài Docker Engine (bỏ qua nếu đã có)
+  when: docker_check.rc != 0
+  block:
+    - name: Tạo thư mục keyrings
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+    - name: Tải khoá GPG Docker
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+    - name: Khai báo repo Docker
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        filename: docker
+        state: present
+    - name: Cài Docker Engine
+      ansible.builtin.apt:
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
+        update_cache: true
+        state: present
+    - name: Bật & khởi động Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+  tags: [bootstrap]
+
+# ---------- PREP: thư mục state & mạng ----------
+# Trước đây tag [bootstrap, deploy] — CỐ Ý cho "deploy" tự chạy kèm phòng khi quên bootstrap-servers.
+# Đã bỏ "deploy" (2026-07-22, theo yêu cầu người dùng — tách hẳn 2 lệnh, xem icinga-ansible.yml đầu
+# play "Bootstrap servers & prepare hosts") — "deploy" giờ giả định host ĐÃ bootstrap-servers.
+- name: Tạo thư mục state cho từng service
+  ansible.builtin.file:
+    path: "{{ icinga_base_dir }}/{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - icinga2/etc
+    - icinga2/var
+    - icinga2/pki
+    - icingadb-redis
+    - icingadb
+    - icingaweb2
+    - mariadb
+  tags: [bootstrap]
+
+# Ghi chú mạng: icinga2/mariadb/redis dùng network_mode=host (xem design 16.1),
+# nên chỉ cần 1 bridge phụ cho web nếu muốn tách. Tạo sẵn để dùng linh hoạt.
+- name: Tạo docker network (dùng cho web nếu không chạy host-net)
+  community.docker.docker_network:
+    name: "{{ docker_network_name }}"
+    state: present
+  tags: [bootstrap]

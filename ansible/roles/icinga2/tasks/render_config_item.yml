@@ -1,0 +1,68 @@
+---
+# Include dùng lại cho từng file config icinga2 — override-aware (design.md mục 4.1).
+# Tham số: cfg.relpath (đường dẫn tương đối dưới icinga2/), cfg.template (file .j2 nguồn).
+# CHỈ dùng cho file KHÔNG bị tiến trình khác ghi lúc chạy (constants.conf, zones.conf,
+# features-available/icingadb.conf, conf.d/*). zones.d/master/clients.conf và zones.d/<zone>/
+# hosts.conf KHÔNG qua đây — chỉ render 1 lần trên ca_host (không phải mọi node), không có cơ chế
+# override per-host, và đích ghi là zones.d/ (path Icinga2 tự quét, không include tường minh) — xem
+# render_satellite_zone.yml + task render zones.d/master trong main.yml. Dù vậy 2 loại file này VẪN
+# mount RO per-file vào container CHỈ trên ca_host — xem block "Xây danh sách mount per-file ĐỘNG"
+# trong main.yml (đã verify: các node khác không có file này cục bộ, nhận nội dung qua chính cluster
+# config-sync của Icinga2 vào /var/lib/icinga2/api/zones/..., không qua bind-mount này).
+#
+# Tầng "theo nhóm" (2026-07-23, theo yêu cầu người dùng) — chèn GIỮA per-host và global: override
+# tại config/icinga2/group_<tên_nhóm_inventory>/<relpath> áp dụng cho MỌI host thuộc nhóm đó (vd
+# group_master áp dụng cho master1+master2, không đụng satellite). "group_names" là biến magic có
+# sẵn của Ansible (danh sách nhóm inventory của chính host đang chạy) — loại "all"/"ungrouped" vì
+# vô nghĩa (mọi host đều có). Nếu 1 host thuộc nhiều nhóm cùng có override, nhóm nào xuất hiện TRƯỚC
+# trong group_names (thứ tự do Ansible quyết định, không đảm bảo) sẽ thắng — tránh tạo override
+# nhóm chồng chéo cho cùng 1 host nếu cần thứ tự chắc chắn. Cũng loại "all_hosts" — tên nhóm gốc
+# TỰ ĐẶT của dự án này (không phải nhóm "all" ngầm định của Ansible), dùng làm umbrella cho mọi
+# inventory — loại luôn cho khỏi sinh 1 lookup vô nghĩa "group_all_hosts".
+#
+# BUG THẬT ĐÃ GẶP (2026-07-23, lúc verify tính năng này): backreference "\1" trong replacement của
+# regex_replace PHẢI viết ĐƠN (\1), KHÔNG phải \\1, vì set_fact dùng block scalar ">-" — khác hẳn
+# chuỗi YAML double-quoted ("..."), nơi \\1 mới đúng (YAML tự bỏ 1 lớp escape trước khi Jinja thấy).
+# Với ">-", không có lớp unescape nào cả — viết \\1 sẽ bị Python re.sub hiểu thành "escaped backslash
+# + ký tự 1 literal" (in ra đúng y "\1" trong path, không thay bằng tên nhóm thật) thay vì
+# backreference. Đã tự verify cả 2 chiều qua playbook debug tạm (không suy đoán).
+- name: "Xác định nguồn cho {{ cfg.relpath }}"
+  ansible.builtin.set_fact:
+    _ic_cfg_src: >-
+      {{ (q('first_found', dict(
+            files=[deploy_config_dir + '/icinga2/' + inventory_hostname + '/' + cfg.relpath]
+                  + (group_names | reject('in', ['all', 'ungrouped', 'all_hosts'])
+                                  | map('regex_replace', '^(.*)$', deploy_config_dir + '/icinga2/group_\1/' + cfg.relpath)
+                                  | list)
+                  + [deploy_config_dir + '/icinga2/' + cfg.relpath],
+            skip=true)) | first) | default('', true) }}
+
+- name: "Đảm bảo thư mục cha cho {{ cfg.relpath }}"
+  ansible.builtin.file:
+    path: "{{ (icinga_etc_dir + '/icinga2/' + cfg.relpath) | dirname }}"
+    state: directory
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0750"
+
+- name: "Copy override -> {{ cfg.relpath }}"
+  ansible.builtin.copy:
+    src: "{{ _ic_cfg_src }}"
+    dest: "{{ icinga_etc_dir }}/icinga2/{{ cfg.relpath }}"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0640"
+  when: _ic_cfg_src | length > 0
+  no_log: true
+  notify: Reload icinga2
+
+- name: "Render template mặc định -> {{ cfg.relpath }}"
+  ansible.builtin.template:
+    src: "{{ cfg.template }}"
+    dest: "{{ icinga_etc_dir }}/icinga2/{{ cfg.relpath }}"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0640"
+  when: _ic_cfg_src | length == 0
+  no_log: true
+  notify: Reload icinga2

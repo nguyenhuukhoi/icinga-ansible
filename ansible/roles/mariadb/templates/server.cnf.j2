@@ -1,0 +1,28 @@
+# {{ ansible_managed }}
+[mysqld]
+bind-address        = 0.0.0.0
+default_storage_engine = InnoDB
+innodb_file_per_table = 1
+character-set-server = utf8mb4
+collation-server     = utf8mb4_general_ci
+max_connections      = 500
+
+{% if mariadb_cluster_mode | default(false) %}
+# ---------------------------------------------------------------------------
+# Galera cluster ({{ galera_count }} node) — bật thật (2026-07-22), không còn block comment tĩnh.
+# ---------------------------------------------------------------------------
+[galera]
+wsrep_on                = ON
+wsrep_provider          = /usr/lib/galera/libgalera_smm.so
+wsrep_cluster_name      = {{ mariadb_galera_cluster_name }}
+wsrep_cluster_address   = gcomm://{% for h in groups['galera'] %}{{ hostvars[h].ansible_host | default(h) }}{% if not loop.last %},{% endif %}{% endfor %}
+
+wsrep_node_address      = {{ ansible_host | default(inventory_hostname) }}
+wsrep_node_name         = {{ inventory_hostname }}
+wsrep_sst_method        = mariabackup
+# wsrep_sst_auth: THIẾU dòng này (bản scaffold cũ không có) sẽ làm SST fail lúc node join —
+# mariabackup cần root credential để lấy state transfer từ node donor.
+wsrep_sst_auth          = root:{{ mariadb_root_password }}
+binlog_format           = ROW
+innodb_autoinc_lock_mode = 2
+{% endif %}

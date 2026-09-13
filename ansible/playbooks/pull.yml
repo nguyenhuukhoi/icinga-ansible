@@ -1,0 +1,47 @@
+---
+# Kéo image thật sự mà không render config, tạo database hay recreate container.
+- name: Pull images dùng trên master
+  hosts: master
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Pull image master (luôn kiểm tra digest dù tag đã tồn tại local)
+      community.docker.docker_image:
+        name: "{{ item }}"
+        source: pull
+        force_source: true
+      loop:
+        - "{{ images.icinga2 }}"
+        - "{{ images.icingadb }}"
+        - "{{ images.icingaweb2 }}"
+        - "{{ images.icingadb_redis }}"
+        - "{{ images.mariadb }}"
+
+- name: Pull image Icinga 2 trên satellite/client
+  hosts: "{{ (groups['satellite'] | default([]) + groups['client'] | default([])) | unique }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Pull image Icinga 2
+      community.docker.docker_image:
+        name: "{{ images.icinga2 }}"
+        source: pull
+        force_source: true
+
+- name: Pull image MariaDB trên node managed DB
+  hosts: galera
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Pull image MariaDB
+      community.docker.docker_image:
+        name: "{{ images.mariadb }}"
+        source: pull
+        force_source: true
+      when: icinga_database_type == 'managed_db'

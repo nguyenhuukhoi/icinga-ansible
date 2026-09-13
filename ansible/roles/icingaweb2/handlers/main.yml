@@ -1,0 +1,22 @@
+---
+- name: Restart icingaweb2 khi config đổi trên container đang tồn tại
+  ansible.builtin.command: docker restart icingaweb2
+  changed_when: true
+  listen: Reload icingaweb2
+  when:
+    - _icingaweb2_container is defined
+    - not (_icingaweb2_container.changed | default(false))
+
+- name: Chờ icingaweb2 healthy sau reload
+  community.docker.docker_container_info:
+    name: icingaweb2
+  register: _icingaweb2_reload_health
+  until:
+    - _icingaweb2_reload_health.exists | default(false)
+    - (_icingaweb2_reload_health.container.State.Health.Status | default('starting')) == 'healthy'
+  retries: 24
+  delay: 5
+  listen: Reload icingaweb2
+  when:
+    - _icingaweb2_container is defined
+    - not (_icingaweb2_container.changed | default(false))

@@ -1,0 +1,191 @@
+---
+# Include dùng chung — bootstrap node đầu [galera] (--wsrep-new-cluster CHỈ 1 lần), cho các node còn
+# lại join, RỒI MỚI bỏ cờ khỏi node đầu (thứ tự này quan trọng — xem BUG bên dưới). Chạy trên TOÀN BỘ
+# host trong play (hosts: galera) — mỗi task tự lọc theo inventory_hostname/mariadb_bootstrap_host.
+#
+# CẬP NHẬT 2026-09: luồng "deploy" bình thường (kolla_action=deploy/reconfigure) KHÔNG còn include
+# file này nữa — icinga-ansible.yml đã tách thành 3 PLAY riêng dùng
+# phase1_config_and_bootstrap.yml/phase2_join_others.yml/phase3_unbootstrap_and_finalize.yml (học
+# đúng kiểu kolla-ansible ansible/mariadb.yml — ranh giới PLAY cứng thay vì include_tasks dynamic
+# trong 1 play, xem comment trong phase1_config_and_bootstrap.yml). File NÀY vẫn giữ nguyên, chỉ còn
+# dùng bởi restore.yml và recover-cluster.yml (2 flow ít chạy hơn, chưa tách 3-phase — nếu sau này
+# cũng gặp race tương tự lúc restore/recover, áp dụng đúng cách tách play y hệt ở đây).
+#
+# Dùng ở 2 nơi (trước là 3): restore.yml và recover-cluster.yml (LUÔN coi là fresh, set
+# mariadb_force_fresh_bootstrap: true — datadir vừa bị xoá/ghi đè nên grastate.dat cũ không còn ý
+# nghĩa).
+#
+# Yêu cầu TRƯỚC khi include: mariadb_data, mariadb_etc, mariadb_bootstrap_host đã set (main.yml set ở
+# task "Xác định mode MariaDB"; restore.yml/recover-cluster.yml tự set tương tự vì chạy độc lập, không
+# đi qua main.yml).
+#
+# BUG đã gặp thật (2026-07-22, deploy sạch từ đầu — KHÔNG phải lỗi tạm thời/timing may rủi): bản đầu
+# tiên bỏ cờ --wsrep-new-cluster NGAY sau khi node đầu bootstrap xong, TRƯỚC KHI các node còn lại kịp
+# join. Tái tạo container = mất luôn Galera group-communication state trong bộ nhớ (dù grastate.dat đã
+# lưu xuống đĩa) — node đầu restart "trần trụi" một mình, không còn cờ bootstrap, không có peer nào
+# đã lên để nối lại -> đứng chờ "Failed to establish connection: Connection refused" vô thời hạn (cụm
+# KHÔNG BAO GIỜ form được, không phải "cần chờ lâu hơn"). Fix: cho các node còn lại join TRƯỚC (lúc
+# node đầu vẫn đang là primary component 1-node từ --wsrep-new-cluster), rồi MỚI bỏ cờ — lúc này node
+# đầu tái tạo lại chỉ là 1 lần restart bình thường của 1 THÀNH VIÊN trong cụm 3 node đã formed (2 node
+# còn lại vẫn giữ đa số/primary trong lúc nó restart), an toàn để rejoin lại qua IST.
+
+- name: (bootstrap+join) Kiểm tra node này đã từng bootstrap/join chưa (grastate.dat tồn tại)
+  ansible.builtin.stat:
+    path: "{{ mariadb_data }}/grastate.dat"
+  register: mariadb_grastate
+  when: not (mariadb_force_fresh_bootstrap | default(false) | bool)
+
+# Precheck kiểu kolla-ansible (2026-07-23, sau khi đọc source thật opendev/kolla-ansible
+# roles/mariadb/tasks/lookup_cluster.yml theo yêu cầu người dùng — không đoán mò). kolla-ansible
+# KHÔNG bao giờ để 1 node tự chọn "join" rồi treo vô thời hạn nếu không còn ai đang sống để join
+# vào — nó fail NGAY, message trỏ thẳng lệnh recovery ("MariaDB cluster exists but is stopped.
+# Please start it using kolla-ansible mariadb-recovery", xem lookup_cluster.yml). BUG THẬT đã gặp
+# (2026-07-23): node bootstrap có grastate.dat THẬT (không rỗng, còn seqno cũ) nhưng KHÔNG node nào
+# trong [galera] đang chạy (cụm đã chết/bị destroy dở dang) -> code cũ vẫn cho nó khởi động ở mode
+# "join" (mariadbd thường, bootstrap option 0) vì chỉ nhìn grastate.dat mà không kiểm tra cụm có
+# đang sống không -> treo vĩnh viễn ở NON_PRIM (không ai để join), task "Chờ node đầu sẵn sàng" bên
+# dưới retry hết 24 lần rồi fail rất mơ hồ, không trỏ ra nguyên nhân thật. Fix: thêm precheck ping
+# nhanh (snapshot, KHÔNG retry dài) toàn bộ node trong [galera] — nếu grastate.dat cho thấy "cụm đã
+# từng formed" nhưng KHÔNG node nào đang sống, fail NGAY với message rõ ràng. (Đơn giản hơn bản đầy
+# đủ của kolla-ansible — bỏ qua phần kiểm tra WSREP sync status vì ngoài phạm vi bug đã gặp; chỉ cần
+# chặn đúng tình huống "cụm chết toàn bộ".)
+- name: (bootstrap+join) Ping nhanh xem node này đang sống không (snapshot — không phải chờ dài)
+  ansible.builtin.command: >
+    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+  register: mariadb_liveness_probe
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: not (mariadb_force_fresh_bootstrap | default(false) | bool)
+
+- name: (bootstrap+join) Gom kết quả sống/chết cả cụm [galera] (quyết định fail-fast hay không)
+  ansible.builtin.set_fact:
+    mariadb_any_node_alive: >-
+      {{ groups['galera']
+         | map('extract', hostvars, 'mariadb_liveness_probe')
+         | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0)
+         | list | length > 0 }}
+  when: not (mariadb_force_fresh_bootstrap | default(false) | bool)
+  run_once: true
+
+- name: "(bootstrap+join) FAIL FAST nếu cụm 'đã formed' (có grastate.dat) nhưng KHÔNG node nào đang sống"
+  ansible.builtin.fail:
+    msg: >-
+      MariaDB Galera cluster [galera] có dữ liệu cũ (grastate.dat tồn tại trên
+      {{ mariadb_bootstrap_host }}) nhưng KHÔNG node nào trong cụm đang chạy/phản hồi được — cụm đã
+      CHẾT, không thể tự "join" lại bình thường (sẽ treo vô thời hạn ở NON_PRIM chờ peer không tồn
+      tại). Chạy: icinga-ansible mariadb-recovery -i <inventory> -e recovery_mode=recover-cluster
+      -e confirm=yes (giống kolla-ansible: "MariaDB cluster exists but is stopped. Please start it
+      using kolla-ansible mariadb-recovery").
+  when:
+    - not (mariadb_force_fresh_bootstrap | default(false) | bool)
+    - hostvars[mariadb_bootstrap_host].mariadb_grastate.stat.exists
+    - not mariadb_any_node_alive
+  run_once: true
+
+- name: (bootstrap+join) Node đầu bootstrap (--wsrep-new-cluster) — CHỈ khi cần fresh
+  ansible.builtin.include_tasks: _start_container.yml
+  vars:
+    mariadb_container_command: "--wsrep-new-cluster"
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - (mariadb_force_fresh_bootstrap | default(false) | bool) or (not mariadb_grastate.stat.exists)
+
+- name: (bootstrap+join) Node đầu chạy lại bình thường (cụm đã formed từ trước)
+  ansible.builtin.include_tasks: _start_container.yml
+  vars:
+    mariadb_container_command: "mariadbd"
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - not (mariadb_force_fresh_bootstrap | default(false) | bool)
+    - mariadb_grastate.stat.exists
+
+- name: (bootstrap+join) Chờ node đầu sẵn sàng trước khi node khác join
+  ansible.builtin.command: >
+    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+  register: mariadb_bootstrap_ping
+  retries: 24
+  delay: 5
+  until: mariadb_bootstrap_ping.rc == 0
+  changed_when: false
+  no_log: true
+  delegate_to: "{{ mariadb_bootstrap_host }}"
+  run_once: true
+
+- name: (bootstrap+join) Các node còn lại join cụm (SST/IST tự động từ node đầu)
+  ansible.builtin.include_tasks: _start_container.yml
+  vars:
+    mariadb_container_command: "mariadbd"
+  when: inventory_hostname != mariadb_bootstrap_host
+
+- name: (bootstrap+join) Chờ MariaDB sẵn sàng trên chính node mình
+  ansible.builtin.command: >
+    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+  register: db_ping
+  retries: 24
+  delay: 5
+  until: db_ping.rc == 0
+  changed_when: false
+  no_log: true
+
+# BUG đã gặp thật (2026-07-22): file .my-healthcheck.cnf mà _start_container.yml ghi ra HOST datadir
+# TRƯỚC khi start bị SST XOÁ trên node join (SST copy nguyên datadir từ donor, mất file) -> healthcheck.sh
+# thiếu credential -> node join báo "unhealthy" dù cụm chạy đúng (wsrep_ready=ON). Fix: ghi LẠI file
+# vào datadir QUA docker exec SAU KHI node đã sẵn sàng (SST đã xong) — lúc này là dữ liệu thật trong
+# datadir, sống sót qua mọi restart sau (SST chỉ chạy lần join đầu). healthcheck.sh tự đọc file này
+# ($datadir/.my-healthcheck.cnf) — cơ chế CHÍNH THỨC của image, không phải config toàn cục.
+- name: (bootstrap+join) Ghi lại .my-healthcheck.cnf trong container (sống sót SST — cho healthcheck.sh)
+  ansible.builtin.shell: |
+    docker exec -i mariadb bash -c 'umask 077; cat > /var/lib/mysql/.my-healthcheck.cnf' <<'HCEOF'
+    [client]
+    user = root
+    password = {{ mariadb_root_password }}
+    HCEOF
+  args:
+    executable: /bin/bash
+  # SST chỉ xảy ra ở lần join đầu; các lần reconfigure sau ghi cùng nội dung và phải idempotent.
+  # During a forced restore/bootstrap the grastate stat task is intentionally
+  # skipped. Treat that path as changed instead of failing on an undefined
+  # registered result after the shell command has already succeeded.
+  changed_when: not (mariadb_grastate.stat.exists | default(false))
+  no_log: true
+
+# Bỏ cờ --wsrep-new-cluster SAU KHI mọi node đã join xong (an toàn — xem giải thích BUG ở đầu file).
+- name: (bootstrap+join) Bỏ cờ --wsrep-new-cluster khỏi node đầu (sau khi cả cụm đã join xong)
+  ansible.builtin.include_tasks: _start_container.yml
+  vars:
+    mariadb_container_command: "mariadbd"
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - (mariadb_force_fresh_bootstrap | default(false) | bool) or (not mariadb_grastate.stat.exists)
+
+- name: (bootstrap+join) Chờ node đầu sẵn sàng lại sau khi bỏ cờ
+  ansible.builtin.command: >
+    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+  register: mariadb_bootstrap_ping2
+  retries: 24
+  delay: 5
+  until: mariadb_bootstrap_ping2.rc == 0
+  changed_when: false
+  no_log: true
+  delegate_to: "{{ mariadb_bootstrap_host }}"
+  run_once: true
+  when: >-
+    (mariadb_force_fresh_bootstrap | default(false) | bool) or
+    (hostvars[mariadb_bootstrap_host].mariadb_grastate.stat.exists is defined and
+     not hostvars[mariadb_bootstrap_host].mariadb_grastate.stat.exists)
+
+- name: (bootstrap+join) Đọc wsrep_cluster_size + wsrep_ready thật (xác nhận cluster form đúng)
+  ansible.builtin.command: >
+    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }}
+    -N -e "SHOW STATUS LIKE 'wsrep_%';"
+  register: wsrep_status
+  changed_when: false
+  no_log: true
+
+- name: (bootstrap+join) In cảnh báo nếu wsrep_cluster_size khác số node khai báo trong [galera]
+  ansible.builtin.debug:
+    msg: >-
+      wsrep_cluster_size thật trên {{ inventory_hostname }} =
+      {{ (wsrep_status.stdout_lines | select('search', 'wsrep_cluster_size') | list | first | default('')).split()[-1] | default('?') }}
+      (kỳ vọng {{ galera_count }}).

@@ -1,0 +1,67 @@
+---
+# Include dùng chung — khởi động/tái tạo container "mariadb" với command chỉ định. Dùng ở main.yml
+# (deploy bình thường), restore.yml, recover-cluster.yml — tránh 3 nơi copy-paste cùng 1 định nghĩa
+# container rồi lệch nhau khi sửa bug (đã từng mất công sửa bug command 3 lần ở cùng chỗ, 2026-07-22).
+#
+# BẮT BUỘC set "mariadb_container_command" TRƯỚC khi include — không có giá trị mặc định, cố ý để lỗi
+# rõ ràng nếu quên set, thay vì âm thầm dùng sai giá trị. Giá trị hợp lệ: "mariadbd" (bình thường) hoặc
+# "--wsrep-new-cluster" (CHỈ lúc bootstrap 1 lần đầu cụm Galera).
+#
+# LUÔN đặt "command" tường minh (không bỏ hẳn tham số, không dùng "[]") — cả 2 cách đó đều sai, xem
+# giải thích chi tiết trong TODO.md mục "Bug đã gặp & fix khi verify Galera cluster thật".
+- name: "mariadb_container_command phải được set trước khi include file này"
+  ansible.builtin.assert:
+    that: mariadb_container_command is defined and mariadb_container_command | length > 0
+    fail_msg: "Thiếu 'mariadb_container_command' — include _start_container.yml sai cách dùng."
+
+- name: Đảm bảo thư mục datadir tồn tại (trước khi ghi .my-healthcheck.cnf)
+  ansible.builtin.file:
+    path: "{{ mariadb_data }}"
+    state: directory
+    mode: "0700"
+
+# healthcheck.sh (script có sẵn trong image) mặc định KHÔNG truyền -u/-p, dựa vào auth unix_socket của
+# root@localhost — chỉ có trên node tự init lần đầu (bootstrap), KHÔNG có trên node join qua SST ->
+# "Access denied ... (using password: NO)" -> Docker báo unhealthy dù DB hoạt động đúng (đã gặp thật,
+# 2026-07-22). Lần fix ĐẦU TIÊN (đã revert): thêm [client] user/password vào server.cnf.j2 — SAI, vì
+# server.cnf mount vào /etc/mysql/mariadb.conf.d/ (path đọc TOÀN CỤC), khiến chính "temporary server"
+# nội bộ của docker-entrypoint.sh lúc khởi tạo lần đầu CŨNG đọc phải config này và cố dùng password
+# trước khi password kịp được set xong -> "Unable to start server", cụm KHÔNG bootstrap được (bug
+# nghiêm trọng hơn cả bug ban đầu, phát hiện khi deploy sạch từ đầu — trước đó chỉ test restart nên
+# không lộ ra). Fix ĐÚNG: healthcheck.sh tự đọc credential từ đúng 1 file riêng
+# "$datadir/.my-healthcheck.cnf" nếu tồn tại (cơ chế CHÍNH THỨC của image, đọc thẳng trong chính
+# healthcheck.sh — xem "def['extra_file']=$datadir/.my-healthcheck.cnf") — KHÔNG global, không ai
+# khác đọc phải, an toàn cho cả init lần đầu lẫn healthcheck sau này.
+- name: Ghi .my-healthcheck.cnf (chỉ healthcheck.sh đọc, KHÔNG phải config toàn cục)
+  ansible.builtin.copy:
+    content: |
+      [client]
+      user = root
+      password = {{ mariadb_root_password }}
+    dest: "{{ mariadb_data }}/.my-healthcheck.cnf"
+    mode: "0600"
+  no_log: true
+
+- name: "Khởi động/tái tạo container mariadb (command: {{ mariadb_container_command }})"
+  community.docker.docker_container:
+    name: mariadb
+    image: "{{ images.mariadb }}"
+    command: "{{ mariadb_container_command }}"
+    state: started
+    restart_policy: unless-stopped
+    network_mode: host
+    env:
+      MARIADB_ROOT_PASSWORD: "{{ mariadb_root_password }}"
+      # Official mariadb image only runs mariadb-upgrade for an existing
+      # datadir when this opt-in is enabled. This is required on every node
+      # during a rolling series upgrade; it is harmless on normal restarts.
+      MARIADB_AUTO_UPGRADE: "1"
+    stop_timeout: 60
+    volumes:
+      - "{{ mariadb_data }}:/var/lib/mysql"
+      - "{{ mariadb_etc }}/server.cnf:/etc/mysql/mariadb.conf.d/99-icinga.cnf:ro"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12

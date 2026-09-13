@@ -1,0 +1,41 @@
+---
+# Container mariadb KHÔNG tự đọc lại config khi server.cnf đổi trên host (bind-mount, không có
+# reload tự động) -> phải chủ động restart khi config đổi, giống bug đã gặp & fix ở role icinga2.
+#
+# BUG THẬT đã gặp (2026-07-23): bản đầu chỉ "docker restart mariadb" trần trụi, KHÔNG throttle/chờ.
+# Khi server.cnf đổi/được tạo lại trên CẢ 3 node Galera trong CÙNG 1 lần deploy (vd sau khi file bị
+# xoá rồi render lại), Ansible notify handler này chạy SONG SONG trên cả 3 host (mặc định, không
+# serial) -> restart CẢ 3 container Galera GẦN NHƯ ĐỒNG THỜI -> không còn node nào sống để làm
+# primary component cho node khác join vào -> kẹt NON_PRIM vĩnh viễn (đúng bug NON_PRIM đã ghi ở
+# _bootstrap_and_join.yml, nhưng lần này do handler restart trần trụi gây ra, không phải do lệch
+# grastate.dat). Fix: gộp restart + CHỜ mariadb sẵn sàng lại (rejoin xong) thành 1 task DUY NHẤT,
+# thêm throttle: 1 — Ansible chỉ cho ĐÚNG 1 host chạy trọn vẹn task này (restart XONG rồi mới tính
+# là xong) tại 1 thời điểm, các host còn lại phải đợi tới lượt -> restart tuần tự từng node 1,
+# luôn còn tối thiểu 2 node sống làm quorum cho node đang restart rejoin qua IST an toàn.
+- name: Reload mariadb
+  # BUG THẬT gặp phải (2026-09, sau khi tách 3-phase học kolla-ansible): server.cnf render "changed"
+  # cho CẢ 3 node [galera] ngay ở Phase 1 (mọi node đều cần config sẵn sàng trước khi container CỦA
+  # NÓ được start, dù start ở phase nào) -> handler này bị notify cho galera2/galera3 dù 2 node đó
+  # CHƯA có container "mariadb" nào (Phase 1 chỉ start container cho node đầu, 2 node còn lại tới
+  # Phase 2 mới start LẦN ĐẦU) -> "docker restart mariadb" fail vì container không tồn tại. Fix:
+  # coi "container chưa tồn tại" là no-op an toàn — container SẮP được tạo mới (Phase 1 hoặc Phase 2)
+  # tự đọc đúng server.cnf hiện tại ngay từ lần start đầu, không cần "reload" gì cả.
+  ansible.builtin.shell: |
+    set -e
+    if ! docker inspect mariadb >/dev/null 2>&1; then
+      echo "container mariadb chua ton tai - se doc config moi ngay tu lan start dau, khong can reload"
+      exit 0
+    fi
+    docker restart mariadb
+    for i in $(seq 1 24); do
+      docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1" >/dev/null 2>&1 && exit 0
+      sleep 5
+    done
+    echo "mariadb khong san sang lai sau restart (vuot 120s)" >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  register: _mariadb_reload_result
+  changed_when: "'chua ton tai' not in _mariadb_reload_result.stdout"
+  no_log: true
+  throttle: 1

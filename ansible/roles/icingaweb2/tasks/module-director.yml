@@ -1,0 +1,70 @@
+---
+# Module Director (loại C): DB đã tạo ở role mariadb. Ở đây: config resource + migration + kickstart.
+#
+# BUG THẬT ĐÃ GẶP (2026-07-22, tự phát hiện khi rà lại cho nhất quán — chưa từng gây sự cố thật vì
+# bắt được trước khi ai đụng vào): trước đây file này ghi TRỰC TIẾP vào web_etc (đường dẫn DATA,
+# /data/etc/icingaweb2/modules/director/config.ini), KHÔNG qua render_config_item.yml như
+# resources.ini/config.ini/... — không có override, không mount ro per-file (chỉ "an toàn" nhờ tình
+# cờ nằm trong /data đã mount rw sẵn). Đổi sang render_config_item.yml cho NHẤT QUÁN với mọi file
+# config khác của role: override-aware (per-host > per-service > template), ghi vào icinga_etc_dir,
+# mount ro per-file (xem task "Khởi động container icingaweb2" — chỉ mount khi module director bật).
+- name: Render config Director (resource DB + endpoint API, override-aware)
+  ansible.builtin.include_tasks: render_config_item.yml
+  vars:
+    cfg: { relpath: "modules/director/config.ini", template: "module-director.ini.j2" }
+
+- name: Render Director kickstart.ini (Icinga API endpoint riêng)
+  ansible.builtin.template:
+    src: module-director-kickstart.ini.j2
+    dest: "{{ icinga_etc_dir }}/icingaweb2/modules/director/kickstart.ini"
+    # icingacli trong image chạy uid 33 (www-data); 0600 vẫn giữ secret chỉ đọc bởi đúng service.
+    owner: "{{ web_uid }}"
+    group: "{{ web_uid }}"
+    mode: "0600"
+  no_log: true
+
+# BUG THẬT ĐÃ GẶP (2026-07-22): "director migration run" chạy qua {{ web_run }}, container one-off
+# CHỈ mount {{ web_data }}:/data — từ khi resources.ini/config.ini/... chuyển sang mount per-file từ
+# icinga_etc_dir (KHÔNG còn nằm trong /data nữa), container one-off này KHÔNG thấy resources.ini
+# (chứa resource "director_db") lẫn modules/director/config.ini vừa render ở trên -> "director
+# migration run" lỗi "Director is not configured correctly". KHÔNG sửa {{ web_run }} dùng chung (task
+# "Enable module" gọi nó SỚM hơn, lúc modules/icingadb/*.ini và modules/director/config.ini CHƯA
+# render xong — mount thêm ở đó sẽ lỗi "no such file"). Thay vào đó định nghĩa wrapper RIÊNG cho lệnh
+# này, nơi mọi file cần đã chắc chắn tồn tại (config lõi + module icingadb + director đều render
+# trước khi tới đây trong thứ tự task).
+- name: "Helper one-off ĐẦY ĐỦ config (chỉ dùng cho migration — mọi file cần đã render xong)"
+  ansible.builtin.set_fact:
+    web_run_full: >-
+      docker run --rm -v {{ web_data }}:/data
+      -v {{ icinga_etc_dir }}/icingaweb2/resources.ini:/data/etc/icingaweb2/resources.ini:ro
+      -v {{ icinga_etc_dir }}/icingaweb2/config.ini:/data/etc/icingaweb2/config.ini:ro
+      -v {{ icinga_etc_dir }}/icingaweb2/authentication.ini:/data/etc/icingaweb2/authentication.ini:ro
+      -v {{ icinga_etc_dir }}/icingaweb2/roles.ini:/data/etc/icingaweb2/roles.ini:ro
+      -v {{ icinga_etc_dir }}/icingaweb2/modules/icingadb/config.ini:/data/etc/icingaweb2/modules/icingadb/config.ini:ro
+      -v {{ icinga_etc_dir }}/icingaweb2/modules/icingadb/redis.ini:/data/etc/icingaweb2/modules/icingadb/redis.ini:ro
+      -v {{ icinga_etc_dir }}/icingaweb2/modules/director/config.ini:/data/etc/icingaweb2/modules/director/config.ini:ro
+      -v {{ icinga_etc_dir }}/icingaweb2/modules/director/kickstart.ini:/data/etc/icingaweb2/modules/director/kickstart.ini:ro
+      --entrypoint icingacli {{ images.icingaweb2 }}
+
+- name: Chạy Director schema migration (idempotent)
+  ansible.builtin.command: "{{ web_run_full }} director migration run"
+  register: dir_mig
+  changed_when: "'nothing to do' not in (dir_mig.stdout | default('') | lower)"
+  failed_when: dir_mig.rc != 0 and 'up to date' not in (dir_mig.stdout | default('') | lower)
+  when: inventory_hostname == ca_host
+
+- name: Kiểm tra Director có cần kickstart không (idempotent)
+  ansible.builtin.command: "{{ web_run_full }} director kickstart required"
+  register: director_kickstart_required
+  changed_when: false
+  failed_when: director_kickstart_required.rc not in [0, 1]
+  when: inventory_hostname == ca_host
+
+- name: Kickstart Director và import Endpoint/Zone/CheckCommand từ Icinga API
+  ansible.builtin.command: "{{ web_run_full }} director kickstart run"
+  register: director_kickstart
+  changed_when: true
+  no_log: true
+  when:
+    - inventory_hostname == ca_host
+    - director_kickstart_required.rc == 0

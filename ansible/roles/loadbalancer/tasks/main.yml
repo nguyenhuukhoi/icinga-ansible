@@ -1,0 +1,11 @@
+---
+# Role loadbalancer (P2): HAProxy + keepalived, VIP CHỈ cho web 443 (sticky session).
+# KHÔNG load-balance cổng cluster 5665 (endpoint↔endpoint, kiểm CN).
+# Stub — sẽ hiện thực ở P2.
+
+- name: Chặn deployment có loadbalancer vì role vẫn chưa được hiện thực
+  ansible.builtin.fail:
+    msg: >-
+      Nhóm [loadbalancer] có host nhưng role HAProxy/Keepalived hiện chưa được hiện thực. Không thể
+      báo deploy thành công giả. Để trống nhóm này và đặt reverse proxy/LB được quản lý bên ngoài,
+      hoặc hiện thực role trước khi dùng VIP {{ icinga_internal_vip_address | default('<chưa set>') }}.

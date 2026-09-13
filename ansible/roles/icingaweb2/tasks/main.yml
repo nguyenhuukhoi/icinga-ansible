@@ -1,0 +1,422 @@
+---
+# Role icingaweb2: Apache2 + Icinga Web 2, module Icinga DB Web + admin.
+# Xử lý module theo 3 loại A/B/C (module_catalog). P1 tập trung icingadb (B).
+#
+# MÔ HÌNH IMAGE (icinga/icingaweb2): state dưới /data (/etc/icingaweb2 -> /data/etc/icingaweb2),
+#   container chạy uid 33 (www-data). => mount host /data, config dưới /data/etc/icingaweb2 sở hữu 33.
+#   entrypoint là binary compiled => lệnh one-off phải override entrypoint (icingacli/cat).
+
+- name: Hằng số đường dẫn web + uid
+  ansible.builtin.set_fact:
+    web_base: "{{ icinga_base_dir }}/icingaweb2"
+    web_data: "{{ icinga_base_dir }}/icingaweb2/data"
+    web_etc: "{{ icinga_base_dir }}/icingaweb2/data/etc/icingaweb2"
+    web_uid: "33"        # www-data trong image
+    # Chỉ mount /data — ĐỦ cho "module enable" (chỉ tạo symlink enabledModules/, không đọc config
+    # resource nào). KHÔNG dùng biến này cho lệnh cần đọc config thật (vd director migration) — xem
+    # "web_run_full" riêng trong module-director.yml, lý do ở comment tại đó.
+    web_run: "docker run --rm -v {{ icinga_base_dir }}/icingaweb2/data:/data --entrypoint icingacli {{ images.icingaweb2 }}"
+
+- name: Tạo cây thư mục /data/etc/icingaweb2 (sở hữu www-data)
+  ansible.builtin.file:
+    path: "{{ web_etc }}/{{ item }}"
+    state: directory
+    owner: "{{ web_uid }}"
+    group: "{{ web_uid }}"
+    mode: "0770"
+  loop: ["", "modules/icingadb", "enabledModules"]
+
+- name: Tạo /data/var/lib/icingaweb2 (runtime của app)
+  ansible.builtin.file:
+    path: "{{ web_data }}/var/lib/icingaweb2"
+    state: directory
+    owner: "{{ web_uid }}"
+    group: "{{ web_uid }}"
+    mode: "0770"
+
+# ---------- Import schema icingaweb2 (một lần) ----------
+- name: Trích schema icingaweb2 từ image (override entrypoint cat)
+  ansible.builtin.shell: >
+    docker run --rm --entrypoint cat {{ images.icingaweb2 }}
+    /usr/share/icingaweb2/schema/mysql.schema.sql
+    > {{ web_base }}/mysql.schema.sql
+  args:
+    creates: "{{ web_base }}/mysql.schema.sql"
+  when: inventory_hostname == ca_host
+
+# Dùng user 'icingaweb2' (KHÔNG phải root) — 2026-07-23, theo yêu cầu người dùng: nhánh
+# icinga_database_type=external không được đụng tới root của DB ngoài (DBA tự tạo database/user/
+# grant sẵn, xem "Hướng dẫn tạo schema DB ngoài" ở roles/prechecks). User 'icingaweb2' có GRANT ALL
+# trên chính DB của nó nên đủ quyền cho cả kiểm tra schema, import schema, lẫn tạo admin user bên
+# dưới — không cần root cho managed_db lẫn external, đồng nhất luôn.
+#
+# _mariadb_ssl_flag (group_vars/all.yml) — chèn "--skip-ssl" khi db_client_skip_ssl: true, rỗng nếu
+# không (mặc định). BUG THẬT ĐÃ GẶP (2026-07-23, verify live external_db lần đầu): client mariadb
+# trong image {{ images.mariadb }} (bản mới) MẶC ĐỊNH yêu cầu TLS khi kết nối qua TCP (-h ...). Với
+# managed_db, "tình cờ" chạy được vì server CŨNG là image mariadb chính thức (tự hỗ trợ TLS mặc
+# định) — nhưng MariaDB tự cài tay (external, vd apt mariadb-server trên Ubuntu) thường KHÔNG bật
+# TLS mặc định -> lỗi "SSL is required, but the server does not support it" nếu không bật
+# db_client_skip_ssl: true trong globals.yml. KHÔNG tự bật mặc định — người dùng chủ động khai khi
+# server thật sự không hỗ trợ TLS, tránh âm thầm tắt bảo mật cho DB CÓ hỗ trợ TLS.
+- name: Kiểm tra schema icingaweb2 đã import chưa
+  ansible.builtin.shell: >
+    docker run --rm --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingaweb2 -p{{ icingaweb2_db_password }}
+    -N -e "SELECT COUNT(*) FROM information_schema.tables
+           WHERE table_schema='icingaweb2' AND table_name='icingaweb_user';"
+  register: web_schema_check
+  changed_when: false
+  no_log: true
+  when: inventory_hostname == ca_host
+
+- name: Import schema icingaweb2 (nếu chưa có bảng user)
+  ansible.builtin.shell: >
+    docker run --rm -i --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingaweb2 -p{{ icingaweb2_db_password }} icingaweb2
+    < {{ web_base }}/mysql.schema.sql
+  args: { executable: /bin/bash }
+  no_log: true
+  when:
+    - inventory_hostname == ca_host
+    - web_schema_check.stdout | default('0') | trim == '0'
+
+- name: Đọc bcrypt hash hiện tại của admin web
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['docker', 'run', '--rm', '--network', 'host', images.mariadb, 'mariadb']
+        + ([_mariadb_ssl_flag] if _mariadb_ssl_flag | length > 0 else [])
+        + ['-h', db_host, '-P', db_port | string, '-uicingaweb2', '-p' ~ icingaweb2_db_password,
+           '-N', 'icingaweb2', '-e',
+           "SELECT COALESCE(password_hash,'') FROM icingaweb_user WHERE name='" ~ icingaweb2_admin_user ~ "';"]
+      }}
+  register: _admin_password_hash
+  changed_when: false
+  no_log: true
+  when: inventory_hostname == ca_host
+
+- name: Xác minh password admin với bcrypt hash hiện tại (password truyền qua stdin)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -i
+      - --entrypoint
+      - php
+      - "{{ images.icingaweb2 }}"
+      - -r
+      - >-
+        $v=json_decode(stream_get_contents(STDIN), true);
+        exit(password_verify($v['password'], $v['hash']) ? 0 : 1);
+    stdin: >-
+      {{ {'password': icingaweb2_admin_password,
+          'hash': _admin_password_hash.stdout | default('') | trim} | to_json }}
+  register: _admin_password_verify
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: inventory_hostname == ca_host
+
+- name: Tạo/cập nhật admin user trong DB khi password thay đổi (bcrypt)
+  # KHÔNG dùng "shell": bcrypt hash chứa "$" (vd $2b$12$...) sẽ bị /bin/sh hiểu nhầm
+  # thành tham chiếu biến ($2, $12, ...) và bị "nuốt" mất -> hash lưu vào DB sai,
+  # không thể đăng nhập bằng bất kỳ mật khẩu nào. "command" với argv không qua shell nên an toàn.
+  # argv dựng bằng Jinja (thay vì liệt kê tĩnh) để chèn/bỏ "--skip-ssl" theo db_client_skip_ssl —
+  # vẫn an toàn với bcrypt "$" vì argv KHÔNG qua shell dù dựng bằng Jinja hay liệt kê tay.
+  vars:
+    _admin_sql: >-
+      INSERT INTO icingaweb_user (name, active, password_hash)
+      VALUES ('{{ icingaweb2_admin_user }}', 1, '{{ icingaweb2_admin_password | password_hash('bcrypt') }}')
+      ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash);
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['docker', 'run', '--rm', '--network', 'host', images.mariadb, 'mariadb']
+        + ([_mariadb_ssl_flag] if _mariadb_ssl_flag | length > 0 else [])
+        + ['-h', db_host, '-P', db_port | string, '-uicingaweb2', '-p' ~ icingaweb2_db_password,
+           'icingaweb2', '-e', _admin_sql]
+      }}
+  no_log: true
+  changed_when: true
+  when:
+    - inventory_hostname == ca_host
+    - _admin_password_verify.rc | default(1) != 0
+
+# ---------- Render config lõi (override-aware — deploy node -> target node, design.md 4.1) ----------
+- name: Render config lõi (resources/config/authentication/roles)
+  ansible.builtin.include_tasks: render_config_item.yml
+  loop:
+    - { relpath: "resources.ini",       template: "resources.ini.j2" }
+    - { relpath: "config.ini",          template: "config.ini.j2" }
+    - { relpath: "authentication.ini",  template: "authentication.ini.j2" }
+    - { relpath: "roles.ini",           template: "roles.ini.j2" }
+    - { relpath: "modules/icingadb/commandtransports.ini", template: "module-icingadb-commandtransports.ini.j2" }
+  loop_control:
+    loop_var: cfg
+
+# Các file web được seed một lần để thay đổi qua UI không bị Ansible ghi đè.
+# Riêng endpoint/credential do globals.yml quản lý phải luôn hội tụ; nếu không,
+# rotate password DB sẽ đổi user MariaDB nhưng Web vẫn giữ password cũ.
+- name: Đồng bộ các field connection do Ansible quản lý trong resources.ini
+  community.general.ini_file:
+    path: "{{ icinga_etc_dir }}/icingaweb2/resources.ini"
+    section: "{{ item.section }}"
+    option: "{{ item.option }}"
+    value: "{{ item.value | string | to_json }}"
+    mode: "0660"
+    no_extra_spaces: true
+  loop: >-
+    {{
+      [
+        {'section': 'icingaweb2_db', 'option': 'type', 'value': 'db'},
+        {'section': 'icingaweb2_db', 'option': 'db', 'value': 'mysql'},
+        {'section': 'icingaweb2_db', 'option': 'host', 'value': db_host},
+        {'section': 'icingaweb2_db', 'option': 'port', 'value': db_port | string},
+        {'section': 'icingaweb2_db', 'option': 'dbname', 'value': 'icingaweb2'},
+        {'section': 'icingaweb2_db', 'option': 'username', 'value': 'icingaweb2'},
+        {'section': 'icingaweb2_db', 'option': 'password', 'value': icingaweb2_db_password},
+        {'section': 'icingadb', 'option': 'type', 'value': 'db'},
+        {'section': 'icingadb', 'option': 'db', 'value': 'mysql'},
+        {'section': 'icingadb', 'option': 'host', 'value': db_host},
+        {'section': 'icingadb', 'option': 'port', 'value': db_port | string},
+        {'section': 'icingadb', 'option': 'dbname', 'value': 'icingadb'},
+        {'section': 'icingadb', 'option': 'username', 'value': 'icingadb'},
+        {'section': 'icingadb', 'option': 'password', 'value': icingadb_db_password}
+      ]
+      + ([
+          {'section': 'director_db', 'option': 'type', 'value': 'db'},
+          {'section': 'director_db', 'option': 'db', 'value': 'mysql'},
+          {'section': 'director_db', 'option': 'host', 'value': db_host},
+          {'section': 'director_db', 'option': 'port', 'value': db_port | string},
+          {'section': 'director_db', 'option': 'dbname', 'value': 'director'},
+          {'section': 'director_db', 'option': 'username', 'value': 'director'},
+          {'section': 'director_db', 'option': 'password', 'value': director_db_password}
+        ] if 'director' in (enable_icingaweb2_modules | default([])) else [])
+    }}
+  loop_control:
+    label: "{{ item.section }}.{{ item.option }}"
+  no_log: true
+  notify: Reload icingaweb2
+
+# ---------- Module (loại A/B/C) ----------
+# Tự giải phụ thuộc (2026-07-22, trước là TODO): đọc "requires" từ module_catalog
+# (group_vars/all.yml) — khai "director" trong globals.yml tự kéo theo "ipl"+"incubator" mà KHÔNG
+# cần liệt kê tay. Trước đây "incubator" chỉ chạy được nhờ MAY MẮN (image tự bật sẵn theo default,
+# không phải Ansible chủ động đảm bảo) — trên volume/node hoàn toàn mới, nếu image không tự bật,
+# "director" sẽ gãy (thiếu autoload các package gipfl/* nó cần, xem bug daemon ở "Khởi động container
+# icingaweb2-director-daemon" bên dưới). Dùng biến RIÊNG (_effective_icingaweb2_modules) chỉ cho việc
+# "enable module nào" — mọi chỗ khác trong role (template resources.ini.j2 kiểm tra 'director' in
+# enable_icingaweb2_modules, mount module-director/config.ini...) vẫn dùng đúng
+# enable_icingaweb2_modules gốc, vì đó là Ý ĐỊNH người dùng (director được BẬT hay không), khác với
+# "cần enable thêm module phụ thuộc nào" (chi tiết triển khai, người dùng không cần biết).
+- name: "Tự giải phụ thuộc module: khởi tạo bằng danh sách khai trong globals.yml"
+  ansible.builtin.set_fact:
+    _effective_icingaweb2_modules: "{{ enable_icingaweb2_modules }}"
+
+- name: "Tự giải phụ thuộc module: thêm requires từ module_catalog (vd director → ipl, incubator)"
+  ansible.builtin.set_fact:
+    _effective_icingaweb2_modules: "{{ (_effective_icingaweb2_modules + module_catalog[item].requires) | unique | list }}"
+  loop: "{{ enable_icingaweb2_modules }}"
+  loop_control: { label: "{{ item }}" }
+  when:
+    - item in module_catalog
+    - module_catalog[item].requires is defined
+
+- name: Kiểm tra module đã enable trên persistent volume
+  ansible.builtin.stat:
+    path: "{{ web_etc }}/enabledModules/{{ item }}"
+  loop: "{{ _effective_icingaweb2_modules }}"
+  register: _web_enabled_modules
+
+# web_run đã có entrypoint=icingacli, nên chỉ truyền "module enable <tên>".
+- name: "Enable module (khai báo + phụ thuộc tự giải)"
+  ansible.builtin.command: "{{ web_run }} module enable {{ item.item }}"
+  loop: "{{ _web_enabled_modules.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not item.stat.exists
+
+- name: (loại B) Render config module Icinga DB Web (resource DB + Redis, override-aware)
+  ansible.builtin.include_tasks: render_config_item.yml
+  loop:
+    - { relpath: "modules/icingadb/config.ini", template: "module-icingadb.ini.j2" }
+    # Redis — FILE RIÊNG, module không đọc từ config.ini (xem TODO.md mục 2.3).
+    - { relpath: "modules/icingadb/redis.ini",  template: "module-icingadb-redis.ini.j2" }
+  loop_control:
+    loop_var: cfg
+
+- name: Đồng bộ endpoint/credential Redis do Ansible quản lý trong Icinga DB Web
+  community.general.ini_file:
+    path: "{{ icinga_etc_dir }}/icingaweb2/modules/icingadb/redis.ini"
+    section: "{{ item.section }}"
+    option: "{{ item.option }}"
+    value: "{{ item.value | string | to_json }}"
+    mode: "0660"
+    no_extra_spaces: true
+  loop: >-
+    {{
+      [
+        {'section': 'redis', 'option': 'tls', 'value': '0'},
+        {'section': 'redis1', 'option': 'host', 'value': '127.0.0.1'},
+        {'section': 'redis1', 'option': 'port', 'value': icingadb_redis_port | string},
+        {'section': 'redis1', 'option': 'password', 'value': icingadb_redis_password}
+      ]
+      + ([
+          {'section': 'redis2', 'option': 'host',
+           'value': hostvars[(groups['master'] | reject('equalto', inventory_hostname) | list)[0]].ansible_host
+                    | default((groups['master'] | reject('equalto', inventory_hostname) | list)[0])},
+          {'section': 'redis2', 'option': 'port', 'value': icingadb_redis_port | string},
+          {'section': 'redis2', 'option': 'password', 'value': icingadb_redis_password}
+        ] if is_ha_master | bool else [])
+    }}
+  loop_control:
+    label: "{{ item.section }}.{{ item.option }}"
+  no_log: true
+  notify: Reload icingaweb2
+
+- name: (loại C) Director — migration + kickstart nếu bật
+  ansible.builtin.include_tasks: module-director.yml
+  when: "'director' in (enable_icingaweb2_modules | default([]))"
+
+# ---------- Xây danh sách mount per-file (thêm module-director nếu bật) ----------
+# MOUNT RW (không phải :ro như mọi per-file khác trong dự án) — CỐ Ý, đi cùng cơ chế "seed 1 lần"
+# ở render_config_item.yml (2026-07-22): Icinga Web (chạy trong container) cần tự ghi được vào các
+# file này khi người dùng thao tác qua UI (vd thêm Resource, đổi Role) mà không bị mất khi container
+# bị xoá/tạo lại — vì đây là bind-mount tới file THẬT trên host (icinga_etc_dir), ghi từ container
+# tức là ghi thẳng ra host, độc lập vòng đời container. Ansible sẽ KHÔNG re-render các file này sau
+# lần deploy đầu (xem "force: false" ở render_config_item.yml) — đổi mật khẩu DB qua globals.yml sau
+# đó sẽ KHÔNG tự áp dụng vào đây nữa.
+- name: "Xây list mount per-file: khởi tạo với các file config cố định"
+  ansible.builtin.set_fact:
+    _web_volumes:
+      - "{{ web_data }}:/data"    # data (enabledModules symlink, session, cache) — rw, KHÔNG đổi
+      # config — mount TỪNG FILE riêng (rw, xem comment trên), giống kolla /etc/kolla/<svc> nhưng
+      # cho phép container tự ghi. KHÔNG mount đè cả /data/etc/icingaweb2 (sẽ che mất enabledModules/
+      # do `icingacli module enable` ghi trực tiếp vào data mount — xem render_config_item.yml).
+      - "{{ icinga_etc_dir }}/icingaweb2/resources.ini:/data/etc/icingaweb2/resources.ini"
+      - "{{ icinga_etc_dir }}/icingaweb2/config.ini:/data/etc/icingaweb2/config.ini"
+      - "{{ icinga_etc_dir }}/icingaweb2/authentication.ini:/data/etc/icingaweb2/authentication.ini"
+      - "{{ icinga_etc_dir }}/icingaweb2/roles.ini:/data/etc/icingaweb2/roles.ini"
+      - "{{ icinga_etc_dir }}/icingaweb2/modules/icingadb/config.ini:/data/etc/icingaweb2/modules/icingadb/config.ini"
+      - "{{ icinga_etc_dir }}/icingaweb2/modules/icingadb/redis.ini:/data/etc/icingaweb2/modules/icingadb/redis.ini"
+      - "{{ icinga_etc_dir }}/icingaweb2/modules/icingadb/commandtransports.ini:/data/etc/icingaweb2/modules/icingadb/commandtransports.ini"
+
+# module-director/config.ini chỉ THẬT SỰ tồn tại trên icinga_etc_dir khi module "director" được bật
+# (module-director.yml chỉ render khi đó) -> mount CHỈ khi bật, nếu không nguồn không tồn tại sẽ
+# làm docker_container lỗi/tạo nhầm thư mục rỗng (cùng bài học zones.d ở role icinga2). RW cùng lý
+# do các file trên.
+- name: "Thêm mount config.ini + kickstart.ini của Director (chỉ khi module director bật)"
+  ansible.builtin.set_fact:
+    _web_volumes: >-
+      {{ _web_volumes +
+         [icinga_etc_dir + '/icingaweb2/modules/director/config.ini:/data/etc/icingaweb2/modules/director/config.ini',
+          icinga_etc_dir + '/icingaweb2/modules/director/kickstart.ini:/data/etc/icingaweb2/modules/director/kickstart.ini:ro'] }}
+  when: "'director' in (enable_icingaweb2_modules | default([]))"
+
+# ---------- Chạy Apache2 + Icinga Web 2 ----------
+# Image serve Apache trên 8080 (không phải 80). Host network -> bind 8080 trên host.
+# BYPASS entrypoint Go của image (nó tự quản /data + đọc ENV, xung đột config mount sẵn).
+# Chạy thẳng Apache: vhost icingaweb2 + Listen 8080 đã baked trong conf-enabled.
+- name: Khởi động container icingaweb2 (Apache2 trực tiếp, host network, cổng 8080)
+  community.docker.docker_container:
+    name: icingaweb2
+    image: "{{ images.icingaweb2 }}"
+    state: started
+    restart_policy: unless-stopped
+    network_mode: host
+    entrypoint:
+      - /bin/bash
+      - -eo
+      - pipefail
+      - -c
+      - ". /etc/apache2/envvars; exec apache2 -DFOREGROUND"
+    volumes: "{{ _web_volumes }}"
+    # BUG THẬT ĐÃ GẶP ở role icinga2 (áp dụng phòng ngừa ở đây luôn): so sánh mặc định của
+    # docker_container cho "volumes" không phát hiện mount bị RÚT BỚT (chỉ phát hiện thêm mới) — tắt
+    # module director rồi reconfigure sẽ không tự gỡ mount config.ini cũ nếu không có "strict".
+    comparisons:
+      volumes: strict
+    healthcheck:
+      # Image không có curl/wget, chỉ có bash + php. Dùng bash /dev/tcp để kiểm tra HTTP thay vì cài thêm gói.
+      # QUAN TRỌNG: "CMD-SHELL" chạy qua /bin/sh (dash trên Debian) — dash KHÔNG hỗ trợ /dev/tcp.
+      # Phải dùng dạng "CMD" gọi thẳng bash để tính năng /dev/tcp hoạt động.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/{{ icingaweb2_http_port }} &&
+          printf 'GET /authentication/login HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          head -1 <&3 | grep -qE 'HTTP/1\.[01] (200|302)'
+      interval: 20s
+      timeout: 5s
+      retries: 5
+  register: _icingaweb2_container
+
+- name: Chờ icingaweb2 healthy sau khi tạo/tái tạo container
+  community.docker.docker_container_info:
+    name: icingaweb2
+  register: _icingaweb2_initial_health
+  until:
+    - _icingaweb2_initial_health.exists | default(false)
+    - (_icingaweb2_initial_health.container.State.Health.Status | default('starting')) == 'healthy'
+  retries: 24
+  delay: 5
+  when: _icingaweb2_container.changed | default(false)
+
+# ---------- Director background daemon (Job/Sync định kỳ) — 2026-07-22 ----------
+# Director cần 1 tiến trình NỀN luôn chạy để xử lý Job (Sync rule, import source theo lịch...) —
+# container icingaweb2 ở trên chỉ chạy Apache (phục vụ web), không có tiến trình nền nào khác.
+# Thiếu daemon này, UI Director báo "The Icinga Director Background Daemon is not running". Daemon
+# KHÔNG bắt buộc để xem/deploy config tay qua UI, chỉ bắt buộc nếu dùng Job/Sync tự động — nhưng vẫn
+# nên chạy để tắt cảnh báo + có Job hoạt động khi cần.
+# Container RIÊNG (không nhét vào icingaweb2) — đúng tinh thần "1 tiến trình dài hạn = 1 container"
+# của dự án, có healthcheck/restart_policy độc lập.
+# CHẠY TRÊN MỌI master (không chỉ ca_host) — đã xác nhận qua test thật: daemon tự có cơ chế LOCK qua
+# DB (`icingacli director daemon run` trên node thứ 2 log "db: locked by other instance") — an toàn
+# chạy nhiều instance, tự failover giống leader-election của icingadb (không cần Ansible tự chọn 1
+# node để chạy).
+#
+# BUG THẬT ĐÃ GẶP (2026-07-22): chạy thẳng `icingacli director daemon run` crash-loop
+# (exit 255) với "PHP Fatal error: Uncaught Error: Class 'gipfl\Cli\Process' not found" — file
+# class NÀY THẬT SỰ CÓ TRONG IMAGE (đã xác nhận:
+# /usr/share/icingaweb2/modules/incubator/vendor/gipfl/cli/src/Process.php), package "gipfl/cli" là
+# 1 trong nhiều thư viện module "incubator" bó kèm (director khai `requires: [incubator]` — đã bật
+# sẵn). Nguyên nhân: `modules/incubator/run.php` (nơi `require_once vendor/autoload.php` của
+# incubator, chỗ DUY NHẤT nạp autoloader cho các package `gipfl/*` bó kèm) chỉ chạy khi phát hiện
+# NGỮ CẢNH WEB (check `$_SERVER['REQUEST_URI']` ở đầu file) — **không chạy khi gọi qua `icingacli`
+# (CLI/daemon)**, nên `gipfl\Cli\Process` (và có thể nhiều class khác trong vendor của incubator)
+# KHÔNG được autoload trong ngữ cảnh daemon dù file vật lý tồn tại. Đây là hành vi thật của bản
+# `director 1.11.9` + `incubator 0.23.0` bó kèm trong image `icingaweb2:2.14.0` — không phải lỗi
+# cấu hình phía Ansible. Fix: tự nạp trước autoloader của incubator bằng
+# `php -d auto_prepend_file=.../incubator/vendor/autoload.php` trước khi chạy `icingacli` — đã verify
+# thật (không còn crash, log ra đúng "running, db: locked by other instance"/"db: connected").
+- name: Khởi động container icingaweb2-director-daemon (Job/Sync nền, chỉ khi module director bật)
+  community.docker.docker_container:
+    name: icingaweb2-director-daemon
+    image: "{{ images.icingaweb2 }}"
+    state: started
+    restart_policy: unless-stopped
+    network_mode: host
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        php -d auto_prepend_file=/usr/share/icingaweb2/modules/incubator/vendor/autoload.php
+        /usr/local/bin/icingacli director daemon run
+    volumes: "{{ _web_volumes }}"
+    comparisons:
+      volumes: strict
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'director daemon' > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  when: "'director' in (enable_icingaweb2_modules | default([]))"
+
+- name: Dừng container icingaweb2-director-daemon nếu module director bị tắt (dọn mồ côi)
+  community.docker.docker_container:
+    name: icingaweb2-director-daemon
+    state: absent
+  when: "'director' not in (enable_icingaweb2_modules | default([]))"

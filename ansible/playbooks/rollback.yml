@@ -1,0 +1,61 @@
+# =============================================================================
+# rollback.yml — quay về trạng thái TRƯỚC upgrade (khi upgrade fail). Đối xứng với upgrade.yml.
+# UX: người dùng sửa icinga_image_versions trong globals.yml VỀ LẠI tag CŨ, rồi:
+#   icinga-ansible rollback -e confirm=yes
+# Trình tự:
+#   1) Restore DB từ backup nhãn pre-upgrade (roles/mariadb restore.yml — PHÁ dữ liệu hiện tại,
+#      confirm-gated). Khôi phục đúng dữ liệu + schema tại thời điểm trước upgrade.
+#   2) Redeploy toàn stack ở version CŨ (globals.yml đã về cũ) — tái dùng site playbook.
+#   3) Postcheck THẬT.
+# Yêu cầu: -e confirm=yes (vì bước 1 ghi đè datadir).
+# =============================================================================
+
+- name: Rollback — chặn external DB vì tool không sở hữu bản backup DB đó
+  hosts: "{{ groups['master'][0] }}"
+  become: false
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Rollback tự động chỉ hỗ trợ managed_db
+      ansible.builtin.assert:
+        that: icinga_database_type == 'managed_db'
+        fail_msg: >-
+          rollback tự động hiện chỉ hỗ trợ managed_db. Với external DB, DBA phải khôi phục DB trước;
+          tool không có datadir/backup để restore và sẽ không tiếp tục như thể đã rollback thành công.
+
+# --- 1. Restore DB pre-upgrade ----------------------------------------------------------------
+- name: Rollback — restore DB pre-upgrade
+  hosts: galera
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    confirm: false
+  tasks:
+    - name: Restore từ backup nhãn pre-upgrade (đọc con trỏ LATEST_PRE_UPGRADE)
+      ansible.builtin.include_role:
+        name: mariadb
+        tasks_from: restore
+
+# --- 2. Redeploy toàn stack ở version CŨ (tái dùng site playbook) ------------------------------
+- ansible.builtin.import_playbook: ../icinga-ansible.yml
+  vars:
+    # Rollback chỉ redeploy workload; bootstrap lại sẽ tăng downtime và có
+    # thể restart cả container ngoài phạm vi stack.
+    icinga_skip_bootstrap: true
+
+# --- 3. Postcheck THẬT ------------------------------------------------------------------------
+- name: Rollback — postcheck
+  hosts: master
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Postcheck trên ca_host
+      ansible.builtin.include_role:
+        name: upgrade
+        tasks_from: postcheck
+      when: inventory_hostname == ca_host

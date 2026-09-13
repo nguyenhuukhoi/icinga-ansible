@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# Cấu hình icingadb daemon. Redis nằm cục bộ trên master này (host network).
+database:
+  type: mysql
+  host: {{ db_host }}
+  port: {{ db_port }}
+  database: {{ icingadb_db_name }}
+  user: icingadb
+  password: {{ icingadb_db_password }}
+
+redis:
+  host: 127.0.0.1
+  port: {{ icingadb_redis_port }}
+  password: {{ icingadb_redis_password }}
+
+logging:
+  level: info

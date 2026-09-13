@@ -1,0 +1,152 @@
+# =============================================================================
+# Site playbook. CLI 'tools/icinga-ansible' chọn công việc qua --tags / playbook chuyên biệt.
+#   tags: bootstrap | prechecks | mariadb | redis | icingadb | icinga2 | web | lb
+#   tag 'deploy' = chạy toàn bộ chuỗi deploy.
+# =============================================================================
+
+# --- 0. Bootstrap host (docker, chrony) + chuẩn bị thư mục/mạng ---------------
+# Tag CHỈ "bootstrap" (2026-07-22, theo yêu cầu người dùng — tách hẳn khỏi "deploy") — trước đây
+# gắn thêm "deploy" + "always" nên "deploy"/"reconfigure" ÂM THẦM chạy lại cả bootstrap mỗi lần, dù
+# README/quickstart đã hướng dẫn chạy "bootstrap-servers" như 1 bước RIÊNG trước "deploy". Giờ
+# "deploy" giả định host ĐÃ bootstrap (đúng khớp hướng dẫn) — nếu chưa, phải tự chạy
+# "bootstrap-servers" trước (đặc biệt sau "destroy", vì destroy có xoá docker network do role này tạo).
+- name: Bootstrap servers & prepare hosts
+  hosts: all_hosts
+  become: true
+  gather_facts: true
+  environment: "{{ proxy_environment }}"   # rỗng {} nếu không khai proxy_http — an toàn
+  roles:
+    - role: common
+      tags: [bootstrap]
+      when: not (icinga_skip_bootstrap | default(false) | bool)
+
+# --- 1. Prechecks (chạy một lần, dựa trên inventory) --------------------------
+# become: true (2026-07-23, BUG THẬT phát hiện khi verify external_db lần đầu) — trước đây prechecks
+# chỉ toàn assert/debug (không cần sudo), là play DUY NHẤT trong site playbook thiếu become: true.
+# Sau khi thêm bước tự thử kết nối DB ngoài qua "docker run" (xem roles/prechecks), task đó chạy
+# bằng user thường (không sudo) -> "permission denied ... docker.sock" dù DB/credential hoàn toàn
+# đúng — lỗi dễ hiểu lầm là do DBA chưa chuẩn bị xong (message cũ không phân biệt được 2 loại lỗi).
+- name: Pre-deployment checks
+  hosts: "{{ groups['master'][0] | default('localhost') }}"
+  become: true
+  gather_facts: false
+  roles:
+    - role: prechecks
+      tags: [prechecks, deploy]
+
+# --- 2. Database: MariaDB / Galera (bỏ qua nếu external) ----------------------
+# Tách 3 PLAY riêng (2026-09, học đúng kolla-ansible ansible/mariadb.yml — xem comment trong
+# roles/mariadb/tasks/phase1_config_and_bootstrap.yml để biết lý do "3 task trong 1 play" trước đây
+# vẫn còn khe hở race lý thuyết dù thứ tự logic đã đúng). Ranh giới PLAY (không phải task/include)
+# là thứ đảm bảo TOÀN BỘ host + handler của play trước xong hẳn rồi mới sang play sau — loại bỏ hẳn
+# khả năng node bootstrap và node join chồng lấn thời gian restart.
+- name: Deploy MariaDB / Galera (1/3 — config + bootstrap node đầu)
+  hosts: galera
+  become: true
+  gather_facts: true
+  tasks:
+    - import_role:
+        name: mariadb
+        tasks_from: phase1_config_and_bootstrap.yml
+      tags: [mariadb, deploy]
+      when: icinga_database_type == 'managed_db'
+
+- name: Deploy MariaDB / Galera (2/3 — node còn lại join cluster)
+  hosts: galera
+  become: true
+  gather_facts: false
+  tasks:
+    - import_role:
+        name: mariadb
+        tasks_from: phase2_join_others.yml
+      tags: [mariadb, deploy]
+      when: icinga_database_type == 'managed_db'
+
+- name: Deploy MariaDB / Galera (3/3 — bỏ cờ node đầu + tạo DB/user)
+  hosts: galera
+  become: true
+  gather_facts: false
+  tasks:
+    - import_role:
+        name: mariadb
+        tasks_from: phase3_unbootstrap_and_finalize.yml
+      tags: [mariadb, deploy]
+      when: icinga_database_type == 'managed_db'
+
+# --- 3. Icinga DB Redis (trên master) ----------------------------------------
+- name: Deploy Icinga DB Redis
+  hosts: master
+  serial: 1                       # đổi image/restart lần lượt, không ngắt Redis của cả 2 master cùng lúc
+  become: true
+  gather_facts: true
+  roles:
+    - role: redis
+      tags: [redis, deploy]
+
+# --- 4. Icinga 2 core: CA gốc trước, rồi các master khác, rồi satellite -------
+- name: Deploy Icinga 2 (CA host first)
+  hosts: master
+  become: true
+  gather_facts: true
+  serial: 1                       # tuần tự để CA host xong trước khi node khác lấy cert
+  roles:
+    - role: icinga2
+      tags: [icinga2, deploy]
+
+- name: Deploy Icinga 2 (satellites)
+  hosts: satellite
+  become: true
+  gather_facts: true
+  roles:
+    - role: icinga2
+      tags: [icinga2, deploy]
+
+# --- 4b. Icinga 2 "client" (command endpoint, monitor 1 host cụ thể) ---------
+- name: Deploy Icinga 2 (client)
+  hosts: "{{ groups['client'] | default([]) }}"
+  become: true
+  gather_facts: true
+  roles:
+    - role: icinga2
+      tags: [icinga2, deploy]
+
+# --- 5. Icinga DB daemon (đồng bộ Redis -> MariaDB), trên master --------------
+- name: Deploy Icinga DB daemon
+  hosts: master
+  become: true
+  gather_facts: true
+  roles:
+    - role: icingadb
+      tags: [icingadb, deploy]
+
+# --- 6. Icinga Web 2 (Apache2) trên master -----------------------------------
+- name: Deploy Icinga Web 2
+  hosts: master
+  become: true
+  gather_facts: true
+  roles:
+    - role: icingaweb2
+      tags: [web, deploy]
+
+# --- 6b. Object CPU/RAM/disk trong Director DB (không dùng config Host/Service tĩnh) ---
+- name: Configure Director-managed monitoring objects
+  hosts: "{{ groups['master'][0] | default('localhost') }}"
+  become: true
+  gather_facts: false
+  roles:
+    - role: director_config
+      tags: [director-config, deploy]
+      when:
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+        - (director_managed_hosts | default([]) | length) > 0
+        - (director_managed_services | default([]) | length) > 0
+
+# --- 7. Load balancer / VIP (chỉ khi HA, P2) ---------------------------------
+- name: Deploy load balancer (VIP web 443) — chỉ khi HA
+  hosts: loadbalancer
+  become: true
+  gather_facts: true
+  roles:
+    - role: loadbalancer
+      tags: [lb, deploy]
+      when: groups['master'] | default([]) | length > 1

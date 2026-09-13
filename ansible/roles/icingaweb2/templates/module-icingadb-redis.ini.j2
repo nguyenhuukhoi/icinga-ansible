@@ -1,0 +1,21 @@
+; {{ ansible_managed }} — Icinga DB Web: dest /etc/icingaweb2/modules/icingadb/redis.ini
+; Module đọc kết nối Redis (live state) từ file này qua Config::module('icingadb', 'redis').
+; Không dùng VIP (quyết định P2, xem TODO.md): redis1 = Redis CỤC BỘ của chính host web này
+; (web + redis + icingadb luôn co-located trên cùng master, network_mode host -> 127.0.0.1 đúng).
+; Khi HA (2 master), thêm redis2 = Redis của master còn lại để icingadb-web tự failover
+; (IcingaRedis.php:getSecondaryRedis() đọc đúng section [redis2] khi primary chết).
+[redis]
+tls = "0"
+
+[redis1]
+host     = "127.0.0.1"
+port     = "{{ icingadb_redis_port }}"
+password = "{{ icingadb_redis_password }}"
+{% if is_ha_master | bool %}
+{% set peer = (groups['master'] | reject('equalto', inventory_hostname) | list)[0] %}
+
+[redis2]
+host     = "{{ hostvars[peer].ansible_host | default(peer) }}"
+port     = "{{ icingadb_redis_port }}"
+password = "{{ icingadb_redis_password }}"
+{% endif %}

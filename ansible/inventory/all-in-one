@@ -1,0 +1,19 @@
+# Inventory mẫu: tất cả trên 1 host (lab / P1). ansible_connection=local nếu chạy tại chỗ.
+[all_hosts]
+localhost ansible_connection=local ansible_host=127.0.0.1
+
+[master]
+localhost
+
+[satellite]
+
+[client]
+
+[galera]
+localhost
+
+[loadbalancer]
+
+[icinga:children]
+master
+satellite

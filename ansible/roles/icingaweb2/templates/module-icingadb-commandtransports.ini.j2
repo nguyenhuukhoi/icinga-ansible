@@ -1,0 +1,26 @@
+; {{ ansible_managed }} — Icinga DB Web: dest /etc/icingaweb2/modules/icingadb/commandtransports.ini
+; Command Transport (Acknowledge/Downtime/Reschedule check/Comment... gửi từ dashboard) — gọi qua API
+; tới CHÍNH icinga2 co-located trên node web này trước ("icinga2", 127.0.0.1 — luôn cùng host với
+; master, network_mode host -> 127.0.0.1 đúng, giống cách redis.ini.j2 xử lý HA). Khi HA (2 master),
+; thêm transport phụ trỏ tới peer master để module tự failover nếu icinga2 cục bộ chết (theo khuyến
+; nghị chính thức https://icinga.com/docs/icinga-db-web/latest/doc/03-Configuration/: "configure the
+; secondary master's API command transport as backup").
+; Dùng ApiUser "icingadb-web" riêng (permissions hạn chế: actions/*, objects/query/*, objects/modify/*,
+; status/query — KHÔNG full "*", xem roles/icinga2/templates/api-users.conf.j2), KHÔNG dùng chung
+; "icingaweb2"/"director".
+[icinga2]
+transport = "api"
+host      = "127.0.0.1"
+port      = "{{ icinga2_api_port }}"
+username  = "icingadb-web"
+password  = "{{ icingadb_web_api_user_password }}"
+{% if is_ha_master | bool %}
+{% set peer = (groups['master'] | reject('equalto', inventory_hostname) | list)[0] %}
+
+[icinga2-{{ peer }}]
+transport = "api"
+host      = "{{ hostvars[peer].ansible_host | default(peer) }}"
+port      = "{{ icinga2_api_port }}"
+username  = "icingadb-web"
+password  = "{{ icingadb_web_api_user_password }}"
+{% endif %}

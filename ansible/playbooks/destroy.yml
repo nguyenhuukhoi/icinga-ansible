@@ -1,0 +1,176 @@
+# =============================================================================
+# destroy.yml — Gỡ toàn bộ container + dữ liệu + CẤU HÌNH icinga-ansible trên host trong inventory.
+# PHÁ HUỶ, KHÔNG hồi phục được (trừ khi có backup riêng — xem mariadb-backup).
+# An toàn: chặn cứng nếu không truyền đúng cụm xác nhận (giống kolla-ansible
+# "--yes-i-really-really-mean-it", 2026-07-23 theo yêu cầu người dùng — trước đây chỉ cần
+# confirm=yes, quá dễ gõ nhầm/dễ vô tình copy-paste đúng cho 1 lệnh PHÁ HUỶ KHÔNG HỒI PHỤC).
+# XOÁ CẢ icinga_etc_dir (/etc/icinga-ansible) — 2026-07-23, theo yêu cầu người dùng (trước đây CỐ Ý
+# giữ lại để không mất secrets/override nếu gõ nhầm lệnh; đổi ý, destroy phải sạch hoàn toàn giống
+# kolla-ansible) — NHƯNG chỉnh lại NGAY SAU ĐÓ cùng ngày: GIỮ LẠI globals.yml + passwords.yml trên
+# deployment node (theo yêu cầu người dùng — "chỉ cần giữ lại global với password trên deployment
+# node là ok thui"), xoá hết phần còn lại (override, và toàn bộ config trên các host quản lý khác).
+# Lý do: 2 file này là secrets/định danh cụm (mật khẩu DB, API user, admin web...) — mất thì phải tự
+# `genpwd` sinh lại TOÀN BỘ mật khẩu MỚI, deploy lại sẽ tạo user/DB với mật khẩu khác hẳn, không thể
+# "deploy lại y hệt cụm cũ" được nữa dù data đã mất theo destroy rồi. Giữ lại 2 file này thì sau
+# destroy chỉ cần `deploy` thẳng (không cần `init-config`/`genpwd` lại). 2 file CHỈ thực sự tồn tại
+# trên control node (nơi chạy CLI, $CONFIG_DIR) — trên host quản lý thuần tuý (không phải control
+# node) chúng vốn không có, nên loại trừ ở đây là no-op, không ảnh hưởng gì tới các host đó.
+#
+# 2 PLAY riêng biệt bên dưới — BUG THẬT phát hiện (2026-07-23, sau khi người dùng hỏi "deployment
+# node không nằm chung với master1 thì destroy xoá sao cho hợp lý"): play 1 (hosts: all_hosts) chỉ
+# xoá icinga_etc_dir TRÊN CÁC HOST TRONG INVENTORY. Ở lab hiện tại control node (nơi chạy CLI) trùng
+# với master1 (ansible_connection=local) nên vô tình "ăn theo" đúng path — NHƯNG nếu control node là
+# 1 máy RIÊNG (vd máy vận hành/CI, chạy ansible-playbook SSH ra các host, không nằm trong inventory)
+# thì play 1 KHÔNG BAO GIỜ đụng tới $CONFIG_DIR thật của CLI trên chính máy đó -> globals.yml/
+# passwords.yml/override SỐNG SÓT ngoài ý muốn, sai với cảnh báo "destroy sẽ xoá cả cấu hình" ở
+# trên. Fix: play 2 (hosts: localhost, connection: local — implicit host Ansible luôn có, không cần
+# khai trong inventory) xoá icinga_etc_dir NGAY TRÊN MÁY ĐANG CHẠY ansible-playbook, tức đúng
+# $CONFIG_DIR của CLI bất kể control node có trùng vị trí với 1 host trong inventory hay không. Nếu
+# trùng (như lab hiện tại) thì play 2 chỉ xoá lại đúng path play 1 đã xoá — vô hại (idempotent).
+# =============================================================================
+- name: Destroy icinga-ansible stack (containers + data)
+  hosts: all_hosts
+  become: true
+  gather_facts: false
+  # File này nằm trong playbooks/ (không cùng cấp ansible/icinga-ansible.yml) nên
+  # group_vars/all.yml không tự nạp -> khai rõ để có icinga_base_dir/docker_network_name.
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    confirm: ""
+  tasks:
+    - name: Chặn nếu chưa xác nhận đúng cụm từ
+      ansible.builtin.fail:
+        msg: >-
+          destroy sẽ XOÁ TOÀN BỘ container + dữ liệu (DB, PKI) LẪN CẤU HÌNH ({{ icinga_etc_dir }}:
+          mọi override) trên host trong inventory này — KHÔNG HỒI PHỤC ĐƯỢC (trừ khi có backup
+          riêng). globals.yml + passwords.yml trên deployment node được GIỮ LẠI (deploy thẳng lại
+          được, không cần init-config/genpwd). Chạy lại kèm đúng cụm xác nhận:
+          icinga-ansible destroy -e confirm=yes-i-really-really-mean-it
+      when: confirm != 'yes-i-really-really-mean-it'
+      run_once: true
+
+    # keep_volumes: false — dọn cả anonymous volume đi kèm container (nếu có, vd image khai VOLUME
+    # mà không được mount tường minh) — phòng ngừa, KHÔNG phải nguồn rò rỉ chính (xem bug thật ở
+    # roles/icinga2 + roles/icingadb: "docker create" tạo container TẠM lúc deploy, không phải các
+    # container tên cố định ở đây, mới là nơi thật sự tạo anonymous volume mồ côi).
+    - name: Dừng & xoá container icinga-ansible (nếu có)
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: absent
+        force_kill: true
+        keep_volumes: false
+      loop:
+        - icingaweb2
+        - icingaweb2-director-daemon
+        - icingadb
+        - icinga2
+        - icingadb-redis
+        - mariadb
+        - haproxy
+        - keepalived
+      ignore_errors: true
+
+    - name: Xoá thư mục dữ liệu ({{ icinga_base_dir }})
+      ansible.builtin.file:
+        path: "{{ icinga_base_dir }}"
+        state: absent
+
+    # KHÔNG xoá NGUYÊN icinga_etc_dir nữa (khác trước) — xoá TỪNG MỤC bên trong, GIỮ LẠI
+    # globals.yml/passwords.yml (xem giải thích đầy đủ ở header). Không tái tạo thư mục rỗng sau khi
+    # xoá (khác icinga_base_dir ở dưới) — nếu icinga_etc_dir không tồn tại thư mục vẫn còn nguyên vì
+    # ta chỉ xoá NỘI DUNG, không xoá chính thư mục cha.
+    - name: "Kiểm tra {{ icinga_etc_dir }} có tồn tại không (tránh find fail nếu đã bị xoá từ trước)"
+      ansible.builtin.stat:
+        path: "{{ icinga_etc_dir }}"
+      register: _etc_dir_stat
+
+    - name: "Liệt kê nội dung cấp cao nhất của {{ icinga_etc_dir }}"
+      ansible.builtin.find:
+        paths: "{{ icinga_etc_dir }}"
+        file_type: any
+        hidden: true
+      register: _etc_top_entries
+      when: _etc_dir_stat.stat.exists
+
+    - name: "Xoá mọi thứ trong {{ icinga_etc_dir }}, GIỮ LẠI globals.yml + passwords.yml"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ _etc_top_entries.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when:
+        - _etc_dir_stat.stat.exists
+        - (item.path | basename) not in ['globals.yml', 'passwords.yml']
+
+    # Tái tạo lại ĐÚNG cây thư mục state mà roles/common (tag bootstrap) tạo — CỐ Ý (2026-07-22,
+    # sau khi tách "deploy" khỏi "bootstrap-servers", nhận ra hệ quả không lường trước: destroy xoá
+    # sạch icinga_base_dir + docker network, mà "deploy" giờ không tự tạo lại 2 thứ đó nữa (đã
+    # chuyển hẳn sang tag "bootstrap") -> "destroy" rồi "deploy" thẳng bị lỗi thư mục/network không
+    # tồn tại, phải nhớ chạy "bootstrap-servers" lại — khác kỳ vọng kiểu kolla-ansible (destroy của
+    # kolla không đụng tới package/network do bootstrap tạo, nên deploy thẳng vẫn chạy được). Fix:
+    # "destroy" tự tái tạo lại đúng những gì nó vừa xoá (thư mục state rỗng — same danh sách với
+    # roles/common/tasks/main.yml, KHÔNG đụng docker network nữa) — giữ đúng tinh thần "destroy dọn
+    # sạch dữ liệu" nhưng không kéo theo yêu cầu bootstrap lại.
+    - name: Tái tạo cây thư mục state rỗng (đồng bộ danh sách với roles/common)
+      ansible.builtin.file:
+        path: "{{ icinga_base_dir }}/{{ item }}"
+        state: directory
+        mode: "0750"
+      loop:
+        - icinga2/etc
+        - icinga2/var
+        - icinga2/pki
+        - icingadb-redis
+        - icingadb
+        - icingaweb2
+        - mariadb
+
+    # KHÔNG xoá docker network "{{ docker_network_name }}" nữa (trước đây có) — network do
+    # bootstrap-servers tạo, không chứa dữ liệu cần "dọn sạch", xoá đi chỉ buộc phải bootstrap lại
+    # mà không có lợi ích gì (deploy sẽ tạo lại container mới nối vào network cũ bình thường).
+
+# -----------------------------------------------------------------------------
+# Play 2 — xoá $CONFIG_DIR TRÊN CHÍNH MÁY CHẠY ansible-playbook (control node), bất kể máy đó có
+# trùng với 1 host trong inventory hay không. Xem giải thích đầy đủ ở header. "confirm" tự có sẵn
+# xuyên suốt playbook (extra-var -e confirm=... áp dụng cho MỌI play trong cùng 1 lần chạy) — không
+# cần lặp lại task "Chặn nếu chưa xác nhận", chỉ cần gate đúng task xoá bằng when: là đủ an toàn.
+# -----------------------------------------------------------------------------
+- name: Destroy — xoá cấu hình trên control node (nơi chạy CLI, có thể KHÔNG nằm trong inventory)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    confirm: ""
+  tasks:
+    - name: "Kiểm tra $CONFIG_DIR ({{ icinga_etc_dir }}) có tồn tại không"
+      ansible.builtin.stat:
+        path: "{{ icinga_etc_dir }}"
+      register: _etc_dir_stat
+      when: confirm == 'yes-i-really-really-mean-it'
+
+    - name: "Liệt kê nội dung cấp cao nhất của $CONFIG_DIR"
+      ansible.builtin.find:
+        paths: "{{ icinga_etc_dir }}"
+        file_type: any
+        hidden: true
+      register: _etc_top_entries
+      when:
+        - confirm == 'yes-i-really-really-mean-it'
+        - _etc_dir_stat.stat.exists
+
+    - name: "Xoá mọi thứ trong $CONFIG_DIR, GIỮ LẠI globals.yml + passwords.yml"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ _etc_top_entries.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when:
+        - confirm == 'yes-i-really-really-mean-it'
+        - _etc_dir_stat.stat.exists
+        - (item.path | basename) not in ['globals.yml', 'passwords.yml']

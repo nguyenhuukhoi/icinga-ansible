@@ -1,0 +1,79 @@
+---
+# Tạo credential monitoring RIÊNG trên deployment node, cấp public key cho host đích và pin SSH
+# host keys. Không tái sử dụng key quản trị Ansible cho runtime checks.
+- name: Prepare check_by_ssh trust
+  hosts: all_hosts
+  become: true
+  gather_facts: false
+  vars:
+    monitor_key_dir: "{{ deploy_config_dir }}/icinga2/ssh"
+    monitor_private_key: "{{ monitor_key_dir }}/id_monitor"
+  pre_tasks:
+    - name: Tạo thư mục credential check_by_ssh trên deployment node
+      ansible.builtin.file:
+        path: "{{ monitor_key_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Tạo key Ed25519 riêng cho check_by_ssh nếu chưa có
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -q
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -C
+          - icinga-check-by-ssh
+          - -f
+          - "{{ monitor_private_key }}"
+        creates: "{{ monitor_private_key }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Đọc public key monitoring từ deployment node
+      ansible.builtin.slurp:
+        src: "{{ monitor_private_key }}.pub"
+      register: monitor_public_key_file
+      delegate_to: localhost
+      become: false
+
+  tasks:
+    - name: Cho phép key monitoring đăng nhập user ubuntu trên host đích
+      ansible.builtin.lineinfile:
+        path: /home/ubuntu/.ssh/authorized_keys
+        line: "{{ monitor_public_key_file.content | b64decode | trim }}"
+        state: present
+        create: true
+        owner: ubuntu
+        group: ubuntu
+        mode: "0600"
+
+    - name: Quét SSH host key từ deployment node
+      ansible.builtin.command:
+        argv: [ssh-keyscan, -T, "10", -H, "{{ ansible_host }}"]
+      register: monitor_host_key
+      changed_when: false
+      delegate_to: localhost
+      become: false
+
+  post_tasks:
+    - name: Ghi known_hosts riêng cho check_by_ssh
+      ansible.builtin.copy:
+        dest: "{{ monitor_key_dir }}/known_hosts"
+        content: >-
+          {{ ansible_play_hosts
+             | map('extract', hostvars, 'monitor_host_key')
+             | map(attribute='stdout')
+             | reject('equalto', '')
+             | join('\n') }}
+          {{ '\n' }}
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      run_once: true

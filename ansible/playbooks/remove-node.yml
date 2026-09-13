@@ -1,0 +1,69 @@
+# =============================================================================
+# remove-node.yml — Gỡ 1 satellite khỏi cluster (design 12.2). PHÁ HUỶ trên host bị gỡ.
+# Dùng: icinga-ansible remove-node -e target_host=<tên trong inventory> -e confirm=yes
+#
+# Chỉ xoá container icinga2 + dữ liệu TRÊN HOST BỊ GỠ (satellite không có redis/icingadb/web).
+# Sau khi chạy, PHẢI tự tay:
+#   1) Xoá host khỏi [satellite] (và satellite_zones[].members trong globals.yml nếu cần) + khỏi
+#      [all_hosts] trong file inventory.
+#   2) Chạy lại `icinga-ansible reconfigure` để master/satellite còn lại render lại zones.conf
+#      (hết endpoint/zone vừa gỡ) + tự reload.
+# =============================================================================
+- name: Chặn nếu chưa xác nhận / thiếu target_host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    confirm: false
+    target_host: ""
+  tasks:
+    - name: Kiểm tra tham số bắt buộc
+      ansible.builtin.fail:
+        msg: >-
+          remove-node cần: -e target_host=<tên host trong inventory, vd sat02> -e confirm=yes.
+          Đây là thao tác PHÁ HUỶ container+dữ liệu icinga2 TRÊN HOST ĐÓ.
+      when: not (confirm | bool) or (target_host | default('')) | length == 0
+
+- name: Xoá container + dữ liệu trên satellite bị gỡ
+  hosts: "{{ target_host }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Xác nhận host này thật sự thuộc [satellite] (an toàn — tránh gõ nhầm target_host)
+      ansible.builtin.assert:
+        that: inventory_hostname in groups['satellite']
+        fail_msg: "'{{ inventory_hostname }}' không thuộc nhóm [satellite] trong inventory — dừng lại."
+
+    - name: Dừng & xoá container icinga2 trên host này
+      community.docker.docker_container:
+        name: icinga2
+        state: absent
+        force_kill: true
+      ignore_errors: true
+
+    - name: Xoá dữ liệu cục bộ ({{ icinga_base_dir }}) — để add lại sạch sau này nếu cần
+      ansible.builtin.file:
+        path: "{{ icinga_base_dir }}"
+        state: absent
+
+    - name: Tạo lại thư mục gốc rỗng
+      ansible.builtin.file:
+        path: "{{ icinga_base_dir }}"
+        state: directory
+        mode: "0755"
+
+- name: Nhắc việc còn lại (đọc kỹ trước khi coi remove-node đã xong)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg:
+          - "Đã xoá container + dữ liệu trên '{{ target_host }}'."
+          - "VIỆC CÒN LẠI (tự làm, chưa tự động):"
+          - "  1) Xoá '{{ target_host }}' khỏi [satellite]/[all_hosts] trong inventory, và khỏi"
+          - "     satellite_zones[].members trong globals.yml nếu cần."
+          - "  2) Chạy: icinga-ansible reconfigure -i <inventory> — để cluster còn lại render lại"
+          - "     zones.conf (hết endpoint/zone '{{ target_host }}') + tự reload."

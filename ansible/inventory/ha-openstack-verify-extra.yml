@@ -1,0 +1,8 @@
+---
+# Lab-only overrides: the custom image is built and loaded locally on both masters.
+# A production deployment should replace this with an immutable image in a private registry.
+# Proxy endpoint is intentionally not committed; keep it in
+# /etc/icinga-ansible/globals.yml (preferably encrypted with Ansible Vault).
+custom_image_registry: "local"
+custom_image_overrides:
+  icinga2: "icinga2:2.16.5-openstack-verify"

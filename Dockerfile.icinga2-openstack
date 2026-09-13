@@ -1,0 +1,11 @@
+FROM icinga/icinga2:2.16.5
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv \
+    && python3 -m venv /opt/icinga-venv \
+    && /opt/icinga-venv/bin/pip install --no-cache-dir openstacksdk PyYAML \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+USER icinga

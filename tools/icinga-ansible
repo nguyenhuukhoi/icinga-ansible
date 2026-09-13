@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+# =============================================================================
+# icinga-ansible — CLI wrapper bọc ansible-playbook (phong cách kolla-ansible).
+#   Usage: icinga-ansible <command> [-i INVENTORY] [--limit HOSTS] [extra ansible args]
+#
+# QUAN TRỌNG (giống kolla-ansible): repo/tool và config KHÔNG chung chỗ.
+#   - Repo (code này) có thể nằm bất cứ đâu, move/clone lại tuỳ ý.
+#   - Config THẬT luôn ở đường dẫn OS cố định /etc/icinga-ansible (globals.yml,
+#     passwords.yml) — độc lập với repo, sống sót qua mọi lần move/redeploy code.
+#     Override bằng biến môi trường ICINGA_ANSIBLE_CONFIG_DIR nếu cần.
+#   - Lần đầu dùng: chạy 'icinga-ansible init-config' để sinh /etc/icinga-ansible
+#     từ template trong repo (etc/examples/), rồi 'genpwd' để điền secret ngẫu nhiên.
+# =============================================================================
+set -euo pipefail
+
+# CẢNH BÁO nếu chạy bằng root (2026-07-23, BUG THẬT đã tự gặp) — KHÔNG chặn cứng (all-in-one 1 host
+# với ansible_connection=local vẫn chạy được), chỉ cảnh báo vì đây là lỗi rất dễ mắc và khó hiểu khi
+# gặp: nếu inventory có SSH ra host KHÁC, chạy bằng root sẽ dùng nhầm /root/.ssh/ (thường không có
+# key/không được authorized trên host đích) thay vì key thật của user thường -> lỗi "unreachable"
+# khó debug. Ansible tự "become" (sudo) đúng lúc cần cho từng task rồi — không cần chạy cả lệnh này
+# bằng root/sudo.
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "!!! CẢNH BÁO: đang chạy icinga-ansible bằng ROOT (hoặc qua sudo)." >&2
+  echo "    Nếu inventory có SSH ra host khác, việc này sẽ dùng nhầm key SSH của root" >&2
+  echo "    (thường không có/không được authorized) thay vì key của user thường -> 'unreachable'." >&2
+  echo "    Ansible tự sudo (become) đúng lúc cần cho từng task rồi — hãy chạy lệnh này bằng" >&2
+  echo "    user thường có sudo (không cần mật khẩu), KHÔNG cần 'sudo icinga-ansible ...'." >&2
+  echo "" >&2
+fi
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"     # thư mục repo (code, di chuyển tự do)
+ANSIBLE_DIR="$HERE/ansible"
+EXAMPLES_DIR="$HERE/etc/examples"                            # template mặc định, đi kèm repo
+
+CONFIG_DIR="${ICINGA_ANSIBLE_CONFIG_DIR:-/etc/icinga-ansible}"   # config THẬT — cố định, ngoài repo
+PLAYBOOK="$ANSIBLE_DIR/icinga-ansible.yml"
+GLOBALS="$CONFIG_DIR/globals.yml"
+PASSWORDS="$CONFIG_DIR/passwords.yml"
+DEPLOY_CONFIG_DIR="$CONFIG_DIR/config"    # override tuỳ biến (giống /etc/kolla/config/<svc>) — mục 4.1 design.md
+
+INVENTORY="$ANSIBLE_DIR/inventory/all-in-one"
+EXTRA_ARGS=()
+LIMIT=""
+
+usage() {
+  cat <<EOF
+icinga-ansible <command> [options]
+
+Cấu hình (đọc/ghi ở \$CONFIG_DIR, mặc định /etc/icinga-ansible — override bằng
+env ICINGA_ANSIBLE_CONFIG_DIR):
+  init-config         Tạo \$CONFIG_DIR từ template (etc/examples/), không ghi đè nếu đã có
+  genpwd              Sinh passwords.yml với giá trị ngẫu nhiên mạnh (tự init-config nếu chưa có)
+  restore-config      Khôi phục \$CONFIG_DIR từ backup-full (--config-backup PATH) — dùng khi dựng
+                      lại hạ tầng mới, thay cho init-config+genpwd
+
+Vòng đời (2026-07-22: "deploy" KHÔNG còn tự chạy kèm "bootstrap-servers" nữa — 2 bước TÁCH HẲN.
+"bootstrap-servers" chỉ cần chạy 1 lần trên host HOÀN TOÀN MỚI — chưa từng cài Docker/chrony. "destroy"
+(2026-07-22, sửa lại) KHÔNG còn xoá docker network/cấu trúc thư mục nữa (giữ nguyên, giống
+kolla-ansible), nên sau "destroy" chỉ cần "deploy" thẳng, KHÔNG cần "bootstrap-servers" lại):
+  bootstrap-servers   Cài Docker, chrony, tạo thư mục/mạng — chỉ cần 1 lần trên host mới
+  prepare-check-by-ssh Tạo key monitoring riêng, authorize trên target và pin known_hosts
+  prechecks           Kiểm tra tiền deploy (topology, version, cổng)
+  pull                Kéo image về host
+  deploy              Triển khai toàn bộ stack (giả định host ĐÃ bootstrap ít nhất 1 lần)
+  reconfigure         Render lại config & reload service thay đổi
+  upgrade-plan        Dry-run: bảng version CURRENT->TARGET (giống kubeadm upgrade plan)
+  upgrade             Nâng cấp rolling (sửa icinga_image_versions trong globals.yml rồi chạy)
+  rollback            Quay về version cũ + restore DB pre-upgrade (-e confirm=yes)
+  post-deploy         In thông tin truy cập / admin
+  check               Health-check cluster + web + DB
+  destroy             Gỡ container + dữ liệu, giữ nguyên Docker/network (có xác nhận, giống kolla-ansible:
+                      -e confirm=yes-i-really-really-mean-it)
+
+Node ops (P3+):
+  add-node | remove-node        Thêm/xoá satellite
+  add-master | remove-master    Thêm/xoá master
+
+DB ops:
+  mariadb-backup      Backup DB (kèm snapshot CA/PKI)
+  mariadb-recovery    Khôi phục DB / cụm Galera
+  recover-db-only     Sau khi restore bản DB duy nhất còn lại: lấy environment ID cũ từ DB,
+                      seed giống nhau lên mọi master và xoá Redis state tạm (-e confirm=yes)
+
+Backup/restore toàn hệ thống (dựng lại hạ tầng mới sau sự cố mất hết — design.md mục 10.6):
+  backup-full         Backup config (deployment node) + DB+PKI + icingaweb2 config (mọi master),
+                      gom về /var/backups/icinga-ansible-config/ (CỐ Ý ngoài \$CONFIG_DIR — destroy
+                      không đụng tới)
+  restore-pki         (tuỳ chọn, giữa bootstrap-servers và deploy) Pre-seed CA cũ lên ca_host để
+                      giữ nguyên định danh PKI — bỏ qua bước này = deploy tự tạo CA mới hoàn toàn
+  # Custom image (design.md mục 9.6): icinga-ansible KHÔNG tự build — tự build/push bằng cách nào
+  # cũng được, rồi khai custom_image_registry + custom_image_overrides trong globals.yml.
+  # Quy trình đầy đủ: restore-config --config-backup PATH -> bootstrap-servers -> [restore-pki
+  # -e pki_backup=PATH -e confirm=yes] -> deploy -> mariadb-recovery -e recovery_mode=restore-backup
+  # -e confirm=yes (copy sẵn file db-full-*.xb.gz lên node DB chính trước bước cuối này)
+
+Options:
+  -i, --inventory PATH   inventory (mặc định: all-in-one)
+      --limit HOSTS      giới hạn host (ansible --limit)
+      --config-backup PATH   dùng với restore-config
+  các tham số khác được chuyển thẳng cho ansible-playbook.
+EOF
+}
+
+# --- parse args --------------------------------------------------------------
+[[ $# -lt 1 ]] && { usage; exit 1; }
+COMMAND="$1"; shift
+CONFIG_BACKUP=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -i|--inventory)
+      [[ $# -ge 2 ]] || { echo "$1 cần một đường dẫn inventory." >&2; exit 2; }
+      INVENTORY="$2"; shift 2;;
+    --limit)
+      [[ $# -ge 2 ]] || { echo "$1 cần danh sách host." >&2; exit 2; }
+      LIMIT="$2"; shift 2;;
+    --config-backup)
+      [[ $# -ge 2 ]] || { echo "$1 cần đường dẫn file backup." >&2; exit 2; }
+      CONFIG_BACKUP="$2"; shift 2;;   # dùng cho "restore-config" — xem bên dưới
+    -h|--help)       usage; exit 0;;
+    *)               EXTRA_ARGS+=("$1"); shift;;
+  esac
+done
+
+# Help phải hoạt động ngay cả trên máy chưa init-config. Trước đây "icinga-ansible help" đi qua
+# guard globals.yml bên dưới và fail, trong khi "-h/--help" chỉ tình cờ thoát sớm lúc parse args.
+[[ "$COMMAND" == "help" ]] && { usage; exit 0; }
+
+# inventory tương đối -> tuyệt đối theo THƯ MỤC ĐANG ĐỨNG lúc gọi lệnh (CWD), giống hệt
+# kolla-ansible (quickstart chính thức: "cp .../all-in-one ." rồi "kolla-ansible deploy -i
+# ./all-in-one" — resolve theo CWD, KHÔNG theo repo root). Đổi lại 2026-07-23 theo yêu cầu người
+# dùng ("kg dùng đường dẫn, làm như kolla ansible") — trước đây quy relative path về $HERE (repo
+# root) khiến người dùng phải gõ "-i ansible/inventory/<tên>" dù đang đứng ngay chỗ đặt file
+# inventory của họ (vd copy ra ~/my-cluster rồi chỉ muốn gõ "-i my-cluster"). Chỉ ảnh hưởng path
+# TƯƠNG ĐỐI người dùng tự truyền qua -i — path tuyệt đối giữ nguyên, INVENTORY mặc định
+# ($ANSIBLE_DIR/inventory/all-in-one) đã tuyệt đối sẵn nên không đổi hành vi khi không truyền -i.
+[[ "$INVENTORY" != /* ]] && INVENTORY="$(pwd)/$INVENTORY"
+
+# tạo $CONFIG_DIR từ template nếu chưa có (không ghi đè file đã tồn tại)
+init_config() {
+  if [[ ! -d "$CONFIG_DIR" ]]; then
+    echo "Tạo $CONFIG_DIR (cần sudo vì nằm trong /etc)..."
+    sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 0750 "$CONFIG_DIR"
+  fi
+  if [[ ! -f "$GLOBALS" ]]; then
+    cp "$EXAMPLES_DIR/globals.yml" "$GLOBALS"
+    echo "Đã tạo $GLOBALS từ template — sửa lại theo nhu cầu."
+  fi
+  if [[ ! -f "$PASSWORDS" && ! -f "$CONFIG_DIR/passwords.yml.example" ]]; then
+    cp "$EXAMPLES_DIR/passwords.yml.example" "$CONFIG_DIR/passwords.yml.example"
+  fi
+}
+
+[[ "$COMMAND" == "init-config" ]] && { init_config; echo "$CONFIG_DIR sẵn sàng."; exit 0; }
+
+# restore-config: đặc biệt như init-config/genpwd — KHÔNG cần $GLOBALS có sẵn trước, vì mục đích
+# CHÍNH LÀ khôi phục $CONFIG_DIR (globals.yml/passwords.yml/mọi override) từ file backup do
+# "backup-full" tạo ra (xem playbooks/backup-full.yml) — dùng khi dựng lại hạ tầng mới sau sự cố mất
+# hết dữ liệu (2026-07-24, theo yêu cầu người dùng). Thuần bash, không qua Ansible.
+[[ "$COMMAND" == "restore-config" ]] && {
+  if [[ -z "$CONFIG_BACKUP" ]]; then
+    echo "Cần --config-backup <đường dẫn file config-*.tar.gz> (xem 'backup-full')." >&2
+    exit 1
+  fi
+  if [[ ! -f "$CONFIG_BACKUP" ]]; then
+    echo "Không tìm thấy file: $CONFIG_BACKUP" >&2
+    exit 1
+  fi
+  if [[ -f "$GLOBALS" ]]; then
+    echo "!!! $CONFIG_DIR đã có globals.yml — restore-config sẽ GHI ĐÈ TOÀN BỘ" >&2
+    echo "    (globals.yml, passwords.yml, mọi override) bằng nội dung trong backup." >&2
+    if [[ "${CONFIRM:-}" != "yes-i-really-mean-it" ]]; then
+      echo "    Chạy lại kèm CONFIRM=yes-i-really-mean-it để xác nhận, vd:" >&2
+      echo "    CONFIRM=yes-i-really-mean-it icinga-ansible restore-config --config-backup $CONFIG_BACKUP" >&2
+      exit 1
+    fi
+  fi
+  # "--strip-components=1": file backup do "backup-full" tạo (community.general.archive) tự bọc 1
+  # lớp thư mục top-level TRÙNG TÊN thư mục cuối cùng của icinga_etc_dir (vd "icinga-ansible/") bên
+  # trong tar — không strip sẽ giải nén lệch thành $CONFIG_DIR/icinga-ansible/... thay vì thẳng
+  # $CONFIG_DIR/... (bug thật đã gặp 2026-07-24 lúc test drill restore thật).
+  sudo mkdir -p "$CONFIG_DIR"
+  sudo tar -xzf "$CONFIG_BACKUP" -C "$CONFIG_DIR" --strip-components=1
+  sudo chown -R "$(id -un):$(id -gn)" "$CONFIG_DIR"
+  echo "Đã restore cấu hình vào $CONFIG_DIR."
+  echo "Tiếp theo: kiểm tra lại $GLOBALS (đổi IP/hostname nếu hạ tầng mới khác hạ tầng cũ), rồi"
+  echo "  bootstrap-servers -> (tuỳ chọn) restore-pki nếu muốn giữ PKI cũ -> deploy -> mariadb-recovery"
+  echo "  -e recovery_mode=restore-backup để khôi phục dữ liệu DB. Xem QUICKSTART.md mục backup/restore."
+  exit 0
+}
+
+[[ "$COMMAND" == "genpwd" ]] || {
+  # các lệnh khác cần config đã tồn tại — báo lỗi rõ ràng thay vì lỗi Jinja/Ansible khó hiểu
+  if [[ ! -f "$GLOBALS" ]]; then
+    echo "Chưa có $GLOBALS. Chạy: icinga-ansible init-config" >&2
+    exit 1
+  fi
+}
+
+# vault + secrets nếu có
+VAULT_ARGS=()
+PASSWORD_ARGS=()
+if [[ -f "$PASSWORDS" ]]; then
+  # Config secrets là baseline; -e người dùng truyền phải nằm SAU để có thể
+  # rotate/override theo đúng precedence chuẩn của ansible-playbook.
+  PASSWORD_ARGS+=("-e" "@$PASSWORDS")
+  if head -1 "$PASSWORDS" | grep -qF "\$ANSIBLE_VAULT"; then
+    VAULT_ARGS+=("--ask-vault-pass")
+  fi
+fi
+[[ -n "$LIMIT" ]] && EXTRA_ARGS+=("--limit" "$LIMIT")
+
+run() {   # run <ansible extra args...>
+  cd "$ANSIBLE_DIR"
+  ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
+    -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "$@" "${EXTRA_ARGS[@]}"
+}
+
+case "$COMMAND" in
+  bootstrap-servers) run --tags bootstrap ;;
+  prepare-check-by-ssh)
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/prepare-check-by-ssh.yml" \
+      -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
+      "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+  prechecks)         run --tags prechecks ;;
+  deploy)            run --tags deploy ;;
+  reconfigure)       run --tags deploy -e icinga_action=reconfigure ;;
+  pull)
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/pull.yml" \
+      -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+  post-deploy)
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/post-deploy.yml" \
+      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+  check)
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/check.yml" \
+      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+  destroy)
+    # KHÔNG dùng run() ở đây: run() luôn chèn $PLAYBOOK (icinga-ansible.yml) mặc định,
+    # nếu gộp chung sẽ chạy CẢ deploy lẫn destroy trong 1 lệnh. destroy chạy playbook riêng.
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/destroy.yml" \
+      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+
+  upgrade-plan)
+    # Dry-run, read-only. Playbook riêng (không phải $PLAYBOOK site).
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/upgrade-plan.yml" \
+      -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+  upgrade)
+    # Nâng cấp rolling theo icinga_image_versions MỚI trong globals.yml (tự backup pre-upgrade).
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/upgrade.yml" \
+      -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+  rollback)
+    # Quay về version CŨ (sửa globals.yml về cũ trước) + restore DB pre-upgrade. Bắt buộc -e confirm=yes.
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/rollback.yml" \
+      -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+
+  add-master|add-node)
+    # Thêm host: host đã có trong inventory (nhóm [master] hoặc [satellite]) rồi chạy lại deploy —
+    # role đã idempotent, tự nhận ra host chưa có cert/container và tự enroll, đồng thời tự render
+    # lại + reload zones.conf trên các host CŨ để chúng biết endpoint mới (đã verify hành vi này
+    # thật với master2/sat01/sat02 — không cần playbook riêng).
+    # LƯU Ý (2026-07-22, "deploy" không còn tự bootstrap): nếu host MỚI THÊM chưa từng chạy
+    # bootstrap-servers (chưa có Docker/chrony/mạng), phải tự chạy "bootstrap-servers" TRƯỚC lệnh
+    # này (trước đây "deploy" tự lo hộ, giờ tách hẳn — xem usage()).
+    run --tags deploy
+    ;;
+  remove-master|remove-node)
+    # KHÔNG dùng run(): playbook riêng, không phải $PLAYBOOK mặc định.
+    # Bắt buộc: -e target_host=<tên trong inventory> -e confirm=yes
+    cd "$ANSIBLE_DIR"
+    PB="remove-master.yml"; [[ "$COMMAND" == "remove-node" ]] && PB="remove-node.yml"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/$PB" \
+      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    echo ""
+    echo "!!! Nhớ: xoá host khỏi inventory rồi chạy 'icinga-ansible reconfigure' để đồng bộ"
+    echo "    zones.conf trên các host còn lại (xem thông báo cuối playbook ở trên)."
+    ;;
+  mariadb-backup)    run --tags mariadb -e icinga_action=backup ;;
+  mariadb-recovery)
+    # KHÔNG dùng run(): playbook riêng, không phải $PLAYBOOK mặc định. Bắt buộc:
+    # -e recovery_mode=restore-backup|recover-cluster -e confirm=yes (xem design.md 10.4).
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/mariadb-recovery.yml" \
+      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+  recover-db-only)
+    # Chạy SAU mariadb-recovery restore-backup khi chỉ còn DB backup, không còn CA/PKI/runtime
+    # của master cũ. Playbook dừng publisher/consumer, lấy environment ID từ DB đã restore,
+    # seed cùng ID lên mọi master, FLUSHALL Redis tạm rồi khởi động lại theo đúng thứ tự.
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/recover-db-only.yml" \
+      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+
+  backup-full)
+    # KHÔNG dùng run(): playbook riêng (không phải $PLAYBOOK site). Kết quả gom về
+    # icinga_config_backup_dir (mặc định /var/backups/icinga-ansible-config/, CỐ Ý ngoài $CONFIG_DIR
+    # — xem group_vars/all.yml, "destroy" chỉ xoá nội dung $CONFIG_DIR nên không bao giờ đụng tới đây)
+    # (config+icingaweb2) và mariadb_backup.destination trên node DB chính (DB+PKI) — xem design.md
+    # mục 10.6, playbooks/backup-full.yml.
+    # icinga_action + backup_tag truyền tường minh để role chỉ chạy nhánh backup.
+    cd "$ANSIBLE_DIR"
+    BACKUP_TS="$(date +%Y%m%d-%H%M%S)"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/backup-full.yml" \
+      -e "@$GLOBALS" -e "backup_ts=$BACKUP_TS" -e icinga_action=backup -e backup_tag=full \
+      "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+  restore-pki)
+    # KHÔNG dùng run(): playbook riêng. Bắt buộc -e pki_backup=<path pki-*.tar.gz đã copy lên
+    # ca_host> -e confirm=yes. Chạy SAU "bootstrap-servers", TRƯỚC "deploy" lần đầu trên hạ tầng
+    # MỚI — xem design.md mục 10.6, playbooks/restore-pki.yml. Bỏ qua bước này = PKI mới hoàn toàn
+    # (mặc định, "deploy" tự tạo CA mới như bình thường).
+    cd "$ANSIBLE_DIR"
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/restore-pki.yml" \
+      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+
+  genpwd)
+    init_config
+    if [[ -f "$PASSWORDS" ]]; then
+      echo "$PASSWORDS đã tồn tại — không ghi đè."; exit 1
+    fi
+    cp "$CONFIG_DIR/passwords.yml.example" "$PASSWORDS"
+    # thay mọi CHANGE_ME bằng chuỗi ngẫu nhiên 32 ký tự
+    while grep -q 'CHANGE_ME' "$PASSWORDS"; do
+      RAND="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | cut -c1-32)"
+      sed -i "0,/CHANGE_ME/s//$RAND/" "$PASSWORDS"
+    done
+    chmod 0600 "$PASSWORDS"
+    echo "Đã sinh $PASSWORDS. Mã hoá bằng: ansible-vault encrypt $PASSWORDS"
+    ;;
+
+  -h|--help|help)    usage ;;
+  *) echo "Lệnh không hợp lệ: $COMMAND"; usage; exit 1 ;;
+esac

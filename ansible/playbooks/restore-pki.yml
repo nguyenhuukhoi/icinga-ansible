@@ -1,0 +1,117 @@
+# =============================================================================
+# restore-pki.yml — Pre-seed CA CŨ (từ file pki-*.tar.gz do "backup-full"/"mariadb-backup" tạo ra)
+# vào ca_host TRƯỚC KHI "deploy" chạy lần đầu trên hạ tầng MỚI — giữ nguyên định danh PKI cũ (mọi
+# satellite/master2/client re-enroll vẫn được ký bởi ĐÚNG CA cũ, không đổi trust chain).
+#
+# Thứ tự BẮT BUỘC: bootstrap-servers -> restore-pki (playbook này) -> deploy.
+# Bỏ qua playbook này = PKI HOÀN TOÀN MỚI (mặc định, đơn giản hơn — "deploy" tự "icinga2 node setup
+# --master" tạo CA mới như bình thường, không cần thao tác gì thêm).
+#
+# Cơ chế (ĐÃ VERIFY THẬT bằng test cô lập trước khi viết playbook này — không suy đoán, xem
+# design.md mục 10.6): "icinga2 node setup --master" tự phát hiện ca.crt/ca.key đã tồn tại tại
+# {{ ic_data }}/var/lib/icinga2/ca/ ("Found CA, skipping and using the existing one"), KHÔNG tạo CA
+# mới, chỉ tự ký cert MỚI cho đúng --cn của ca_host bằng CA đã có. roles/icinga2/tasks/main.yml đã
+# sửa gate (2026-07-24) để KHÔNG skip bước "node setup --master" chỉ vì ca.crt đã tồn tại — gate
+# đúng theo cert RIÊNG của ca_host (chưa tồn tại trên host MỚI dù CA đã pre-seed).
+# =============================================================================
+
+- name: Restore PKI cũ lên ca_host (trước deploy lần đầu)
+  hosts: all_hosts
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    confirm: ""
+  tasks:
+    - name: Chặn nếu thiếu pki_backup hoặc chưa xác nhận
+      ansible.builtin.fail:
+        msg: >-
+          Cần -e pki_backup=<đường dẫn file pki-*.tar.gz, đã copy sẵn lên {{ ca_host }}> và
+          -e confirm=yes. Playbook này chỉ dùng cho ca_host HOÀN TOÀN MỚI, ngay sau
+          bootstrap-servers, TRƯỚC deploy lần đầu — sẽ fail nếu ca_host đã có CA (tránh ghi đè CA
+          đang dùng thật của cụm đang chạy).
+      when: (pki_backup is not defined) or (confirm != 'yes')
+      run_once: true
+
+    - name: Xác định đường dẫn CA đích (giống ic_data trong roles/icinga2)
+      ansible.builtin.set_fact:
+        _restore_ca_dir: "{{ icinga_base_dir }}/icinga2/data/var/lib/icinga2/ca"
+      when: inventory_hostname == ca_host
+
+    - name: Kiểm tra ca_host ĐÃ có CA chưa (không ghi đè CA đang dùng thật)
+      ansible.builtin.stat:
+        path: "{{ _restore_ca_dir }}/ca.crt"
+      register: _existing_ca_stat
+      when: inventory_hostname == ca_host
+
+    - name: Fail nếu ca_host đã có CA rồi
+      ansible.builtin.fail:
+        msg: >-
+          {{ ca_host }} đã có CA sẵn ({{ _restore_ca_dir }}/ca.crt tồn tại) — nghĩa là đã deploy
+          trước đó rồi, KHÔNG phải host mới. restore-pki chỉ chạy được ngay sau
+          bootstrap-servers, trước deploy lần đầu. Muốn thay CA của cụm đang chạy là việc khác,
+          KHÔNG được playbook này hỗ trợ (rủi ro cao, cần quy trình riêng).
+      when:
+        - inventory_hostname == ca_host
+        - _existing_ca_stat.stat.exists
+
+    - name: Kiểm tra file pki_backup có tồn tại trên ca_host không
+      ansible.builtin.stat:
+        path: "{{ pki_backup }}"
+      register: _pki_backup_stat
+      when: inventory_hostname == ca_host
+
+    - name: Fail nếu không tìm thấy pki_backup trên ca_host
+      ansible.builtin.fail:
+        msg: >-
+          Không tìm thấy {{ pki_backup }} trên {{ ca_host }} — copy file pki-*.tar.gz (từ
+          backup-full/mariadb-backup) lên ĐÚNG {{ ca_host }} trước khi chạy lại (scp/rsync trực
+          tiếp lên host này, KHÔNG phải deployment node).
+      when:
+        - inventory_hostname == ca_host
+        - not _pki_backup_stat.stat.exists
+
+    - name: Tạo thư mục CA đích
+      ansible.builtin.file:
+        path: "{{ _restore_ca_dir }}"
+        state: directory
+        owner: "5665"
+        group: "5665"
+        mode: "0750"
+      when: inventory_hostname == ca_host
+
+    - name: Giải nén pki_backup vào thư mục CA đích
+      ansible.builtin.unarchive:
+        src: "{{ pki_backup }}"
+        dest: "{{ _restore_ca_dir }}"
+        remote_src: true
+        owner: "5665"
+        group: "5665"
+        extra_opts: ["--strip-components=1"]
+      when: inventory_hostname == ca_host
+
+    - name: Xác nhận ca.crt/ca.key đã đúng chỗ sau khi giải nén
+      ansible.builtin.stat:
+        path: "{{ _restore_ca_dir }}/ca.crt"
+      register: _restored_ca_stat
+      when: inventory_hostname == ca_host
+
+    - name: Fail nếu giải nén xong vẫn không thấy ca.crt (cấu trúc tar khác kỳ vọng)
+      ansible.builtin.fail:
+        msg: >-
+          Giải nén {{ pki_backup }} xong nhưng KHÔNG thấy {{ _restore_ca_dir }}/ca.crt — cấu trúc
+          file tar khác kỳ vọng (mong đợi ca.crt/ca.key nằm ngay top-level trong tar, dùng
+          --strip-components=1 nếu tar có 1 lớp thư mục cha). Kiểm tra tay bằng
+          "tar -tzf {{ pki_backup }}".
+      when:
+        - inventory_hostname == ca_host
+        - not _restored_ca_stat.stat.exists
+
+    - name: In xác nhận thành công
+      ansible.builtin.debug:
+        msg: >-
+          Đã restore CA cũ vào {{ ca_host }} ({{ _restore_ca_dir }}). Giờ chạy 'deploy' bình
+          thường — "icinga2 node setup --master" sẽ tự phát hiện + dùng CA này, KHÔNG tạo CA mới.
+      when: inventory_hostname == ca_host
+      run_once: true

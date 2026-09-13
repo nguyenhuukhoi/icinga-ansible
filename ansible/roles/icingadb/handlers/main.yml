@@ -1,0 +1,11 @@
+---
+- name: Reload icingadb
+  ansible.builtin.command: docker restart icingadb
+  changed_when: true
+  # Khi config được render lần đầu, docker_container ở cuối role đã khởi động daemon bằng đúng file
+  # mới. Restart thêm ở cuối play có thể cắt initial config sync giữa chừng, để lại dữ liệu nửa vời
+  # và khiến lần sync kế tiếp retry vô hạn vì duplicate primary key. Chỉ restart khi container đã
+  # tồn tại và task docker_container không vừa create/recreate nó.
+  when:
+    - _icingadb_container is defined
+    - not (_icingadb_container.changed | default(false))

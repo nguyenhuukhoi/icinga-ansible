@@ -1,0 +1,100 @@
+---
+# Cứu cụm Galera chết (mọi node dừng/crash) mà KHÔNG cần backup — dữ liệu vẫn còn nguyên trên đĩa
+# (design.md mục 10.4 "Recover cụm chết"). Tự động hoá đúng quy trình đã làm TAY thành công trong lúc
+# verify Galera cluster thật (2026-07-21): dừng hết -> đọc grastate.dat mọi node -> chọn node
+# safe_to_bootstrap:1 (hoặc seqno cao nhất nếu không node nào có cờ đó) -> bootstrap đúng node đó ->
+# các node còn lại join lại (IST, không mất data vì datadir vẫn còn).
+#
+# Gọi qua: ansible/playbooks/mariadb-recovery.yml -e recovery_mode=recover-cluster -e confirm=yes
+# KHÔNG xoá dữ liệu (khác hẳn restore.yml) — nhưng vẫn confirm-gated vì dừng/khởi động lại container
+# đang chạy có thể gây gián đoạn.
+
+- name: Chặn nếu chưa xác nhận
+  ansible.builtin.fail:
+    msg: >-
+      recover-cluster sẽ dừng + khởi động lại container mariadb trên MỌI node [galera] để cứu cụm chết.
+      Chạy lại kèm xác nhận: icinga-ansible mariadb-recovery -e recovery_mode=recover-cluster -e confirm=yes
+  when: not (confirm | default(false) | bool)
+  run_once: true
+
+- name: Xác định đường dẫn MariaDB
+  ansible.builtin.set_fact:
+    mariadb_etc: "{{ icinga_etc_dir }}/mariadb"
+    mariadb_data: "{{ icinga_base_dir }}/mariadb/data"
+
+- name: Dừng container mariadb (mọi node galera, nếu còn chạy)
+  community.docker.docker_container:
+    name: mariadb
+    state: stopped
+  ignore_errors: true
+
+- name: Đọc grastate.dat từng node
+  ansible.builtin.slurp:
+    src: "{{ mariadb_data }}/grastate.dat"
+  register: _grastate_raw
+
+- name: Parse seqno + safe_to_bootstrap từ grastate.dat (mỗi host tự parse của chính nó)
+  ansible.builtin.set_fact:
+    _grastate_seqno: "{{ (_grastate_raw.content | b64decode | regex_search('seqno:\\s*(-?\\d+)', '\\1'))[0] | int }}"
+    _grastate_safe: "{{ (_grastate_raw.content | b64decode | regex_search('safe_to_bootstrap:\\s*(\\d+)', '\\1'))[0] | int }}"
+
+- name: In grastate từng node (để log lại quyết định chọn node bootstrap)
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: seqno={{ _grastate_seqno }} safe_to_bootstrap={{ _grastate_safe }}"
+
+# Tính 1 LẦN (run_once chạy trên host đầu tiên của batch = groups['galera'][0] vì play không serial) —
+# ưu tiên node có safe_to_bootstrap=1 (Galera tự đánh dấu lúc cụm tan rã, đáng tin nhất); nếu KHÔNG
+# node nào có cờ đó thì chọn node seqno cao nhất. Dùng {% set %}/namespace vì cần "tìm phần tử thoả
+# điều kiện qua nhiều host" — selectattr không lọc được list string thuần theo giá trị tra qua hostvars.
+- name: Chọn node bootstrap để cứu cụm (tính 1 lần, dùng hostvars mọi node)
+  ansible.builtin.set_fact:
+    mariadb_bootstrap_host: >-
+      {%- set safe_pick = namespace(host='') -%}
+      {%- for h in groups['galera'] -%}
+        {%- if safe_pick.host == '' and hostvars[h]._grastate_safe == 1 -%}
+          {%- set safe_pick.host = h -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- if safe_pick.host != '' -%}
+        {{ safe_pick.host }}
+      {%- else -%}
+        {%- set best = namespace(host=groups['galera'][0], seqno=hostvars[groups['galera'][0]]._grastate_seqno) -%}
+        {%- for h in groups['galera'] -%}
+          {%- if hostvars[h]._grastate_seqno > best.seqno -%}
+            {%- set best.host = h -%}
+            {%- set best.seqno = hostvars[h]._grastate_seqno -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ best.host }}
+      {%- endif -%}
+  run_once: true
+
+- name: Đồng bộ mariadb_bootstrap_host cho mọi host (run_once chỉ set trên 1 host)
+  ansible.builtin.set_fact:
+    mariadb_bootstrap_host: "{{ hostvars[groups['galera'][0]].mariadb_bootstrap_host }}"
+  when: inventory_hostname != groups['galera'][0]
+
+- name: In rõ node được chọn làm bootstrap (để log lại, tránh recover nhầm)
+  ansible.builtin.debug:
+    msg: "Chọn {{ mariadb_bootstrap_host }} làm node bootstrap cứu cụm."
+  run_once: true
+
+# Nếu node được chọn KHÔNG tự có safe_to_bootstrap=1 (nghĩa là chọn qua nhánh seqno cao nhất, không
+# phải node Galera tự đánh dấu an toàn) — MariaDB sẽ TỪ CHỐI --wsrep-new-cluster giống hệt bug đã gặp
+# lúc verify thật (2026-07-21: "It may not be safe to bootstrap..."). Đây là lúc OPERATOR (script này,
+# sau khi đã so sánh seqno mọi node) chủ động ghi đè cờ — đúng thủ tục chính thức Galera khi người vận
+# hành xác nhận thủ công node nào an toàn nhất, không phải bỏ qua an toàn bừa bãi.
+- name: Ghi safe_to_bootstrap=1 nếu node được chọn qua nhánh seqno (chưa tự có cờ đó)
+  ansible.builtin.replace:
+    path: "{{ mariadb_data }}/grastate.dat"
+    regexp: 'safe_to_bootstrap:\s*\d+'
+    replace: "safe_to_bootstrap: 1"
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - _grastate_safe != 1
+
+# ---------- Bootstrap node được chọn + các node còn lại join lại (IST, không mất data) ----------
+- name: Bootstrap node được chọn + các node còn lại join
+  ansible.builtin.include_tasks: _bootstrap_and_join.yml
+  vars:
+    mariadb_force_fresh_bootstrap: true

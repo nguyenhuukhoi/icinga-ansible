@@ -1,0 +1,116 @@
+---
+# migrate_schema.yml — áp SQL migration cho DB nào CẦN, chạy 1 LẦN trên ca_host (Galera tự replicate
+# DDL). Gọi bởi playbooks/upgrade.yml SAU khi backup + dừng icingadb, TRƯỚC khi deploy daemon bản mới.
+#
+# icingadb: image distroless KHÔNG ship file upgrade tăng dần -> file bundle sẵn trong
+#   roles/upgrade/files/icingadb-upgrades/<release>.sql (mỗi file kết thúc bằng
+#   INSERT INTO icingadb_schema VALUES (<version_mới>)). Áp file nào có version > version DB hiện tại.
+# icingaweb2: image CÓ ship /usr/share/icingaweb2/schema/mysql-upgrades/<ver>.sql -> đọc từ image ĐÍCH.
+#
+# Helper chạy SQL từ ca_host (không cần client trên host — dùng container mariadb, host network):
+#   docker run --rm -i --network host {{ images.mariadb }} mariadb -h db_host ... < file
+
+# ---------- icingadb ----------
+- name: (migrate) icingadb — đọc schema version hiện tại trong DB
+  ansible.builtin.command: >
+    docker run --rm --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uroot -p{{ mariadb_root_password }}
+    -N -e "SELECT COALESCE(MAX(version),0) FROM icingadb.icingadb_schema;"
+  register: _idb_cur
+  changed_when: false
+  no_log: true
+
+- name: (migrate) icingadb — parse version đích của từng file upgrade bundle (control node)
+  ansible.builtin.set_fact:
+    _idb_upgrades: >-
+      {{ (_idb_upgrades | default([])) + [ {
+           'path': item,
+           'version': (lookup('file', item)
+                        | regex_search('INSERT\s+INTO\s+icingadb_schema[^;]*VALUES\s*\(\s*([0-9]+)', '\1')
+                        | first | int) } ] }}
+  loop: "{{ query('fileglob', role_path + '/files/icingadb-upgrades/*.sql') | sort }}"
+  loop_control: { label: "{{ item | basename }}" }
+
+- name: (migrate) icingadb — chốt danh sách file CẦN áp (version > hiện tại), sắp tăng dần
+  ansible.builtin.set_fact:
+    _idb_pending: >-
+      {{ (_idb_upgrades | default([]))
+         | selectattr('version', 'gt', (_idb_cur.stdout | trim | int))
+         | sort(attribute='version') | list }}
+
+- name: (migrate) icingadb — in kế hoạch migrate
+  ansible.builtin.debug:
+    msg: >-
+      icingadb schema hiện tại = {{ _idb_cur.stdout | trim }}.
+      {{ 'CẦN áp: ' + (_idb_pending | map(attribute='path') | map('basename') | join(', '))
+         if _idb_pending | length > 0 else 'KHÔNG cần migrate (đã mới nhất).' }}
+
+- name: (migrate) icingadb — copy file upgrade cần áp sang ca_host
+  ansible.builtin.copy:
+    src: "{{ item.path }}"
+    dest: "/tmp/idb-upgrade-{{ item.version }}.sql"
+    mode: "0600"
+  loop: "{{ _idb_pending }}"
+  loop_control: { label: "{{ item.path | basename }}" }
+
+- name: (migrate) icingadb — áp từng file upgrade (tăng dần, Galera tự replicate)
+  ansible.builtin.shell: >
+    docker run --rm -i --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uroot -p{{ mariadb_root_password }} icingadb
+    < /tmp/idb-upgrade-{{ item.version }}.sql
+  args:
+    executable: /bin/bash
+  loop: "{{ _idb_pending }}"
+  loop_control: { label: "-> schema {{ item.version }}" }
+  no_log: true
+
+- name: (migrate) icingadb — dọn file tạm
+  ansible.builtin.file:
+    path: "/tmp/idb-upgrade-{{ item.version }}.sql"
+    state: absent
+  loop: "{{ _idb_pending }}"
+  loop_control: { label: "{{ item.version }}" }
+
+# ---------- icingaweb2 ----------
+- name: (migrate) icingaweb2 — đọc schema version hiện tại trong DB
+  ansible.builtin.command: >
+    docker run --rm --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uroot -p{{ mariadb_root_password }}
+    -N -e "SELECT version FROM icingaweb2.icingaweb_schema ORDER BY id DESC LIMIT 1;"
+  register: _iweb_cur
+  changed_when: false
+  no_log: true
+
+# icingaweb2 upgrades nằm trong image ĐÍCH: /usr/share/icingaweb2/schema/mysql-upgrades/<ver>.sql
+# (image có sh, không distroless). Liệt kê + so version (sort -V) > hiện tại.
+- name: (migrate) icingaweb2 — liệt kê file upgrade trong image đích + lọc version > hiện tại
+  ansible.builtin.shell: |
+    set -e
+    cur="{{ _iweb_cur.stdout | trim }}"
+    for f in $(docker run --rm {{ images.icingaweb2 }} ls /usr/share/icingaweb2/schema/mysql-upgrades/ 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.sql$' | sed 's/\.sql$//'); do
+      # in ra "f" nếu f > cur theo version-sort (và khác cur)
+      if [ "$f" != "$cur" ] && [ "$(printf '%s\n%s\n' "$cur" "$f" | sort -V | tail -1)" = "$f" ]; then
+        echo "$f"
+      fi
+    done | sort -V
+  register: _iweb_pending
+  changed_when: false
+
+- name: (migrate) icingaweb2 — in kế hoạch migrate
+  ansible.builtin.debug:
+    msg: >-
+      icingaweb2 schema hiện tại = {{ _iweb_cur.stdout | trim }}.
+      {{ 'CẦN áp: ' + (_iweb_pending.stdout_lines | join(', '))
+         if _iweb_pending.stdout_lines | length > 0 else 'KHÔNG cần migrate.' }}
+
+- name: (migrate) icingaweb2 — áp từng file upgrade từ image đích (tăng dần)
+  ansible.builtin.shell: >
+    docker run --rm -i --network host {{ images.icingaweb2 }}
+    cat /usr/share/icingaweb2/schema/mysql-upgrades/{{ item }}.sql
+    | docker run --rm -i --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uroot -p{{ mariadb_root_password }} icingaweb2
+  args:
+    executable: /bin/bash
+  loop: "{{ _iweb_pending.stdout_lines }}"
+  loop_control: { label: "-> {{ item }}" }
+  no_log: true

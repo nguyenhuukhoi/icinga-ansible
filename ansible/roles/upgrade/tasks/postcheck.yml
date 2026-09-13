@@ -1,0 +1,86 @@
+---
+# postcheck.yml — kiểm tra THẬT sau upgrade HOẶC rollback (dùng chung). Chạy 1 lần trên ca_host.
+# FAIL rõ ràng nếu không khỏe (không báo "thành công" khi thực ra chưa xong). KHÔNG đổi gì.
+
+- name: (postcheck) Galera — read wsrep state on every node
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - mariadb
+      - mariadb
+      - --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf
+      - -N
+      - -e
+      - >-
+        SHOW STATUS WHERE Variable_name IN
+        ('wsrep_cluster_size','wsrep_cluster_status',
+         'wsrep_local_state_comment','wsrep_ready');
+  register: _pc_wsrep_nodes
+  changed_when: false
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['galera'] }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - icinga_database_type == 'managed_db'
+    - (galera_count | int) >= 3
+
+- name: (postcheck) Every Galera node must be Primary, Synced and ready
+  ansible.builtin.assert:
+    that:
+      - "'Primary' in item.stdout"
+      - "'Synced' in item.stdout"
+      - "'ON' in item.stdout"
+      - >-
+        (item.stdout_lines | select('search', 'wsrep_cluster_size')
+         | first | default('0 0')).split()[-1] | int == galera_count | int
+    fail_msg: >-
+      Galera node {{ item.item }} is unhealthy: {{ item.stdout_lines }}
+      (expected size={{ galera_count }}, Primary, Synced, ready=ON).
+  loop: "{{ _pc_wsrep_nodes.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - icinga_database_type == 'managed_db'
+    - (galera_count | int) >= 3
+
+- name: (postcheck) MariaDB standalone phải trả lời SELECT 1
+  ansible.builtin.command: >
+    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -N -e "SELECT 1;"
+  changed_when: false
+  no_log: true
+  when:
+    - icinga_database_type == 'managed_db'
+    - (galera_count | int) == 1
+
+- name: (postcheck) Lấy trạng thái container icinga2/icingadb/icingaweb2 trên mọi master
+  community.docker.docker_container_info:
+    name: "{{ item.1 }}"
+  register: _pc_info
+  delegate_to: "{{ item.0 }}"
+  loop: "{{ groups['master'] | product(['icinga2', 'icingadb', 'icingaweb2']) | list }}"
+  loop_control: { label: "{{ item.0 }}/{{ item.1 }}" }
+  retries: 18
+  delay: 5
+  until:
+    - _pc_info.container is defined
+    - (_pc_info.container.State.Health.Status | default(_pc_info.container.State.Status)) in ['healthy', 'running']
+
+- name: (postcheck) Web login trả HTTP 200/302 trên mọi master
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ icingaweb2_http_port }}/authentication/login"
+    status_code: [200, 302]
+  register: _pc_http
+  retries: 18
+  delay: 5
+  until: _pc_http.status in [200, 302]
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['master'] }}"
+  loop_control: { label: "{{ item }}" }
+
+- name: (postcheck) In tóm tắt OK
+  ansible.builtin.debug:
+    msg: >-
+      Postcheck OK — database {{ 'Galera size ' ~ galera_count ~ '/ready' if (galera_count | int) >= 3
+      else 'standalone ready' }}, container mọi master healthy, web login 200/302.

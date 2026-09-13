@@ -1,0 +1,178 @@
+---
+# Role prechecks: fail sớm nếu cấu hình/topology sai. Chạy một lần trên master[0].
+
+- name: Số master phải >= 1
+  ansible.builtin.assert:
+    that: (groups['master'] | default([]) | length) >= 1
+    fail_msg: "Nhóm [master] phải có ít nhất 1 host (đang: {{ groups['master'] | default([]) | length }})."
+
+- name: Loại database phải hợp lệ
+  ansible.builtin.assert:
+    that: icinga_database_type in ['managed_db', 'external']
+    fail_msg: >-
+      icinga_database_type phải là 'managed_db' hoặc 'external' (đang là
+      '{{ icinga_database_type | default('<undefined>') }}').
+
+- name: Managed DB phải là standalone 1 node hoặc Galera số lẻ >= 3
+  ansible.builtin.assert:
+    that:
+      - (galera_count | int) == 1 or ((galera_count | int) >= 3 and (galera_count | int) % 2 == 1)
+    fail_msg: >-
+      icinga_database_type=managed_db yêu cầu [galera] có đúng 1 node (standalone) hoặc số lẻ >= 3
+      (Galera có quorum); hiện có {{ galera_count }} node.
+  when: icinga_database_type == 'managed_db'
+
+- name: icinga_image_versions phải khai đủ 5 thành phần, không rỗng
+  ansible.builtin.assert:
+    that:
+      - icinga_image_versions is defined
+      - icinga_image_versions[item] is defined
+      - (icinga_image_versions[item] | string | trim) | length > 0
+    fail_msg: >-
+      Thiếu/rỗng icinga_image_versions.{{ item }} trong globals.yml. Phải khai tag tường minh cho cả
+      5: icinga2, icingadb, icingadb_redis, icingaweb2, mariadb (không còn 'bộ phiên bản' — xem
+      design.md mục 6).
+  loop: [icinga2, icingadb, icingadb_redis, icingaweb2, mariadb]
+
+- name: "custom_image_overrides không rỗng thì custom_image_registry phải khai (không hardcode registry nào)"
+  ansible.builtin.assert:
+    that: (custom_image_registry | default('')) | length > 0
+    fail_msg: >-
+      custom_image_overrides có khai ít nhất 1 image nhưng custom_image_registry đang trống trong
+      globals.yml — cần khai registry riêng (host:port + namespace, vd "10.10.10.151:8081/icinga")
+      nơi bạn đã tự build+push image custom lên (xem design.md mục 9.6).
+  when: (custom_image_overrides | default({})) | length > 0
+
+- name: "custom_image_overrides chỉ được khai đúng tên image có thật (khớp images_upstream)"
+  ansible.builtin.assert:
+    that: custom_image_overrides.keys() | difference(images_upstream.keys()) | length == 0
+    fail_msg: >-
+      custom_image_overrides có khoá không hợp lệ: {{ custom_image_overrides.keys() | difference(images_upstream.keys()) | join(', ') }}.
+      Chỉ được dùng đúng tên trong images_upstream: {{ images_upstream.keys() | join(', ') }}.
+  when: (custom_image_overrides | default({})) | length > 0
+
+- name: "proxy_group_overrides chỉ được khai đúng tên nhóm vai trò có thật"
+  # Cùng tinh thần validate custom_image_overrides ở trên — tránh gõ nhầm tên nhóm (vd "satelite")
+  # rồi âm thầm không có tác dụng gì (fallback về proxy global, không lỗi, khó phát hiện).
+  ansible.builtin.assert:
+    that: >-
+      proxy_group_overrides.keys() | difference(['master', 'satellite', 'galera', 'client']) | length == 0
+    fail_msg: >-
+      proxy_group_overrides có khoá không hợp lệ:
+      {{ proxy_group_overrides.keys() | difference(['master', 'satellite', 'galera', 'client']) | join(', ') }}.
+      Chỉ được dùng đúng tên nhóm vai trò: master, satellite, galera, client.
+  when: (proxy_group_overrides | default({})) | length > 0
+
+- name: Chặn IDO/PDO — không cho bật ido-mysql / ido-pgsql
+  ansible.builtin.assert:
+    that:
+      - "'ido-mysql' not in (enable_icinga2_features | default([]))"
+      - "'ido-pgsql' not in (enable_icinga2_features | default([]))"
+    fail_msg: "Stack này CHỈ dùng Icinga DB. Bỏ ido-mysql/ido-pgsql khỏi enable_icinga2_features."
+
+- name: Feature icingadb bắt buộc bật
+  ansible.builtin.assert:
+    that: "'icingadb' in (enable_icinga2_features | default([]))"
+    fail_msg: "Thiếu feature 'icingadb' trong enable_icinga2_features (bắt buộc)."
+
+- name: Module Icinga DB Web bắt buộc
+  ansible.builtin.assert:
+    that: "'icingadb' in (enable_icingaweb2_modules | default([]))"
+    fail_msg: "Thiếu module 'icingadb' trong enable_icingaweb2_modules (thay module monitoring/IDO cũ)."
+
+- name: Web server phải là apache2
+  ansible.builtin.assert:
+    that: icingaweb2_web_server == 'apache2'
+    fail_msg: "Thiết kế cố định web server = apache2."
+
+- name: External DB phải khai host
+  ansible.builtin.assert:
+    that: external_db.host | length > 0
+    fail_msg: "icinga_database_type=external nhưng external_db.host trống."
+  when: icinga_database_type == 'external'
+
+# ---------- external: xác nhận DBA đã tạo sẵn database/user/grant (KHÔNG dùng root DB ngoài) ----------
+# Quyết định 2026-07-23 (theo yêu cầu người dùng, xem TODO.md): nhánh external KHÔNG BAO GIỜ đụng
+# root của DB ngoài — khác managed_db (tool tự dựng + tự cấp quyền cho ĐÚNG DB do chính nó quản lý).
+# Với external, DBA (người quản lý DB đó, không phải icinga-ansible) phải tự CREATE DATABASE/USER/
+# GRANT trước khi deploy, dùng đúng tên/mật khẩu đã khai trong globals.yml/passwords.yml. Prechecks
+# tự thử kết nối bằng ĐÚNG user mỗi service sẽ dùng (không phải root) để phát hiện sớm nếu DBA chưa
+# chuẩn bị xong, thay vì để lỗi rơi giữa chừng lúc roles/icingadb hay roles/icingaweb2 đang import
+# schema (khó debug hơn nhiều, message tối nghĩa hơn nhiều).
+- name: "(external) Thử kết nối bằng user icingadb/icingaweb2/director — kiểm tra DBA đã tạo sẵn"
+  # _mariadb_ssl_flag: tuỳ chọn qua db_client_skip_ssl (mặc định false — xem group_vars/all.yml +
+  # giải thích BUG THẬT ở roles/icingaweb2/tasks/main.yml, client mariadb bản mới mặc định yêu cầu
+  # TLS, MariaDB tự cài tay thường không bật TLS).
+  ansible.builtin.command: >
+    docker run --rm --network host {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -u{{ item.user }} -p{{ item.password }} {{ item.db }}
+    -e "SELECT 1;"
+  loop:
+    - { user: icingadb,   password: "{{ icingadb_db_password }}",   db: "{{ icingadb_db_name }}" }
+    - { user: icingaweb2, password: "{{ icingaweb2_db_password }}", db: icingaweb2 }
+    - { user: director,   password: "{{ director_db_password }}",   db: director }
+  loop_control: { label: "{{ item.user }}" }
+  register: _ext_db_check
+  no_log: true
+  changed_when: false
+  failed_when: false
+  when:
+    - icinga_database_type == 'external'
+    - item.user != 'director' or 'director' in (enable_icingaweb2_modules | default([]))
+
+- name: "(external) Xác định service DBA CHƯA chuẩn bị xong (nếu có)"
+  ansible.builtin.set_fact:
+    _ext_db_missing: >-
+      {{ (_ext_db_check.results | default([]))
+         | selectattr('skipped', 'undefined')
+         | selectattr('rc', '!=', 0)
+         | map(attribute='item.user') | list }}
+  when: icinga_database_type == 'external'
+
+- name: "(external) Dựng SQL hướng dẫn DBA (icingadb + icingaweb2 luôn, director nếu bật module)"
+  ansible.builtin.set_fact:
+    _ext_db_sql: >-
+      {{ (
+        ["CREATE DATABASE IF NOT EXISTS " ~ icingadb_db_name ~ " CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;",
+         "CREATE USER IF NOT EXISTS 'icingadb'@'%' IDENTIFIED BY '<xem icingadb_db_password trong passwords.yml>';",
+         "GRANT ALL ON " ~ icingadb_db_name ~ ".* TO 'icingadb'@'%';",
+         "CREATE DATABASE IF NOT EXISTS icingaweb2 CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;",
+         "CREATE USER IF NOT EXISTS 'icingaweb2'@'%' IDENTIFIED BY '<xem icingaweb2_db_password trong passwords.yml>';",
+         "GRANT ALL ON icingaweb2.* TO 'icingaweb2'@'%';"]
+        + (["CREATE DATABASE IF NOT EXISTS director CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;",
+            "CREATE USER IF NOT EXISTS 'director'@'%' IDENTIFIED BY '<xem director_db_password trong passwords.yml>';",
+            "GRANT ALL ON director.* TO 'director'@'%';"]
+           if 'director' in (enable_icingaweb2_modules | default([])) else [])
+        + ["FLUSH PRIVILEGES;"]
+      ) | join('\n') }}
+  when:
+    - icinga_database_type == 'external'
+    - _ext_db_missing | default([]) | length > 0
+
+- name: "(external) Hướng dẫn tạo schema DB ngoài — gửi cho DBA (chỉ hiện khi kiểm tra thất bại)"
+  ansible.builtin.fail:
+    msg: >-
+      DBA chưa tạo sẵn (hoặc sai mật khẩu) cho user: {{ _ext_db_missing | join(', ') }}.
+      icinga_database_type=external -> icinga-ansible KHÔNG BAO GIỜ dùng root của DB ngoài. DBA phải
+      tự chạy SQL sau (điền đúng mật khẩu thật từ /etc/icinga-ansible/passwords.yml) TRƯỚC khi deploy:
+      ---
+      {{ _ext_db_sql }}
+      ---
+  when:
+    - icinga_database_type == 'external'
+    - _ext_db_missing | default([]) | length > 0
+
+- name: "(external) Xác nhận đã kết nối OK bằng user riêng từng service (không dùng root)"
+  ansible.builtin.debug:
+    msg: "OK — DB ngoài đã sẵn sàng, kết nối được bằng user icingadb/icingaweb2{{ '/director' if 'director' in (enable_icingaweb2_modules | default([])) else '' }} (không cần root)."
+  when:
+    - icinga_database_type == 'external'
+    - _ext_db_missing | default([]) | length == 0
+
+- name: Tóm tắt topology sẽ triển khai
+  ansible.builtin.debug:
+    msg:
+      - "Version image: icinga2 {{ icinga_image_versions.icinga2 }}, icingadb {{ icinga_image_versions.icingadb }}, web {{ icinga_image_versions.icingaweb2 }}, redis {{ icinga_image_versions.icingadb_redis }}, mariadb {{ icinga_image_versions.mariadb }}"
+      - "Master       : {{ master_count }} ({{ 'HA' if is_ha_master else 'single' }})  CA={{ ca_host }}"
+      - "Satellite    : {{ satellite_count }}"
+      - "Database      : {{ icinga_database_type }}  (galera nodes: {{ galera_count }})  endpoint: {{ db_host }}:{{ db_port }}"

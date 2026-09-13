@@ -1,0 +1,121 @@
+# =============================================================================
+# backup-full.yml — Backup TOÀN BỘ state cần để dựng lại hệ thống trên hạ tầng MỚI + restore về gần
+# như y hệt cũ (thiết kế 2026-07-24, theo yêu cầu người dùng "cơ chế backup và restore ok... khi hệ
+# thống mất hết thì dựng lại hệ thống mới với topo tương tự và restore lại như cũ").
+#
+# Gồm 3 phần, gộp vào 1 lệnh cho tiện, nhưng MỖI PHẦN độc lập, không phụ thuộc nhau:
+#   1. Config trên deployment node (globals.yml, passwords.yml, MỌI override — config/) — đây là
+#      "recipe" để tái tạo lại toàn bộ hạ tầng + secrets, quan trọng nhất, nhẹ nhất.
+#   2. Database + PKI (tái dùng NGUYÊN VẸN roles/mariadb backup.yml đã có — mục 10.4/10.5) — tag
+#      "full" (không phải timestamp) để LUÔN có 1 con trỏ LATEST_FULL trỏ đúng bản mới nhất.
+#   3. icingaweb2 config trên MỖI master (resources.ini/config.ini/...) — vì cơ chế "seed 1 lần, mount
+#      RW" (xem design.md mục 4.1) khiến sửa qua UI chỉ nằm trên node, KHÔNG có trong bất kỳ override
+#      nào — nếu không backup riêng, mọi thứ sửa qua UI sẽ mất khi rebuild.
+#
+# TOÀN BỘ kết quả backup gom về 1 chỗ: {{ icinga_config_backup_dir }}/ trên deployment node (mặc
+# định "/var/backups/icinga-ansible-config" — CỐ Ý nằm ngoài icinga_etc_dir, xem group_vars/all.yml,
+# để destroy.yml — vốn chỉ xoá nội dung icinga_etc_dir — không bao giờ đụng tới thư mục backup này,
+# kể cả khi destroy 1 inventory/cụm khác dùng chung control node) — tự backup thư mục đó ra ngoài
+# (rsync/copy sang máy khác) là đủ cho disaster recovery thật, vì hạ tầng lab có thể mất bất cứ lúc
+# nào (đã từng xảy ra thật trong quá trình phát triển — xem TODO.md).
+#
+# KHÔNG backup icingadb-redis — đây là cache runtime (MariaDB qua icingadb daemon mới là nguồn dữ
+# liệu thật), rebuild lại từ đầu bằng cách chạy checks lại là đủ, không cần khôi phục.
+# =============================================================================
+
+- name: "Backup full (1/3) — config trên deployment node"
+  hosts: localhost
+  connection: local
+  # KHÔNG "become: true" ở CẤP PLAY (khác destroy.yml) — icinga_etc_dir (/etc/icinga-ansible) vốn đã
+  # do chính user chạy CLI sở hữu (init_config() trong tools/icinga-ansible: "sudo install -d -o
+  # $(id -un)"), không cần sudo để đọc/ghi trong đó. BUG THẬT đã gặp (2026-07-24): dùng become:true ở
+  # đây làm thư mục "backups/" bị tạo ra owner root — "ansible.builtin.fetch" ở play (3/3) bên dưới
+  # LUÔN ghi phía LOCAL bằng chính user chạy ansible-playbook (KHÔNG qua become dù play đó có
+  # become:true, become chỉ ảnh hưởng phía REMOTE) -> "Permission denied" khi fetch cố ghi vào thư
+  # mục root-owned. Fix: bỏ hẳn become ở play localhost này, giữ nguyên ownership user thường.
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    # icinga_config_backup_dir (mặc định /var/backups/icinga-ansible-config, 2026-07-29) nằm dưới
+    # /var/backups — thư mục hệ thống, user CLI thường không có quyền tạo — CẦN sudo riêng ở ĐÚNG
+    # task này (không phải cấp play, tránh lặp lại bug ở trên), rồi chown thẳng về user CLI qua
+    # owner/group để các task ghi file PHÍA SAU (không sudo) vẫn ghi được bình thường.
+    - name: "Tạo thư mục đích backup (sudo vì /var/backups là thư mục hệ thống, chown về user CLI)"
+      become: true
+      ansible.builtin.file:
+        path: "{{ icinga_config_backup_dir }}"
+        state: directory
+        mode: "0700"
+        owner: "{{ lookup('pipe', 'id -un') }}"
+        group: "{{ lookup('pipe', 'id -gn') }}"
+
+    # icinga_config_backup_dir CỐ Ý nằm NGOÀI icinga_etc_dir (xem group_vars/all.yml) — nên archive
+    # toàn bộ icinga_etc_dir không còn tự lồng backup cũ vào trong nữa, không cần exclude_path (vốn
+    # không hoạt động đúng như kỳ vọng với community.general.archive — bug đã ghi nhận, tự hết theo).
+    - name: "Archive toàn bộ {{ icinga_etc_dir }} (globals.yml, passwords.yml, mọi override)"
+      community.general.archive:
+        path: "{{ icinga_etc_dir }}"
+        dest: "{{ icinga_config_backup_dir }}/config-{{ backup_ts }}.tar.gz"
+        format: gz
+        mode: "0600"
+
+- name: "Backup full (2/3) — database + PKI (tái dùng roles/mariadb backup.yml, tag 'full')"
+  # icinga_action + backup_tag được CLI truyền qua extra-vars; dùng tên riêng
+  # thay vì biến reserved `action` của Ansible.
+  hosts: galera
+  become: true
+  gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  roles:
+    - role: mariadb
+      when: icinga_database_type == 'managed_db'
+
+- name: "Backup full (3/3) — icingaweb2 config (resources.ini... sửa qua UI) trên mọi master"
+  hosts: master
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Archive icingaweb2 config trên chính node
+      community.general.archive:
+        path: "{{ icinga_etc_dir }}/icingaweb2"
+        dest: "/tmp/icingaweb2-{{ inventory_hostname }}-{{ backup_ts }}.tar.gz"
+        format: gz
+        mode: "0600"
+
+    - name: Fetch archive về deployment node
+      ansible.builtin.fetch:
+        src: "/tmp/icingaweb2-{{ inventory_hostname }}-{{ backup_ts }}.tar.gz"
+        dest: "{{ icinga_config_backup_dir }}/"
+        flat: true
+
+    - name: Siết quyền archive web đã fetch (chứa DB/Redis credential)
+      ansible.builtin.file:
+        path: "{{ icinga_config_backup_dir }}/icingaweb2-{{ inventory_hostname }}-{{ backup_ts }}.tar.gz"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+
+    - name: Dọn file tạm trên node
+      ansible.builtin.file:
+        path: "/tmp/icingaweb2-{{ inventory_hostname }}-{{ backup_ts }}.tar.gz"
+        state: absent
+
+- name: "Backup full — tóm tắt"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: In vị trí backup
+      ansible.builtin.debug:
+        msg: >-
+          Backup xong — xem {{ icinga_config_backup_dir }}/ (config-{{ backup_ts }}.tar.gz,
+          icingaweb2-*-{{ backup_ts }}.tar.gz). DB + PKI nằm trên node DB chính
+          ({{ groups['galera'][0] | default('(không có, external_db)') }},
+          {{ mariadb_backup.destination }}/, tên db-full-*.xb.gz + pki-*.tar.gz, con trỏ
+          LATEST_FULL) — nhớ copy CẢ 2 nơi ra ngoài hạ tầng lab để backup có ý nghĩa thật.

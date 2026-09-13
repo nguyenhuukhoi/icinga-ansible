@@ -1,0 +1,38 @@
+# Inventory thật — 2 master (HA) + 2 satellite (1 zone con) + 3 node Galera cluster thật.
+# Deployment node TÁCH RIÊNG (10.10.10.151, không nằm trong inventory này).
+# client1/client2 (10.10.10.159/160) KHÔNG nằm trong inventory — không phải node icinga2, monitor
+# qua SSH check (client1 qua zone "master", client2 qua zone satellite "dc-main") — xem
+# deploy_config_dir/icinga2/zones.d/{master,dc-main}/hosts.conf.
+
+[all_hosts]
+m1   ansible_host=10.10.10.152
+m2   ansible_host=10.10.10.153
+sat1 ansible_host=10.10.10.154
+sat2 ansible_host=10.10.10.155
+db1  ansible_host=10.10.10.156
+db2  ansible_host=10.10.10.157
+db3  ansible_host=10.10.10.158
+
+# ===== Vai trò Icinga =====
+[master]
+m1
+m2
+
+[satellite]
+sat1
+sat2
+
+[client]
+
+# ===== Database — 3 node lẻ -> Galera cluster THẬT (không phải standalone) =====
+[galera]
+db1
+db2
+db3
+
+# ===== Load balancer / VIP — để trống =====
+[loadbalancer]
+
+[icinga:children]
+master
+satellite
