@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+umask 077
+destination={{ mariadb_backup.destination | quote }}
+retention_days={{ mariadb_backup.retention_days | int }}
+image={{ images.mariadb | quote }}
+
+mkdir -p "$destination"
+exec 9>"$destination/.scheduled-backup.lock"
+flock -n 9 || exit 0
+
+log="$destination/scheduled-backup.log"
+if [[ -f "$log" ]] && (( $(stat -c %s "$log") > 5242880 )); then
+  mv -f "$log" "$log.1"
+fi
+exec >>"$log" 2>&1
+
+timestamp=$(date +%Y%m%d-%H%M%S)
+final="$destination/db-scheduled-$timestamp.xb.gz"
+tmp="${final}.tmp.$$"
+validate_dir=$(mktemp -d "$destination/.validate.XXXXXX")
+trap 'rm -f "$tmp"; rm -rf "$validate_dir"' EXIT
+
+docker exec mariadb mariadb-backup \
+  --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf \
+  --backup --stream=xbstream | gzip > "$tmp"
+
+gzip -t "$tmp"
+gzip -cd "$tmp" | docker run --rm -i \
+  -v "$validate_dir:/validate" \
+  --entrypoint mbstream "$image" -x -C /validate
+test -s "$validate_dir/mariadb_backup_info"
+test -s "$validate_dir/backup-my.cnf"
+
+rm -rf "$validate_dir"
+mv -f "$tmp" "$final"
+printf '%s' "$timestamp" > "$destination/LATEST_SCHEDULED.tmp.$$"
+mv -f "$destination/LATEST_SCHEDULED.tmp.$$" "$destination/LATEST_SCHEDULED"
+find "$destination" -maxdepth 1 -type f -name 'db-scheduled-*.xb.gz' \
+  -mtime "+$retention_days" -delete
+trap - EXIT

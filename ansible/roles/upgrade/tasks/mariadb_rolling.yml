@@ -202,7 +202,12 @@
         -N -e "SELECT VERSION(); SHOW STATUS WHERE Variable_name IN
         ('wsrep_cluster_size','wsrep_cluster_status',
         'wsrep_local_state_comment','wsrep_ready');";
-        printf 'upgrade_info\t'; cat /var/lib/mysql/mariadb_upgrade_info
+        printf 'upgrade_info\t';
+        if test -s /var/lib/mysql/mariadb_upgrade_info; then
+          cat /var/lib/mysql/mariadb_upgrade_info;
+        else
+          printf 'absent\n';
+        fi
   register: _mariadb_after
   changed_when: false
   retries: 36
@@ -222,7 +227,9 @@
   ansible.builtin.assert:
     that:
       - _mariadb_after.stdout_lines[0].startswith(_mariadb_target_version)
-      - "('upgrade_info\t' ~ _mariadb_target_version) in _mariadb_after.stdout"
+      - >-
+        not (_mariadb_node_needs_upgrade | bool) or
+        ('upgrade_info\t' ~ _mariadb_target_version) in _mariadb_after.stdout
     fail_msg: >-
       {{ inventory_hostname }} did not finish its MariaDB upgrade to
       {{ _mariadb_target_version }}: {{ _mariadb_after.stdout_lines }}

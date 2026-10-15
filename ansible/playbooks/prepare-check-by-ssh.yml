@@ -5,6 +5,12 @@
   hosts: all_hosts
   become: true
   gather_facts: false
+  # Playbook nằm trong ansible/playbooks/ (không cùng cấp ansible/group_vars/) nên Ansible KHÔNG tự
+  # nạp group_vars/all.yml (bug class đã ghi ở TODO.md 2.5) — thiếu dòng này, "deploy_config_dir"
+  # dưới đây chỉ có giá trị nhờ tools/icinga-ansible LUÔN truyền "-e deploy_config_dir=..."; chạy
+  # trực tiếp bằng ansible-playbook (bỏ qua CLI wrapper) sẽ ra lỗi "deploy_config_dir is undefined".
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
   vars:
     monitor_key_dir: "{{ deploy_config_dir }}/icinga2/ssh"
     monitor_private_key: "{{ monitor_key_dir }}/id_monitor"

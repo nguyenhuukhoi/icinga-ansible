@@ -1,0 +1,38 @@
+---
+# Upgrade/rollback must not discover a missing image after the database has
+# already been backed up, migrated, or restored. `pull` is the explicit network
+# phase; this task is intentionally read-only.
+
+- name: Build the target image list required on this host
+  ansible.builtin.set_fact:
+    _upgrade_required_images: >-
+      {{ (([images.icinga2, images.icingadb, images.icingaweb2,
+             images.icingadb_redis, images.mariadb]
+            if 'master' in group_names else [])
+          + ([images.icinga2]
+             if ('satellite' in group_names or 'client' in group_names) else [])
+          + ([images.mariadb]
+             if ('galera' in group_names and icinga_database_type == 'managed_db') else []))
+         | unique | list }}
+
+- name: Inspect every required target image without pulling
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ item }}"]
+  loop: "{{ _upgrade_required_images }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _upgrade_target_image_inspect
+  changed_when: false
+  failed_when: false
+
+- name: Require every target image before changing the cluster
+  ansible.builtin.assert:
+    that: item.rc == 0
+    quiet: true
+    fail_msg: >-
+      {{ inventory_hostname }} chưa có image đích {{ item.item }}. Chạy
+      `icinga-ansible pull -i <inventory>` và xử lý proxy/registry cho tới khi pull thành công
+      trên mọi host trước khi upgrade/rollback.
+  loop: "{{ _upgrade_target_image_inspect.results }}"
+  loop_control:
+    label: "{{ item.item }}"

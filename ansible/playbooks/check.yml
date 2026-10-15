@@ -11,6 +11,9 @@
       ansible.builtin.set_fact:
         _expected_containers: >-
           {{ ((['icinga2', 'icingadb-redis', 'icingadb', 'icingaweb2'] if 'master' in group_names else [])
+              + (['icingaweb2-director-daemon']
+                 if ('master' in group_names and 'director' in (enable_icingaweb2_modules | default([])))
+                 else [])
               + (['icinga2'] if ('satellite' in group_names or 'client' in group_names) else [])
               + (['mariadb'] if ('galera' in group_names and icinga_database_type == 'managed_db') else []))
              | unique | list }}
@@ -81,13 +84,15 @@
         argv:
           - docker
           - exec
+          - -e
+          - REDISCLI_AUTH
           - icingadb-redis
           - redis-cli
           - -p
           - "{{ icingadb_redis_port | string }}"
-          - -a
-          - "{{ icingadb_redis_password }}"
           - ping
+      environment:
+        REDISCLI_AUTH: "{{ icingadb_redis_password }}"
       register: _redis_ping
       changed_when: false
       no_log: true
@@ -154,12 +159,16 @@
         fail_msg: "Icinga Web 2 nhận POST nhưng từ chối credential admin."
 
     - name: Icinga DB heartbeat phải mới và config sync phải có dữ liệu
+      # MYSQL_PWD (environment), KHÔNG -p<password> trên cmdline — D4: "no_log" chỉ che log Ansible,
+      # không che "ps aux" trong lúc lệnh đang chạy.
       ansible.builtin.command: >-
-        docker run --rm --network host {{ images.mariadb }}
+        docker run --rm --network host -e MYSQL_PWD {{ images.mariadb }}
         mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }}
-        -uicingadb -p{{ icingadb_db_password }} -N icingadb
+        -uicingadb -N icingadb
         -e "SELECT IF(COALESCE(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000-MAX(heartbeat),999999999) < 60000,'OK','STALE') FROM icingadb_instance;
             SELECT IF(COUNT(*) > 0,'OK','EMPTY') FROM checkcommand;"
+      environment:
+        MYSQL_PWD: "{{ icingadb_db_password }}"
       register: _icingadb_db_health
       changed_when: false
       no_log: true
@@ -184,6 +193,59 @@
         fail_msg: >-
           Icinga DB có lỗi nghiêm trọng trong 5 phút gần đây; xem `docker logs --since 5m icingadb`.
 
+    - name: Director CLI phải báo healthy
+      ansible.builtin.command:
+        argv: [docker, exec, icingaweb2, icingacli, director, health, check]
+      changed_when: false
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
+    - name: Tính chính xác endpoint và zone Director phải import từ topology hiện tại
+      ansible.builtin.set_fact:
+        _director_expected_endpoints: >-
+          {{ ((groups['master'] | default([]))
+              + (groups['satellite'] | default([]))
+              + (groups['client'] | default([]))) | unique | sort | join(',') }}
+        _director_expected_zones: >-
+          {{ (['director-global', 'global-templates', 'master']
+              + (satellite_zones | default([]) | map(attribute='name') | list)
+              + (groups['client'] | default([]))) | unique | sort | join(',') }}
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
+    - name: Director phải đã import chính xác endpoint và zone của topology hiện tại
+      ansible.builtin.command: >-
+        docker run --rm --network host -e MYSQL_PWD {{ images.mariadb }}
+        mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }}
+        -udirector -N director
+        -e "SELECT GROUP_CONCAT(object_name ORDER BY object_name SEPARATOR ',')
+            FROM icinga_endpoint WHERE object_type='external_object';
+            SELECT GROUP_CONCAT(object_name ORDER BY object_name SEPARATOR ',')
+            FROM icinga_zone WHERE object_type='external_object';"
+      environment:
+        MYSQL_PWD: "{{ director_db_password }}"
+      register: _director_topology
+      changed_when: false
+      no_log: true
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
+    - name: Xác nhận topology Director khớp inventory
+      ansible.builtin.assert:
+        that:
+          - _director_topology.stdout_lines | length == 2
+          - _director_topology.stdout_lines[0] == _director_expected_endpoints
+          - _director_topology.stdout_lines[1] == _director_expected_zones
+        fail_msg: >-
+          Endpoint/zone external_object của Director không khớp chính xác topology hiện tại;
+          có thể còn object của node đã xóa hoặc thiếu node vừa thêm.
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
 - name: Check managed MariaDB/Galera
   hosts: galera
   become: true
@@ -192,8 +254,12 @@
     - "{{ playbook_dir }}/../group_vars/all.yml"
   tasks:
     - name: MariaDB phải trả lời SELECT 1
+      # --defaults-extra-file (không phải -uroot -p<password> trên cmdline) — tránh lộ root password
+      # qua "ps aux"/"/proc/<pid>/cmdline" trong lúc lệnh đang chạy ("no_log: true" chỉ che log
+      # Ansible, không che process list trên host). Cùng file .my-healthcheck.cnf đã ghi sẵn cho mọi
+      # node ở _start_container.yml, cùng cách mariadb_rolling.yml đã dùng.
       ansible.builtin.command: >-
-        docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -N -e "SELECT 1;"
+        docker exec mariadb mariadb --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf -N -e "SELECT 1;"
       register: _mariadb_ping
       changed_when: false
       no_log: true
@@ -201,7 +267,7 @@
 
     - name: Galera phải Primary, ready và đủ node
       ansible.builtin.command: >-
-        docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -N
+        docker exec mariadb mariadb --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf -N
         -e "SHOW STATUS WHERE Variable_name IN ('wsrep_cluster_size','wsrep_cluster_status','wsrep_ready');"
       register: _galera_status
       changed_when: false

@@ -11,24 +11,36 @@
 # suy đoán, đã xác nhận bằng docker cp thử trực tiếp. Container distroless không có bunzip2 bên
 # trong -> phải copy file .bz2 ra host rồi giải nén bằng python3 (luôn có sẵn, Ansible managed node
 # yêu cầu) thay vì cài thêm gói bzip2.
+- name: "Xác định đường dẫn schema cache (versioned theo image tag — xem giải thích BUG bên dưới)"
+  ansible.builtin.set_fact:
+    _idb_schema_file: "{{ icinga_base_dir }}/icingadb/schema-{{ images.icingadb | hash('md5') }}.sql"
+
+# BUG THẬT (đọc trước khi đổi lại tên file tĩnh "schema.sql"): tên file CỐ ĐỊNH + guard "creates:"
+# khiến schema cache không bao giờ tự làm mới khi đổi tag images.icingadb trong globals.yml để
+# upgrade — bootstrap 1 cụm MỚI trên CÙNG control host sau đó (vd DR/lab mới) sẽ seed nhầm schema CŨ.
+# Fix: nhúng md5 của chính "images.icingadb" vào tên file — đổi tag/registry/digest tự tạo tên file
+# khác, "creates:" tự đúng lại.
 - name: Trích schema icingadb từ image ra host (docker cp, thử /schema/ trước, fallback .bz2 ở root)
   ansible.builtin.shell: |
-    set -e
-    cid=$(docker create {{ images.icingadb }})
-    if docker cp "$cid:/schema/mysql/schema.sql" {{ icinga_base_dir }}/icingadb/schema.sql 2>/dev/null; then
+    set -euo pipefail
+    tmp={{ (_idb_schema_file ~ '.tmp') | quote }}
+    tmp_bz2="${tmp}.bz2"
+    cid=$(docker create {{ images.icingadb | quote }})
+    trap 'docker rm -vf "$cid" >/dev/null 2>&1 || true; rm -f "$tmp" "$tmp_bz2"' EXIT
+    if docker cp "$cid:/schema/mysql/schema.sql" "$tmp" 2>/dev/null; then
       :
     else
-      docker cp "$cid:/mysql.schema.sql.bz2" {{ icinga_base_dir }}/icingadb/schema.sql.bz2
-      python3 -c "
-    import bz2, shutil
-    with bz2.open('{{ icinga_base_dir }}/icingadb/schema.sql.bz2') as f_in, open('{{ icinga_base_dir }}/icingadb/schema.sql', 'wb') as f_out:
-        shutil.copyfileobj(f_in, f_out)
-    "
-      rm -f {{ icinga_base_dir }}/icingadb/schema.sql.bz2
+      docker cp "$cid:/mysql.schema.sql.bz2" "$tmp_bz2"
+      python3 -c 'import bz2, shutil, sys; shutil.copyfileobj(bz2.open(sys.argv[1]), open(sys.argv[2], "wb"))' "$tmp_bz2" "$tmp"
     fi
+    test -s "$tmp"
+    grep -qiE 'CREATE[[:space:]]+TABLE' "$tmp"
+    mv -f "$tmp" {{ _idb_schema_file | quote }}
     docker rm -v "$cid" >/dev/null
+    trap - EXIT
   args:
-    creates: "{{ icinga_base_dir }}/icingadb/schema.sql"
+    executable: /bin/bash
+    creates: "{{ _idb_schema_file }}"
   when: inventory_hostname == ca_host
 
 - name: Kiểm tra schema icingadb đã import chưa
@@ -48,11 +60,13 @@
   # giải thích BUG THẬT ở roles/icingaweb2/tasks/main.yml): client mariadb bản mới mặc định yêu cầu
   # TLS, MariaDB tự cài tay (external) thường không bật TLS -> "SSL is required, but the server does
   # not support it" nếu không bật db_client_skip_ssl: true trong globals.yml.
-  ansible.builtin.shell: >
-    docker run --rm --network host {{ images.mariadb }}
-    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingadb -p{{ icingadb_db_password }}
+  ansible.builtin.command: >
+    docker run --rm --network host -e MYSQL_PWD {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingadb
     -N -e "SELECT COUNT(*) FROM information_schema.tables
            WHERE table_schema='icingadb' AND table_name='host';"
+  environment:
+    MYSQL_PWD: "{{ icingadb_db_password }}"
   register: idb_schema_check
   retries: 24
   delay: 5
@@ -62,12 +76,16 @@
   when: inventory_hostname == ca_host
 
 - name: Import schema icingadb (nếu chưa có bảng)
+  # Vẫn cần "shell" (redirect stdin "<" từ file) — password truyền qua MYSQL_PWD (environment),
+  # KHÔNG nhúng vào chuỗi lệnh, nên "$" trong password không bị /bin/sh diễn giải sai (TODO.md 2.1).
   ansible.builtin.shell: >
-    docker run --rm -i --network host {{ images.mariadb }}
-    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingadb -p{{ icingadb_db_password }} icingadb
-    < {{ icinga_base_dir }}/icingadb/schema.sql
+    docker run --rm -i --network host -e MYSQL_PWD {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingadb icingadb
+    < {{ _idb_schema_file }}
   args:
     executable: /bin/bash
+  environment:
+    MYSQL_PWD: "{{ icingadb_db_password }}"
   no_log: true
   when:
     - inventory_hostname == ca_host

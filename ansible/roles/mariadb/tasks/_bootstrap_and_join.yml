@@ -51,7 +51,9 @@
 # chặn đúng tình huống "cụm chết toàn bộ".)
 - name: (bootstrap+join) Ping nhanh xem node này đang sống không (snapshot — không phải chờ dài)
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: mariadb_liveness_probe
   changed_when: false
   failed_when: false
@@ -102,7 +104,9 @@
 
 - name: (bootstrap+join) Chờ node đầu sẵn sàng trước khi node khác join
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: mariadb_bootstrap_ping
   retries: 24
   delay: 5
@@ -120,11 +124,32 @@
 
 - name: (bootstrap+join) Chờ MariaDB sẵn sàng trên chính node mình
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: db_ping
   retries: 24
   delay: 5
   until: db_ping.rc == 0
+  changed_when: false
+  no_log: true
+
+# SELECT 1 can succeed while a joiner is still finishing SST.  Writing into
+# /var/lib/mysql before wsrep reaches Synced is unsafe because the final SST
+# datadir swap can remove the file again (reproduced during the 2026-10-04
+# total-cluster-crash drill).  Wait for the durable post-SST state first.
+- name: (bootstrap+join) Chờ từng node đạt wsrep Synced trước khi ghi healthcheck
+  ansible.builtin.command: >
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot
+    -N -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
+  register: _bootstrap_join_synced
+  retries: 36
+  delay: 5
+  until:
+    - _bootstrap_join_synced.rc == 0
+    - "'Synced' in (_bootstrap_join_synced.stdout | default(''))"
   changed_when: false
   no_log: true
 
@@ -139,7 +164,7 @@
     docker exec -i mariadb bash -c 'umask 077; cat > /var/lib/mysql/.my-healthcheck.cnf' <<'HCEOF'
     [client]
     user = root
-    password = {{ mariadb_root_password }}
+    password = {{ mariadb_root_password | to_json }}
     HCEOF
   args:
     executable: /bin/bash
@@ -149,6 +174,48 @@
   # registered result after the shell command has already succeeded.
   changed_when: not (mariadb_grastate.stat.exists | default(false))
   no_log: true
+
+- name: (bootstrap+join) Xác nhận healthcheck credential tồn tại sau SST
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - mariadb
+      - test
+      - -s
+      - /var/lib/mysql/.my-healthcheck.cnf
+  register: _bootstrap_join_healthcheck_file
+  retries: 12
+  delay: 2
+  until: _bootstrap_join_healthcheck_file.rc == 0
+  changed_when: false
+
+- name: (bootstrap+join) Chờ mọi node cùng vào Primary/Synced trước khi restart node bootstrap
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - mariadb
+      - mariadb
+      - --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf
+      - -N
+      - -e
+      - >-
+        SHOW STATUS WHERE Variable_name IN
+        ('wsrep_cluster_size','wsrep_cluster_status',
+         'wsrep_local_state_comment','wsrep_ready');
+  register: _bootstrap_join_cluster_ready
+  changed_when: false
+  retries: 36
+  delay: 5
+  until:
+    - "'Primary' in _bootstrap_join_cluster_ready.stdout"
+    - "'Synced' in _bootstrap_join_cluster_ready.stdout"
+    - "'ON' in _bootstrap_join_cluster_ready.stdout"
+    - >-
+      (_bootstrap_join_cluster_ready.stdout_lines
+       | select('search', 'wsrep_cluster_size')
+       | first | default('0 0')).split()[-1] | int == galera_count | int
 
 # Bỏ cờ --wsrep-new-cluster SAU KHI mọi node đã join xong (an toàn — xem giải thích BUG ở đầu file).
 - name: (bootstrap+join) Bỏ cờ --wsrep-new-cluster khỏi node đầu (sau khi cả cụm đã join xong)
@@ -161,7 +228,9 @@
 
 - name: (bootstrap+join) Chờ node đầu sẵn sàng lại sau khi bỏ cờ
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: mariadb_bootstrap_ping2
   retries: 24
   delay: 5
@@ -177,8 +246,10 @@
 
 - name: (bootstrap+join) Đọc wsrep_cluster_size + wsrep_ready thật (xác nhận cluster form đúng)
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }}
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot
     -N -e "SHOW STATUS LIKE 'wsrep_%';"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: wsrep_status
   changed_when: false
   no_log: true
@@ -189,3 +260,15 @@
       wsrep_cluster_size thật trên {{ inventory_hostname }} =
       {{ (wsrep_status.stdout_lines | select('search', 'wsrep_cluster_size') | list | first | default('')).split()[-1] | default('?') }}
       (kỳ vọng {{ galera_count }}).
+
+- name: (bootstrap+join) Chặn nếu cụm sau recovery chưa Primary/Synced/Ready và đủ node
+  ansible.builtin.assert:
+    that:
+      - "'Primary' in wsrep_status.stdout"
+      - "'Synced' in wsrep_status.stdout"
+      - "'ON' in wsrep_status.stdout"
+      - >-
+        (wsrep_status.stdout_lines
+         | select('search', 'wsrep_cluster_size')
+         | first | default('0 0')).split()[-1] | int == galera_count | int
+    fail_msg: "Galera trên {{ inventory_hostname }} chưa hội tụ đầy đủ sau bootstrap/join."

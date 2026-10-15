@@ -28,6 +28,7 @@
 
 - name: (postcheck) Every Galera node must be Primary, Synced and ready
   ansible.builtin.assert:
+    quiet: true
     that:
       - "'Primary' in item.stdout"
       - "'Synced' in item.stdout"
@@ -47,7 +48,7 @@
 
 - name: (postcheck) MariaDB standalone phải trả lời SELECT 1
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -N -e "SELECT 1;"
+    docker exec mariadb mariadb --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf -N -e "SELECT 1;"
   changed_when: false
   no_log: true
   when:

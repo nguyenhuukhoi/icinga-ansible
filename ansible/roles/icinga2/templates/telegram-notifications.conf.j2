@@ -36,8 +36,8 @@ object NotificationCommand "telegram-host-notification" {
     "-s" = "$host.state$"
     "-y" = "$notification.type$"
   }
-  vars.telegram_bot_token = "{{ telegram_bot_token }}"
-  vars.telegram_chat_id   = "{{ telegram_chat_id }}"
+  vars.telegram_bot_token = {{ telegram_bot_token | to_json }}
+  vars.telegram_chat_id   = {{ telegram_chat_id | to_json }}
 }
 
 object NotificationCommand "telegram-service-notification" {
@@ -55,8 +55,8 @@ object NotificationCommand "telegram-service-notification" {
     "-s" = "$service.state$"
     "-y" = "$notification.type$"
   }
-  vars.telegram_bot_token = "{{ telegram_bot_token }}"
-  vars.telegram_chat_id   = "{{ telegram_chat_id }}"
+  vars.telegram_bot_token = {{ telegram_bot_token | to_json }}
+  vars.telegram_chat_id   = {{ telegram_chat_id | to_json }}
 }
 
 /* LƯU Ý (BUG THẬT ĐÃ GẶP 2026-07-23): "import" trong "apply Notification" phải trỏ tới 1 NOTIFICATION

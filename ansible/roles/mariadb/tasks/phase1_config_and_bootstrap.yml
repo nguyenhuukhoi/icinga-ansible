@@ -76,7 +76,9 @@
 
 - name: Chờ MariaDB sẵn sàng (standalone)
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: db_ping
   retries: 24
   delay: 5
@@ -96,13 +98,17 @@
     - mariadb_cluster_mode | bool
     - inventory_hostname == mariadb_bootstrap_host
 
-- name: (cluster) Ping nhanh xem node đầu đang sống không (snapshot — không phải chờ dài)
+- name: (cluster) Ping nhanh mọi node để biết cụm còn primary component đang sống không
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
-  register: mariadb_liveness_probe
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
+  register: mariadb_cluster_liveness
   changed_when: false
   failed_when: false
   no_log: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['galera'] }}"
   when:
     - mariadb_cluster_mode | bool
     - inventory_hostname == mariadb_bootstrap_host
@@ -118,7 +124,7 @@
     - mariadb_cluster_mode | bool
     - inventory_hostname == mariadb_bootstrap_host
     - mariadb_grastate.stat.exists
-    - mariadb_liveness_probe.rc | default(1) != 0
+    - (mariadb_cluster_liveness.results | default([]) | selectattr('rc', 'equalto', 0) | list | length) == 0
 
 - name: (cluster) Node đầu bootstrap (--wsrep-new-cluster) — CHỈ khi cần fresh
   ansible.builtin.include_tasks: _start_container.yml
@@ -142,7 +148,9 @@
 # wsrep_local_state_comment=Synced thật (không chỉ SELECT 1 trả lời được), đúng cứng cựa hơn bản cũ.
 - name: (cluster) Chờ node đầu SELECT 1 được (mariadbd đã khởi động xong)
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: mariadb_bootstrap_ping
   retries: 24
   delay: 5
@@ -155,8 +163,10 @@
 
 - name: (cluster) Chờ node đầu wsrep_local_state_comment=Synced (không chỉ "sống", phải THẬT SỰ ready)
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }}
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot
     -N -e "SHOW STATUS LIKE 'wsrep_local_state_comment'"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: mariadb_bootstrap_synced
   retries: 24
   delay: 5

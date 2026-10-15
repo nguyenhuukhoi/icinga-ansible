@@ -55,7 +55,8 @@ TEXT=$(printf '%s %s - %s on %s is %s\n\nHost: %s\nService: %s\nAddress: %s\nDat
   "$ICON" "$NOTIFICATIONTYPE" "$SERVICEDISPLAYNAME" "$HOSTDISPLAYNAME" "$SERVICESTATE" \
   "$HOSTDISPLAYNAME" "$SERVICEDISPLAYNAME" "$HOSTADDRESS" "$LONGDATETIME" "$SERVICEOUTPUT")
 
-curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+curl --fail-with-body --silent --show-error --connect-timeout 10 --max-time 30 \
+  -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
   --data-urlencode "chat_id=${CHAT_ID}" \
   --data-urlencode "parse_mode=Markdown" \
   --data-urlencode "text=${TEXT}" \

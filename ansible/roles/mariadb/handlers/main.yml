@@ -28,7 +28,7 @@
     fi
     docker restart mariadb
     for i in $(seq 1 24); do
-      docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1" >/dev/null 2>&1 && exit 0
+      docker exec mariadb mariadb --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf -e "SELECT 1" >/dev/null 2>&1 && exit 0
       sleep 5
     done
     echo "mariadb khong san sang lai sau restart (vuot 120s)" >&2

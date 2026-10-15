@@ -53,18 +53,11 @@
   failed_when: dir_mig.rc != 0 and 'up to date' not in (dir_mig.stdout | default('') | lower)
   when: inventory_hostname == ca_host
 
-- name: Kiểm tra Director có cần kickstart không (idempotent)
-  ansible.builtin.command: "{{ web_run_full }} director kickstart required"
-  register: director_kickstart_required
-  changed_when: false
-  failed_when: director_kickstart_required.rc not in [0, 1]
-  when: inventory_hostname == ca_host
-
-- name: Kickstart Director và import Endpoint/Zone/CheckCommand từ Icinga API
+- name: Đồng bộ Director với Endpoint/Zone/CheckCommand hiện tại từ Icinga API
   ansible.builtin.command: "{{ web_run_full }} director kickstart run"
-  register: director_kickstart
-  changed_when: true
+  # `director kickstart required` chỉ cho biết Director đã được khởi tạo hay chưa; nó không phát hiện
+  # topology drift. Vì vậy dùng nó làm điều kiện khiến endpoint/zone của node đã xóa tồn tại mãi trong
+  # Director. `kickstart run` là phép reconcile idempotent và cũng xóa object import không còn trong API.
+  changed_when: false
   no_log: true
-  when:
-    - inventory_hostname == ca_host
-    - director_kickstart_required.rc == 0
+  when: inventory_hostname == ca_host

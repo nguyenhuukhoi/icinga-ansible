@@ -39,22 +39,23 @@
         _restore_ca_dir: "{{ icinga_base_dir }}/icinga2/data/var/lib/icinga2/ca"
       when: inventory_hostname == ca_host
 
-    - name: Kiểm tra ca_host ĐÃ có CA chưa (không ghi đè CA đang dùng thật)
+    - name: Kiểm tra ca_host ĐÃ có bất kỳ CA state nào chưa
       ansible.builtin.stat:
-        path: "{{ _restore_ca_dir }}/ca.crt"
-      register: _existing_ca_stat
+        path: "{{ _restore_ca_dir }}/{{ item }}"
+      loop: [ca.crt, ca.key]
+      register: _existing_ca_files
       when: inventory_hostname == ca_host
 
-    - name: Fail nếu ca_host đã có CA rồi
+    - name: Fail nếu ca_host đã có toàn bộ hoặc một phần CA
       ansible.builtin.fail:
         msg: >-
-          {{ ca_host }} đã có CA sẵn ({{ _restore_ca_dir }}/ca.crt tồn tại) — nghĩa là đã deploy
-          trước đó rồi, KHÔNG phải host mới. restore-pki chỉ chạy được ngay sau
+          {{ ca_host }} đã có CA state trong {{ _restore_ca_dir }} — nghĩa là đã deploy trước đó
+          hoặc một lần restore dở dang. restore-pki chỉ chạy được ngay sau
           bootstrap-servers, trước deploy lần đầu. Muốn thay CA của cụm đang chạy là việc khác,
           KHÔNG được playbook này hỗ trợ (rủi ro cao, cần quy trình riêng).
       when:
         - inventory_hostname == ca_host
-        - _existing_ca_stat.stat.exists
+        - (_existing_ca_files.results | selectattr('stat.exists') | list | length) > 0
 
     - name: Kiểm tra file pki_backup có tồn tại trên ca_host không
       ansible.builtin.stat:
@@ -62,15 +63,29 @@
       register: _pki_backup_stat
       when: inventory_hostname == ca_host
 
-    - name: Fail nếu không tìm thấy pki_backup trên ca_host
-      ansible.builtin.fail:
-        msg: >-
-          Không tìm thấy {{ pki_backup }} trên {{ ca_host }} — copy file pki-*.tar.gz (từ
-          backup-full/mariadb-backup) lên ĐÚNG {{ ca_host }} trước khi chạy lại (scp/rsync trực
-          tiếp lên host này, KHÔNG phải deployment node).
+    - name: Require a non-empty regular PKI archive on ca_host
+      ansible.builtin.assert:
+        that:
+          - _pki_backup_stat.stat.exists
+          - _pki_backup_stat.stat.isreg
+          - _pki_backup_stat.stat.size | int > 0
+        fail_msg: >-
+          Không tìm thấy file PKI hợp lệ {{ pki_backup }} trên {{ ca_host }} — copy file
+          pki-*.tar.gz từ backup-full/mariadb-backup lên đúng host này trước khi chạy lại.
       when:
         - inventory_hostname == ca_host
-        - not _pki_backup_stat.stat.exists
+
+    - name: Validate archive structure before writing any CA state
+      ansible.builtin.shell: |
+        set -euo pipefail
+        members=$(tar -tzf {{ pki_backup | quote }})
+        grep -Eq '^[^/]+/ca\.crt$' <<<"$members"
+        grep -Eq '^[^/]+/ca\.key$' <<<"$members"
+        ! grep -Eq '(^|/)\.\.(/|$)|^/' <<<"$members"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: inventory_hostname == ca_host
 
     - name: Tạo thư mục CA đích
       ansible.builtin.file:
@@ -91,22 +106,27 @@
         extra_opts: ["--strip-components=1"]
       when: inventory_hostname == ca_host
 
-    - name: Xác nhận ca.crt/ca.key đã đúng chỗ sau khi giải nén
+    - name: Xác nhận ca.crt và ca.key đã đúng chỗ sau khi giải nén
       ansible.builtin.stat:
-        path: "{{ _restore_ca_dir }}/ca.crt"
-      register: _restored_ca_stat
+        path: "{{ _restore_ca_dir }}/{{ item }}"
+      loop: [ca.crt, ca.key]
+      register: _restored_ca_files
       when: inventory_hostname == ca_host
 
-    - name: Fail nếu giải nén xong vẫn không thấy ca.crt (cấu trúc tar khác kỳ vọng)
-      ansible.builtin.fail:
-        msg: >-
-          Giải nén {{ pki_backup }} xong nhưng KHÔNG thấy {{ _restore_ca_dir }}/ca.crt — cấu trúc
-          file tar khác kỳ vọng (mong đợi ca.crt/ca.key nằm ngay top-level trong tar, dùng
-          --strip-components=1 nếu tar có 1 lớp thư mục cha). Kiểm tra tay bằng
-          "tar -tzf {{ pki_backup }}".
+    - name: Require both restored CA files to be non-empty
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.size | int > 0
+        fail_msg: >-
+          Giải nén {{ pki_backup }} xong nhưng {{ item.item }} bị thiếu/rỗng trong
+          {{ _restore_ca_dir }}; không được deploy với CA không hoàn chỉnh.
+      loop: "{{ _restored_ca_files.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
       when:
         - inventory_hostname == ca_host
-        - not _restored_ca_stat.stat.exists
 
     - name: In xác nhận thành công
       ansible.builtin.debug:

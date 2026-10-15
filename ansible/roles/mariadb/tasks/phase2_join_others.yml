@@ -18,7 +18,9 @@
 
 - name: (cluster) Chờ node này SELECT 1 được
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: db_ping
   retries: 24
   delay: 5
@@ -31,8 +33,10 @@
 
 - name: (cluster) Chờ node này wsrep_local_state_comment=Synced (SST/IST xong thật)
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }}
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot
     -N -e "SHOW STATUS LIKE 'wsrep_local_state_comment'"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: mariadb_join_synced
   retries: 24
   delay: 5
@@ -52,7 +56,7 @@
     docker exec -i mariadb bash -c 'umask 077; cat > /var/lib/mysql/.my-healthcheck.cnf' <<'HCEOF'
     [client]
     user = root
-    password = {{ mariadb_root_password }}
+    password = {{ mariadb_root_password | to_json }}
     HCEOF
   args:
     executable: /bin/bash

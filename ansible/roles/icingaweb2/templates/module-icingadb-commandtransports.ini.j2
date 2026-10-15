@@ -13,7 +13,7 @@ transport = "api"
 host      = "127.0.0.1"
 port      = "{{ icinga2_api_port }}"
 username  = "icingadb-web"
-password  = "{{ icingadb_web_api_user_password }}"
+password  = {{ icingadb_web_api_user_password | to_json }}
 {% if is_ha_master | bool %}
 {% set peer = (groups['master'] | reject('equalto', inventory_hostname) | list)[0] %}
 
@@ -22,5 +22,5 @@ transport = "api"
 host      = "{{ hostvars[peer].ansible_host | default(peer) }}"
 port      = "{{ icinga2_api_port }}"
 username  = "icingadb-web"
-password  = "{{ icingadb_web_api_user_password }}"
+password  = {{ icingadb_web_api_user_password | to_json }}
 {% endif %}

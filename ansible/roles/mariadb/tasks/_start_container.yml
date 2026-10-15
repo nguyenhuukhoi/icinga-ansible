@@ -37,7 +37,7 @@
     content: |
       [client]
       user = root
-      password = {{ mariadb_root_password }}
+      password = {{ mariadb_root_password | to_json }}
     dest: "{{ mariadb_data }}/.my-healthcheck.cnf"
     mode: "0600"
   no_log: true

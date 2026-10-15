@@ -1,6 +1,6 @@
 # =============================================================================
 # upgrade-plan.yml — DRY-RUN: dò image đang chạy vs icinga_image_versions (globals.yml) + schema DB.
-# KHÔNG đổi gì trên hệ thống (chỉ có thể pull image đích để đọc metadata). Xem design.md mục 13.2.
+# KHÔNG đổi DB/runtime; image đích phải được kéo sẵn bằng lệnh `pull`. Xem design.md mục 13.2.
 # File nằm trong playbooks/ -> nạp group_vars/all.yml tường minh (giống destroy.yml).
 # =============================================================================
 - name: Upgrade plan (dry-run)
@@ -17,6 +17,11 @@
           upgrade-plan hiện chỉ hỗ trợ managed_db. Nhánh external DB không được phép dùng root và
           chưa có mô hình backup/rollback do DBA xác nhận.
       run_once: true
+
+    - name: Kiểm tra topology và version đích
+      ansible.builtin.include_role:
+        name: prechecks
+      when: inventory_hostname == ca_host
 
     - name: Chạy plan trên ca_host
       ansible.builtin.include_role:

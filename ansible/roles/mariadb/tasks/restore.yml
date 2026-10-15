@@ -3,15 +3,19 @@
 # Gọi qua playbook ansible/playbooks/mariadb-recovery.yml -e recovery_mode=restore-backup -e confirm=yes
 # PHÁ HUỶ dữ liệu hiện tại trên TOÀN BỘ node [galera] — chặn cứng nếu thiếu confirm, theo mẫu destroy.yml.
 #
-# restore_backup_ts (tuỳ chọn, "-e restore_backup_ts=20260722-101500"): chọn đúng bản backup theo
-# timestamp. Không set = đọc con trỏ LATEST_PRE_UPGRADE (do `upgrade` tự ghi trước khi nâng cấp).
+# restore_backup_ts (tuỳ chọn): chọn đúng timestamp. Nếu không set, restore_backup_tag mặc định là
+# pre_upgrade và đọc LATEST_PRE_UPGRADE. Dùng `-e restore_backup_tag=full` để đọc LATEST_FULL của
+# backup-full. Khi artifact không còn trên galera[0], role tự tìm trong controller backup directory,
+# validate rồi stage sang Galera mới trước khi dừng DB.
 
 - name: Chặn nếu chưa xác nhận
   ansible.builtin.fail:
     msg: >-
       restore-backup sẽ XOÁ dữ liệu MariaDB hiện tại trên MỌI node [galera] rồi ghi đè bằng bản backup.
       Chạy lại kèm xác nhận: icinga-ansible mariadb-recovery -e recovery_mode=restore-backup -e confirm=yes
-  when: not (confirm | default(false) | bool)
+  # So sánh chuỗi CHÍNH XÁC "yes" (không phải "| bool") — "| bool" coi cả "true"/"on"/"1" hợp lệ, dễ
+  # bị 1 giá trị "confirm: true" sót lại trong group_vars/host_vars âm thầm cho qua thao tác XOÁ DỮ LIỆU.
+  when: (confirm | default('')) != 'yes'
   run_once: true
 
 # ---------- Xác định đường dẫn (độc lập với main.yml — restore không đi qua main.yml) ----------
@@ -21,73 +25,198 @@
     mariadb_etc: "{{ icinga_etc_dir }}/mariadb"
     mariadb_data: "{{ icinga_base_dir }}/mariadb/data"
 
-# BUG đã gặp thật (2026-07-22): nếu icingadb daemon (trên master) vẫn chạy sống trong lúc restore,
-# nó liên tục thử kết nối/ghi vào DB đúng lúc cụm Galera đang ở bước nhạy cảm nhất (bootstrap 1 node
-# rồi tái tạo lại NGAY để bỏ cờ --wsrep-new-cluster — xem _start_container.yml) — traffic xen vào
-# đúng lúc container mariadb bị stop+recreate làm node bootstrap rớt khỏi view đang hình thành, 2 node
-# join sau (đang wipe/SST) tự lập primary component RIÊNG không có data thật -> seqno lệch giữa các
-# node, cụm không hội tụ đúng. Phải dừng hẳn icingadb TRƯỚC khi đụng tới mariadb, không được để chạy
-# song song trong lúc restore.
-- name: Dừng icingadb daemon trên các master (tránh traffic sống xen vào lúc restore DB)
-  community.docker.docker_container:
-    name: icingadb
-    state: stopped
-  delegate_to: "{{ item }}"
-  loop: "{{ groups['master'] }}"
-  run_once: true
-  ignore_errors: true
-
 # Toàn bộ đoạn xác định file backup CHỈ chạy trên node bootstrap (file backup nằm trên đĩa của đúng
 # node đó — xem backup.yml: chỉ galera[0] chạy backup). Các host khác đọc lại kết quả qua
 # hostvars[mariadb_bootstrap_host] — cùng mẫu đã dùng ổn định ở _bootstrap_and_join.yml
 # (hostvars[...].mariadb_grastate), KHÔNG dùng run_once+set_fact (chỉ set trên 1 host, host khác
 # không thấy được giá trị — bug thật đã bắt trước khi chạy, xem lại 2 lần nếu sửa lại đoạn này).
-- name: Xác định restore_backup_ts (tham số hoặc con trỏ LATEST_PRE_UPGRADE)
+- name: Xác định timestamp và nhãn con trỏ restore được yêu cầu
   ansible.builtin.set_fact:
     restore_backup_ts: "{{ restore_backup_ts | default('') }}"
+    restore_backup_tag_norm: "{{ (restore_backup_tag | default('pre_upgrade')) | replace('-', '_') | upper }}"
   when: inventory_hostname == mariadb_bootstrap_host
 
-- name: Đọc con trỏ LATEST_PRE_UPGRADE (khi không chỉ định restore_backup_ts)
-  ansible.builtin.slurp:
-    src: "{{ mariadb_backup.destination }}/LATEST_PRE_UPGRADE"
-  register: _latest_pre_upgrade
+- name: Chặn nhãn restore có thể thoát khỏi backup directory
+  ansible.builtin.assert:
+    that:
+      - restore_backup_tag_norm is regex('^[A-Z0-9_]+$')
+      - >-
+        (restore_backup_ts | string | length == 0) or
+        ((restore_backup_ts | string) is regex('^[0-9]{8}-[0-9]{6}$'))
+    fail_msg: >-
+      restore_backup_tag chỉ được dùng chữ/số/gạch dưới (gạch ngang được đổi thành gạch dưới), và
+      restore_backup_ts nếu khai phải có dạng YYYYMMDD-HHMMSS.
+  when: inventory_hostname == mariadb_bootstrap_host
+
+- name: Kiểm tra con trỏ restore trên node Galera chính
+  ansible.builtin.stat:
+    path: "{{ mariadb_backup.destination }}/LATEST_{{ restore_backup_tag_norm }}"
+  register: _restore_remote_pointer
   when:
     - inventory_hostname == mariadb_bootstrap_host
-    - restore_backup_ts | length == 0
+    - restore_backup_ts | string | length == 0
+
+- name: Kiểm tra con trỏ restore trên deployment node
+  ansible.builtin.stat:
+    path: "{{ mariadb_controller_backup_dir }}/LATEST_{{ restore_backup_tag_norm }}"
+  register: _restore_controller_pointer
+  delegate_to: localhost
+  become: false
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - restore_backup_ts | string | length == 0
+
+- name: Đọc con trỏ restore trên node Galera chính
+  ansible.builtin.slurp:
+    src: "{{ mariadb_backup.destination }}/LATEST_{{ restore_backup_tag_norm }}"
+  register: _restore_remote_pointer_data
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - restore_backup_ts | string | length == 0
+    - _restore_remote_pointer.stat.exists
+
+- name: Đọc con trỏ restore dự phòng trên deployment node
+  ansible.builtin.slurp:
+    src: "{{ mariadb_controller_backup_dir }}/LATEST_{{ restore_backup_tag_norm }}"
+  register: _restore_controller_pointer_data
+  delegate_to: localhost
+  become: false
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - restore_backup_ts | string | length == 0
+    - not _restore_remote_pointer.stat.exists
+    - _restore_controller_pointer.stat.exists
+
+- name: Chặn nếu không có timestamp và không tìm thấy con trỏ restore
+  ansible.builtin.assert:
+    that:
+      - _restore_remote_pointer.stat.exists or _restore_controller_pointer.stat.exists
+    fail_msg: >-
+      Không có restore_backup_ts và cũng không tìm thấy LATEST_{{ restore_backup_tag_norm }} trên
+      galera[0] hoặc deployment node. Với backup-full hãy dùng -e restore_backup_tag=full.
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - restore_backup_ts | string | length == 0
 
 - name: Chốt restore_backup_ts cuối cùng
   ansible.builtin.set_fact:
-    restore_backup_ts: "{{ (_latest_pre_upgrade.content | b64decode | trim) if restore_backup_ts | length == 0 else restore_backup_ts }}"
+    restore_backup_ts: >-
+      {{ ((_restore_remote_pointer_data.content
+            if _restore_remote_pointer.stat.exists
+            else _restore_controller_pointer_data.content) | b64decode | trim)
+         if restore_backup_ts | string | length == 0 else restore_backup_ts | string }}
   when: inventory_hostname == mariadb_bootstrap_host
 
-- name: Tìm đúng file backup khớp restore_backup_ts
+- name: Chặn timestamp restore không đúng định dạng hoặc chứa glob/path
+  ansible.builtin.assert:
+    that: restore_backup_ts is regex('^[0-9]{8}-[0-9]{6}$')
+    fail_msg: >-
+      restore_backup_ts phải có dạng YYYYMMDD-HHMMSS; giá trị từ tham số hoặc LATEST pointer không hợp lệ.
+      Dừng trước khi tìm artifact hoặc dừng service.
+  when: inventory_hostname == mariadb_bootstrap_host
+
+- name: Tìm file backup khớp timestamp trên node Galera chính
+  ansible.builtin.find:
+    paths: "{{ mariadb_backup.destination }}"
+    patterns: "db-*{{ restore_backup_ts }}.xb.gz"
+  register: _restore_backup_remote_found
+  when: inventory_hostname == mariadb_bootstrap_host
+
+- name: Tìm file backup dự phòng trên deployment node
+  ansible.builtin.find:
+    paths: "{{ mariadb_controller_backup_dir }}"
+    patterns: "db-*{{ restore_backup_ts }}.xb.gz"
+  register: _restore_backup_controller_found
+  delegate_to: localhost
+  become: false
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - _restore_backup_remote_found.matched | int == 0
+
+- name: Chặn nếu artifact không xác định duy nhất trước khi stage
+  ansible.builtin.fail:
+    msg: >-
+      Timestamp {{ restore_backup_ts }} phải khớp đúng một DB artifact. Tìm thấy
+      {{ _restore_backup_remote_found.matched }} file trên galera[0] và
+      {{ _restore_backup_controller_found.matched | default(0) }} file dự phòng trên deployment node.
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - >-
+      (_restore_backup_remote_found.matched | int > 1) or
+      ((_restore_backup_remote_found.matched | int == 0) and
+       (_restore_backup_controller_found.matched | default(0) | int != 1))
+
+- name: Tạo thư mục backup trên Galera mới trước khi stage artifact
+  ansible.builtin.file:
+    path: "{{ mariadb_backup.destination }}"
+    state: directory
+    mode: "0700"
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - _restore_backup_remote_found.matched | int == 0
+
+- name: Stage DB artifact từ deployment node sang Galera mới
+  ansible.builtin.copy:
+    src: "{{ _restore_backup_controller_found.files[0].path }}"
+    dest: "{{ mariadb_backup.destination }}/{{ _restore_backup_controller_found.files[0].path | basename }}"
+    mode: "0600"
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - _restore_backup_remote_found.matched | int == 0
+
+- name: Tìm lại DB artifact sau bước stage
   ansible.builtin.find:
     paths: "{{ mariadb_backup.destination }}"
     patterns: "db-*{{ restore_backup_ts }}.xb.gz"
   register: _restore_backup_found
   when: inventory_hostname == mariadb_bootstrap_host
 
-- name: Chặn nếu không tìm thấy đúng 1 file backup
-  ansible.builtin.fail:
-    msg: >-
-      Tìm thấy {{ _restore_backup_found.files | length }} file khớp "db-*{{ restore_backup_ts }}.xb.gz"
-      trong {{ mariadb_backup.destination }} trên {{ mariadb_bootstrap_host }} — cần đúng 1. Kiểm tra
-      lại restore_backup_ts hoặc con trỏ LATEST_PRE_UPGRADE.
-  when:
-    - inventory_hostname == mariadb_bootstrap_host
-    - _restore_backup_found.files | length != 1
+- name: Xác nhận Galera chính có đúng một artifact để restore
+  ansible.builtin.assert:
+    that:
+      - _restore_backup_found.matched | int == 1
+      - _restore_backup_found.files[0].size | int > 0
+    fail_msg: "DB artifact sau bước stage không tồn tại duy nhất hoặc bị rỗng."
+  when: inventory_hostname == mariadb_bootstrap_host
 
 - name: In rõ bản backup sẽ restore (để log lại, tránh restore nhầm)
   ansible.builtin.debug:
     msg: "Restore từ {{ mariadb_bootstrap_host }}:{{ _restore_backup_found.files[0].path }}"
   when: inventory_hostname == mariadb_bootstrap_host
 
+- name: Kiểm tra gzip và stream backup đọc được trước khi dừng MariaDB
+  ansible.builtin.shell: |
+    set -euo pipefail
+    validate_dir=$(mktemp -d {{ (mariadb_data ~ '/../restore-validate.XXXXXX') | quote }})
+    trap 'rm -rf "$validate_dir"' EXIT
+    gzip -t {{ _restore_backup_found.files[0].path | quote }}
+    gzip -cd {{ _restore_backup_found.files[0].path | quote }} |
+      docker run --rm -i -v "$validate_dir:/validate" \
+        --entrypoint mbstream {{ images.mariadb | quote }} -x -C /validate
+    test -s "$validate_dir/mariadb_backup_info"
+    test -s "$validate_dir/backup-my.cnf"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: inventory_hostname == mariadb_bootstrap_host
+
+# Stop publishers only after the requested artifact has been found and fully
+# validated. A typo/missing/corrupt backup must not cause avoidable monitoring
+# downtime. Icinga DB must still be stopped before MariaDB is touched because it
+# otherwise writes while Galera is being bootstrapped and SST is in progress.
+- name: Dừng icingadb daemon trên các master ngay trước khi restore DB
+  community.docker.docker_container:
+    name: icingadb
+    state: stopped
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['master'] }}"
+  run_once: true
+
 # ---------- Dừng toàn bộ container mariadb trên [galera] ----------
 - name: Dừng container mariadb (mọi node galera)
   community.docker.docker_container:
     name: mariadb
     state: stopped
-  ignore_errors: true
 
 # ---------- Prepare + copy-back TRÊN NODE BOOTSTRAP ----------
 - name: Tạo thư mục staging (prepare bản backup)
@@ -151,7 +280,9 @@
 
 - name: Restore xong — kiểm tra icingadb/icingaweb2 vẫn còn trong DB (không suy đoán)
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -N -e "SHOW DATABASES;"
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -N -e "SHOW DATABASES;"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: restore_db_check
   changed_when: false
   no_log: true

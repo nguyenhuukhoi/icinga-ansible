@@ -1,7 +1,13 @@
 ---
 # plan.yml — dry-run: dò image đang CHẠY (docker inspect) vs image ĐÍCH (globals.yml icinga_image_versions)
-# + schema DB cần migrate hay không. Chạy 1 lần trên ca_host. READ-ONLY (chỉ có thể pull image đích để
-# đọc schema — không recreate container nào, không đổi DB).
+# + schema DB cần migrate hay không. Chạy 1 lần trên ca_host. READ-ONLY: image đích phải được kéo
+# sẵn bằng lệnh `pull`; plan chỉ tạo/xoá một container tạm để đọc schema, không đổi DB/runtime.
+
+- name: (plan) Verify the actual target schema and bundled migration chain
+  ansible.builtin.include_tasks: validate_icingadb_target.yml
+
+- name: (plan) Read the exact schema from the target Icinga Web image
+  ansible.builtin.include_tasks: validate_icingaweb_target.yml
 
 - name: (plan) Dò image đang chạy — icinga2/icingadb/icingaweb2/icingadb-redis (ca_host)
   community.docker.docker_container_info:
@@ -28,31 +34,27 @@
         {'svc': 'mariadb',        'cur': (_plan_db_img.container.Config.Image | default('?')), 'tgt': images.mariadb}
       ] }}
 
-# --- schema icingadb: hiện tại (DB) vs version đích lớn nhất trong file upgrade bundle ---
+# --- schema icingadb: hiện tại (DB) vs schema đọc trực tiếp từ image đích ---
 - name: (plan) icingadb schema hiện tại (DB)
+  # MYSQL_PWD (environment), KHÔNG -p<password> trên cmdline — "no_log: true" không che được
+  # "ps aux"/"/proc/<pid>/cmdline" trong lúc lệnh đang chạy.
   ansible.builtin.command: >
-    docker run --rm --network host {{ images.mariadb }}
-    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uroot -p{{ mariadb_root_password }}
+    docker run --rm --network host -e MYSQL_PWD {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uroot
     -N -e "SELECT COALESCE(MAX(version),0) FROM icingadb.icingadb_schema;"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: _plan_idb_cur
   changed_when: false
   no_log: true
 
-- name: (plan) icingadb — version đích lớn nhất trong file upgrade bundle
-  ansible.builtin.set_fact:
-    _plan_idb_files: >-
-      {{ (_plan_idb_files | default([])) + [
-           (lookup('file', item)
-             | regex_search('INSERT\s+INTO\s+icingadb_schema[^;]*VALUES\s*\(\s*([0-9]+)', '\1')
-             | first | int) ] }}
-  loop: "{{ query('fileglob', role_path + '/files/icingadb-upgrades/*.sql') }}"
-  loop_control: { label: "{{ item | basename }}" }
-
 - name: (plan) icingaweb2 schema hiện tại (DB)
   ansible.builtin.command: >
-    docker run --rm --network host {{ images.mariadb }}
-    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uroot -p{{ mariadb_root_password }}
+    docker run --rm --network host -e MYSQL_PWD {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uroot
     -N -e "SELECT version FROM icingaweb2.icingaweb_schema ORDER BY id DESC LIMIT 1;"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: _plan_iweb_cur
   changed_when: false
   no_log: true
@@ -66,8 +68,8 @@
       {% endfor %}
 
       Schema DB (dò THẬT, không suy từ version image):
-        icingadb    hiện tại: {{ _plan_idb_cur.stdout | trim }}   đích(bundle max): {{ (_plan_idb_files | default([0]) + [0]) | max }}   -> {{ 'CẦN migrate' if ((_plan_idb_files | default([0]) + [0]) | max) > (_plan_idb_cur.stdout | trim | int) else 'không cần' }}
-        icingaweb2  hiện tại: {{ _plan_iweb_cur.stdout | trim }}   (file upgrade lấy từ image đích lúc chạy 'upgrade')
+        icingadb    hiện tại: {{ _plan_idb_cur.stdout | trim }}   đích(image): {{ _idb_target_schema_version }}   -> {{ 'CẦN migrate' if (_idb_target_schema_version | int) > (_plan_idb_cur.stdout | trim | int) else ('KHÔNG THỂ downgrade tại chỗ' if (_idb_target_schema_version | int) < (_plan_idb_cur.stdout | trim | int) else 'không cần') }}
+        icingaweb2  hiện tại: {{ _plan_iweb_cur.stdout | trim }}   đích(image): {{ _iweb_target_schema_version }}   -> {{ 'CẦN migrate' if (_iweb_target_schema_version is version(_plan_iweb_cur.stdout | trim, '>')) else ('KHÔNG THỂ downgrade tại chỗ' if (_iweb_target_schema_version is version(_plan_iweb_cur.stdout | trim, '<')) else 'không cần') }}
 
       Chạy 'icinga-ansible upgrade' để thực thi (tự backup pre-upgrade, rollback được nếu fail).
       =============================================================

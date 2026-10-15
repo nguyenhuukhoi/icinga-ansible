@@ -24,6 +24,7 @@
 
 - name: MariaDB recovery (restore-backup hoặc recover-cluster)
   hosts: galera
+  any_errors_fatal: true
   become: true
   gather_facts: false
   vars_files:

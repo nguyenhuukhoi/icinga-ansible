@@ -12,7 +12,7 @@
 
 - name: Rollback — chặn external DB vì tool không sở hữu bản backup DB đó
   hosts: "{{ groups['master'][0] }}"
-  become: false
+  become: true
   gather_facts: false
   vars_files:
     - "{{ playbook_dir }}/../group_vars/all.yml"
@@ -24,9 +24,29 @@
           rollback tự động hiện chỉ hỗ trợ managed_db. Với external DB, DBA phải khôi phục DB trước;
           tool không có datadir/backup để restore và sẽ không tiếp tục như thể đã rollback thành công.
 
+    # globals.yml lúc này phải đã trỏ về bộ version cũ. Chặn cấu hình đích sai
+    # trước khi restore phá huỷ datadir hiện tại.
+    - name: Kiểm tra topology và version rollback trước khi restore DB
+      ansible.builtin.include_role:
+        name: prechecks
+
+- name: Rollback — require every old target image before restoring DB
+  hosts: all_hosts
+  any_errors_fatal: true
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Validate rollback images on this host
+      ansible.builtin.include_role:
+        name: upgrade
+        tasks_from: validate_target_images
+
 # --- 1. Restore DB pre-upgrade ----------------------------------------------------------------
 - name: Rollback — restore DB pre-upgrade
   hosts: galera
+  any_errors_fatal: true
   become: true
   gather_facts: false
   vars_files:

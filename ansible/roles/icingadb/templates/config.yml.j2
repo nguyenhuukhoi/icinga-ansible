@@ -6,12 +6,12 @@ database:
   port: {{ db_port }}
   database: {{ icingadb_db_name }}
   user: icingadb
-  password: {{ icingadb_db_password }}
+  password: {{ icingadb_db_password | to_json }}
 
 redis:
   host: 127.0.0.1
   port: {{ icingadb_redis_port }}
-  password: {{ icingadb_redis_password }}
+  password: {{ icingadb_redis_password | to_json }}
 
 logging:
   level: info

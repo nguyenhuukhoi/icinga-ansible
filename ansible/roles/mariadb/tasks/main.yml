@@ -83,7 +83,9 @@
 # ---------- Chờ MariaDB sẵn sàng trên chính node mình (chỉ nhánh standalone — cluster đã chờ ở trên) ----------
 - name: Chờ MariaDB sẵn sàng (standalone)
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: db_ping
   retries: 24
   delay: 5
@@ -106,20 +108,36 @@
   no_log: true
   when: inventory_hostname == mariadb_bootstrap_host
 
+- name: "Ping lại root trước khi check credential (tránh nhầm transient blip thành 'sai credential')"
+  ansible.builtin.command: >
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -h127.0.0.1 -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
+  register: _managed_db_preflight_ping
+  retries: 6
+  delay: 5
+  until: _managed_db_preflight_ping.rc == 0
+  changed_when: false
+  no_log: true
+  when: inventory_hostname == mariadb_bootstrap_host
+
 - name: Kiểm tra credential và grant hiện tại của từng service DB
   ansible.builtin.command:
     argv:
       - docker
       - exec
+      - -e
+      - MYSQL_PWD
       - mariadb
       - mariadb
       - -h127.0.0.1
       - "-u{{ item.name }}"
-      - "-p{{ item.password }}"
       - -N
       - "{{ item.database }}"
       - -e
       - "SHOW GRANTS FOR CURRENT_USER;"
+  environment:
+    MYSQL_PWD: "{{ item.password }}"
   loop: "{{ _managed_db_services | default([]) }}"
   register: _managed_db_auth_checks
   changed_when: false
@@ -149,17 +167,28 @@
     argv:
       - docker
       - exec
+      - -e
+      - MYSQL_PWD
       - mariadb
       - mariadb
       - "-uroot"
-      - "-p{{ mariadb_root_password }}"
       - -e
       - >-
         CREATE DATABASE IF NOT EXISTS `{{ item.item.database }}` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-        CREATE USER IF NOT EXISTS '{{ item.item.name }}'@'%' IDENTIFIED BY '{{ item.item.password }}';
-        ALTER USER '{{ item.item.name }}'@'%' IDENTIFIED BY '{{ item.item.password }}';
+        CREATE USER IF NOT EXISTS '{{ item.item.name }}'@'%';
+        SET @icinga_password = CONVERT(FROM_BASE64('{{ item.item.password | b64encode }}') USING utf8mb4);
+        SET @icinga_alter_user = CONCAT(
+          'ALTER USER ''{{ item.item.name }}''@''%'' IDENTIFIED BY ',
+          QUOTE(@icinga_password)
+        );
+        PREPARE icinga_alter_user_stmt FROM @icinga_alter_user;
+        EXECUTE icinga_alter_user_stmt;
+        DEALLOCATE PREPARE icinga_alter_user_stmt;
+        SET @icinga_password = NULL;
         GRANT ALL ON `{{ item.item.database }}`.* TO '{{ item.item.name }}'@'%';
         FLUSH PRIVILEGES;
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   loop: "{{ _managed_db_auth_checks.results | default([]) }}"
   loop_control:
     label: "{{ item.item.name }}"

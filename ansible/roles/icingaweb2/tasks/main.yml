@@ -35,13 +35,30 @@
     mode: "0770"
 
 # ---------- Import schema icingaweb2 (một lần) ----------
+- name: "Xác định đường dẫn schema cache (versioned theo image tag — xem giải thích BUG bên dưới)"
+  ansible.builtin.set_fact:
+    _web_schema_file: "{{ web_base }}/mysql.schema-{{ images.icingaweb2 | hash('md5') }}.sql"
+
+# BUG THẬT (đọc trước khi đổi lại tên file tĩnh "mysql.schema.sql"): dùng tên file CỐ ĐỊNH + guard
+# "creates:" khiến schema cache KHÔNG BAO GIỜ tự làm mới khi đổi tag images.icingaweb2 trong
+# globals.yml để upgrade — nếu sau đó cần bootstrap 1 cụm MỚI trên CÙNG control host (vd DR/lab mới),
+# task này thấy file "đã tồn tại" (từ lần deploy CŨ trước khi upgrade) và seed nhầm schema CŨ vào DB
+# mới. Fix: tên file nhúng md5 của chính "images.icingaweb2" — đổi tag/registry/digest tự tạo tên
+# file khác, "creates:" tự đúng lại mà không cần logic invalidate riêng.
 - name: Trích schema icingaweb2 từ image (override entrypoint cat)
-  ansible.builtin.shell: >
-    docker run --rm --entrypoint cat {{ images.icingaweb2 }}
-    /usr/share/icingaweb2/schema/mysql.schema.sql
-    > {{ web_base }}/mysql.schema.sql
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp={{ (_web_schema_file ~ '.tmp') | quote }}
+    trap 'rm -f "$tmp"' EXIT
+    docker run --rm --entrypoint cat {{ images.icingaweb2 | quote }} \
+      /usr/share/icingaweb2/schema/mysql.schema.sql > "$tmp"
+    test -s "$tmp"
+    grep -qiE 'CREATE[[:space:]]+TABLE' "$tmp"
+    mv -f "$tmp" {{ _web_schema_file | quote }}
+    trap - EXIT
   args:
-    creates: "{{ web_base }}/mysql.schema.sql"
+    executable: /bin/bash
+    creates: "{{ _web_schema_file }}"
   when: inventory_hostname == ca_host
 
 # Dùng user 'icingaweb2' (KHÔNG phải root) — 2026-07-23, theo yêu cầu người dùng: nhánh
@@ -59,22 +76,31 @@
 # db_client_skip_ssl: true trong globals.yml. KHÔNG tự bật mặc định — người dùng chủ động khai khi
 # server thật sự không hỗ trợ TLS, tránh âm thầm tắt bảo mật cho DB CÓ hỗ trợ TLS.
 - name: Kiểm tra schema icingaweb2 đã import chưa
-  ansible.builtin.shell: >
-    docker run --rm --network host {{ images.mariadb }}
-    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingaweb2 -p{{ icingaweb2_db_password }}
+  # Dùng "command" (không phải "shell") + MYSQL_PWD env var — KHÔNG nhúng password thẳng vào chuỗi
+  # lệnh. Bug đã gặp (TODO.md 2.1): "shell" đi qua /bin/sh, "$" trong password bị hiểu nhầm thành
+  # tham chiếu biến và bị nuốt mất. Áp dụng lại đúng quy tắc đó cho password DB, không chỉ bcrypt hash.
+  ansible.builtin.command: >
+    docker run --rm --network host -e MYSQL_PWD {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingaweb2
     -N -e "SELECT COUNT(*) FROM information_schema.tables
            WHERE table_schema='icingaweb2' AND table_name='icingaweb_user';"
+  environment:
+    MYSQL_PWD: "{{ icingaweb2_db_password }}"
   register: web_schema_check
   changed_when: false
   no_log: true
   when: inventory_hostname == ca_host
 
 - name: Import schema icingaweb2 (nếu chưa có bảng user)
+  # Vẫn cần "shell" (redirect stdin "<" từ file) — nhưng password không còn nằm trong chuỗi lệnh,
+  # truyền qua MYSQL_PWD (environment) nên "$" trong password không bị /bin/sh diễn giải sai nữa.
   ansible.builtin.shell: >
-    docker run --rm -i --network host {{ images.mariadb }}
-    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingaweb2 -p{{ icingaweb2_db_password }} icingaweb2
-    < {{ web_base }}/mysql.schema.sql
+    docker run --rm -i --network host -e MYSQL_PWD {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }} -uicingaweb2 icingaweb2
+    < {{ _web_schema_file }}
   args: { executable: /bin/bash }
+  environment:
+    MYSQL_PWD: "{{ icingaweb2_db_password }}"
   no_log: true
   when:
     - inventory_hostname == ca_host
@@ -118,6 +144,31 @@
   no_log: true
   when: inventory_hostname == ca_host
 
+- name: Tạo bcrypt mới bằng runtime PHP của image Icinga Web
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -i
+      - --entrypoint
+      - php
+      - "{{ images.icingaweb2 }}"
+      - -r
+      - >-
+        $v=json_decode(stream_get_contents(STDIN), true);
+        $h=password_hash($v['password'], PASSWORD_BCRYPT);
+        if ($h === false) { exit(1); }
+        echo $h;
+    stdin: "{{ {'password': icingaweb2_admin_password} | to_json }}"
+    stdin_add_newline: false
+  register: _admin_password_new_hash
+  changed_when: false
+  no_log: true
+  when:
+    - inventory_hostname == ca_host
+    - _admin_password_verify.rc | default(1) != 0
+
 - name: Tạo/cập nhật admin user trong DB khi password thay đổi (bcrypt)
   # KHÔNG dùng "shell": bcrypt hash chứa "$" (vd $2b$12$...) sẽ bị /bin/sh hiểu nhầm
   # thành tham chiếu biến ($2, $12, ...) và bị "nuốt" mất -> hash lưu vào DB sai,
@@ -127,7 +178,7 @@
   vars:
     _admin_sql: >-
       INSERT INTO icingaweb_user (name, active, password_hash)
-      VALUES ('{{ icingaweb2_admin_user }}', 1, '{{ icingaweb2_admin_password | password_hash('bcrypt') }}')
+      VALUES ('{{ icingaweb2_admin_user }}', 1, '{{ _admin_password_new_hash.stdout | trim }}')
       ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash);
   ansible.builtin.command:
     argv: >-
@@ -196,6 +247,29 @@
     }}
   loop_control:
     label: "{{ item.section }}.{{ item.option }}"
+  no_log: true
+  notify: Reload icingaweb2
+
+# BUG THẬT (đọc trước khi xoá task này): commandtransports.ini seed-once giống resources.ini (để
+# không mất tuỳ biến qua UI — không áp dụng ở đây vì module không có UI sửa command transport), NHƯNG
+# khác resources.ini, file này KHÔNG có task đồng bộ lại field do Ansible quản lý — password của
+# ApiUser "icingadb-web" (icinga2_api_users.conf.j2 render lại MỖI reconfigure) và password ở đây bị
+# LỆCH VĨNH VIỄN ngay khi rotate icingadb_web_api_user_password trong passwords.yml: nút Acknowledge/
+# Downtime/Comment/Reschedule trên dashboard lỗi 401, không tự phục hồi dù chạy lại deploy bao nhiêu
+# lần. Fix: đồng bộ lại đúng field password (section tên cố định "icinga2", cộng "icinga2-<peer>" nếu
+# HA — tên section động theo đúng cách template sinh ra) mỗi lần reconfigure, giống resources.ini/redis.ini.
+- name: Đồng bộ password ApiUser do Ansible quản lý trong commandtransports.ini
+  community.general.ini_file:
+    path: "{{ icinga_etc_dir }}/icingaweb2/modules/icingadb/commandtransports.ini"
+    section: "{{ item }}"
+    option: password
+    value: "{{ icingadb_web_api_user_password | to_json }}"
+    mode: "0660"
+    no_extra_spaces: true
+  loop: >-
+    {{ ['icinga2'] +
+       (['icinga2-' ~ (groups['master'] | reject('equalto', inventory_hostname) | list)[0]]
+        if is_ha_master | bool else []) }}
   no_log: true
   notify: Reload icingaweb2
 
@@ -318,6 +392,20 @@
 # Image serve Apache trên 8080 (không phải 80). Host network -> bind 8080 trên host.
 # BYPASS entrypoint Go của image (nó tự quản /data + đọc ENV, xung đột config mount sẵn).
 # Chạy thẳng Apache: vhost icingaweb2 + Listen 8080 đã baked trong conf-enabled.
+- name: Tính checksum toàn bộ config web/director trước khi tạo container
+  ansible.builtin.find:
+    paths: "{{ icinga_etc_dir }}/icingaweb2"
+    recurse: true
+    file_type: file
+    get_checksum: true
+  register: _web_config_files
+
+- name: Chốt fingerprint config web/director
+  ansible.builtin.set_fact:
+    _web_config_fingerprint: >-
+      {{ (_web_config_files.files | sort(attribute='path') | map(attribute='checksum') | join(':'))
+         | hash('sha256') }}
+
 - name: Khởi động container icingaweb2 (Apache2 trực tiếp, host network, cổng 8080)
   community.docker.docker_container:
     name: icingaweb2
@@ -332,6 +420,8 @@
       - -c
       - ". /etc/apache2/envvars; exec apache2 -DFOREGROUND"
     volumes: "{{ _web_volumes }}"
+    env:
+      ICINGA_ANSIBLE_CONFIG_FINGERPRINT: "{{ _web_config_fingerprint }}"
     # BUG THẬT ĐÃ GẶP ở role icinga2 (áp dụng phòng ngừa ở đây luôn): so sánh mặc định của
     # docker_container cho "volumes" không phát hiện mount bị RÚT BỚT (chỉ phát hiện thêm mới) — tắt
     # module director rồi reconfigure sẽ không tự gỡ mount config.ini cũ nếu không có "strict".
@@ -406,6 +496,8 @@
         php -d auto_prepend_file=/usr/share/icingaweb2/modules/incubator/vendor/autoload.php
         /usr/local/bin/icingacli director daemon run
     volumes: "{{ _web_volumes }}"
+    env:
+      ICINGA_ANSIBLE_CONFIG_FINGERPRINT: "{{ _web_config_fingerprint }}"
     comparisons:
       volumes: strict
     healthcheck:
@@ -413,7 +505,21 @@
       interval: 30s
       timeout: 5s
       retries: 3
+  register: _director_daemon_container
   when: "'director' in (enable_icingaweb2_modules | default([]))"
+
+- name: Chờ Director daemon healthy sau khi tạo/tái tạo
+  community.docker.docker_container_info:
+    name: icingaweb2-director-daemon
+  register: _director_daemon_health
+  until:
+    - _director_daemon_health.exists | default(false)
+    - (_director_daemon_health.container.State.Health.Status | default('starting')) == 'healthy'
+  retries: 24
+  delay: 5
+  when:
+    - "'director' in (enable_icingaweb2_modules | default([]))"
+    - _director_daemon_container.changed | default(false)
 
 - name: Dừng container icingaweb2-director-daemon nếu module director bị tắt (dọn mồ côi)
   community.docker.docker_container:

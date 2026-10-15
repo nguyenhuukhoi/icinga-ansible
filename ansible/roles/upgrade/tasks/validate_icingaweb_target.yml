@@ -1,0 +1,36 @@
+---
+# Read the schema version from the full SQL shipped by the selected Web image.
+# This gives upgrade-plan/migration an exact upper bound and prevents applying
+# upgrade files past the schema understood by the target image.
+
+- name: (Icinga Web target) Check that the target image was pulled
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ images.icingaweb2 }}"]
+  register: _iweb_target_image_info
+  changed_when: false
+  failed_when: false
+
+- name: (Icinga Web target) Refuse an upgrade without the target image
+  ansible.builtin.assert:
+    that: _iweb_target_image_info.rc == 0
+    fail_msg: >-
+      Chưa có image Icinga Web 2 đích {{ images.icingaweb2 }} trên {{ inventory_hostname }}.
+      Chạy `icinga-ansible pull -i <inventory>` trước upgrade-plan/upgrade.
+
+- name: (Icinga Web target) Read schema version embedded in the target image
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker run --rm --entrypoint cat {{ images.icingaweb2 | quote }} \
+      /usr/share/icingaweb2/schema/mysql.schema.sql \
+      | python3 -c 'import re,sys; s=sys.stdin.read(); m=re.search(r"INSERT\s+INTO\s+`?icingaweb_schema`?.*?VALUES\s*\(\s*[\x27\x22]([^\x27\x22]+)", s, re.I|re.S); print(m.group(1) if m else "")'
+  args:
+    executable: /bin/bash
+  register: _iweb_target_schema_probe
+  changed_when: false
+  failed_when: >-
+    _iweb_target_schema_probe.rc != 0 or
+    not ((_iweb_target_schema_probe.stdout | trim) is regex('^[0-9]+\.[0-9]+\.[0-9]+$'))
+
+- name: (Icinga Web target) Store target schema version
+  ansible.builtin.set_fact:
+    _iweb_target_schema_version: "{{ _iweb_target_schema_probe.stdout | trim }}"

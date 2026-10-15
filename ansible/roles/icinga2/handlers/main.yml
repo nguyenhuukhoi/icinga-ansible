@@ -6,3 +6,20 @@
 - name: Reload icinga2
   ansible.builtin.command: docker restart icinga2
   changed_when: true
+  when:
+    - _icinga2_container is defined
+    - not (_icinga2_container.changed | default(false))
+
+- name: Chờ icinga2 healthy sau reload
+  community.docker.docker_container_info:
+    name: icinga2
+  register: _icinga2_reload_health
+  until:
+    - _icinga2_reload_health.exists | default(false)
+    - (_icinga2_reload_health.container.State.Health.Status | default('starting')) == 'healthy'
+  retries: 24
+  delay: 5
+  listen: Reload icinga2
+  when:
+    - _icinga2_container is defined
+    - not (_icinga2_container.changed | default(false))

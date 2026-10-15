@@ -507,11 +507,18 @@ trên **hạ tầng IP hoàn toàn khác** bản backup — xem 3 case cụ th�
 ```bash
 # Chạy định kỳ (cron) hoặc trước khi làm việc rủi ro — TỪ deployment node
 ./tools/icinga-ansible backup-full -i ansible/inventory/my-cluster
-# sinh ra: /var/backups/icinga-ansible-config/config-<ts>.tar.gz, icingaweb2-<host>-<ts>.tar.gz
+# sinh ra trên deployment node, cùng một thư mục:
+# /var/backups/icinga-ansible-config/config-<ts>.tar.gz
+# /var/backups/icinga-ansible-config/icingaweb2-<host>-<ts>.tar.gz
+# /var/backups/icinga-ansible-config/database/db-full-<ts>.xb.gz + LATEST_FULL
+# /var/backups/icinga-ansible-config/pki/pki-<ts>.tar.gz
+# /var/backups/icinga-ansible-config/manifest-<ts>.sha256 + LATEST_COMPLETE
 # (CỐ Ý ngoài /etc/icinga-ansible — "destroy" không bao giờ đụng tới thư mục này)
-# + trên node DB chính (galera[0]): /var/backups/icinga-db/db-full-<ts>.xb.gz
-# + trên ca_host (master[0]):       /var/backups/icinga-db/pki-<ts>.tar.gz  (CHÚ Ý: khác host với DB)
-# QUAN TRỌNG: copy cả 3 file ra NGOÀI hạ tầng lab/cluster để backup có ý nghĩa thật khi mất trắng.
+# Bản gốc vẫn được tạo trên galera[0]/ca_host, sau đó playbook kiểm tra và fetch về deployment node.
+# Mọi archive trên deployment node được siết mode 0600 vì chứa secrets, database hoặc CA private key.
+# Chỉ coi bundle hoàn chỉnh khi LATEST_COMPLETE trỏ tới timestamp và manifest SHA-256 tương ứng tồn tại.
+# Kiểm tra lại sau khi copy off-site: cd /var/backups/icinga-ansible-config && sha256sum -c manifest-<ts>.sha256
+# QUAN TRỌNG: đồng bộ cả thư mục trên sang storage nằm ngoài deployment node để chịu được mất node này.
 ```
 
 > **`restore-config` dùng biến môi trường `CONFIRM=...`, KHÔNG phải cờ `-e confirm=...`** (đây là lệnh
@@ -555,9 +562,10 @@ scp pki-20260802-044728.tar.gz m1:/home/ubuntu/
 # 2b. HƯỚNG "PKI mới" (đơn giản hơn, không cần lo TicketSalt — xem lưu ý Case 3) — bỏ qua hẳn bước 2a,
 #     "deploy" ở bước 3 sẽ tự sinh CA mới hoàn toàn.
 
-# 3. Deploy + khôi phục DB
+# 3. Chép lại toàn bộ thư mục backup vào đúng icinga_config_backup_dir trên deployment node mới,
+#    deploy rồi khôi phục DB. Role tự tìm controller artifact và stage sang galera[0].
+#    Không cần scp DB thủ công lên node Galera.
 ./tools/icinga-ansible deploy -i ansible/inventory/my-cluster
-scp db-full-20260802-044728.xb.gz db1:/var/backups/icinga-db/   # copy lên ĐÚNG node DB chính (galera[0])
 ./tools/icinga-ansible mariadb-recovery -i ansible/inventory/my-cluster \
   -e recovery_mode=restore-backup -e restore_backup_ts=20260802-044728 -e confirm=yes
 ./tools/icinga-ansible deploy -i ansible/inventory/my-cluster   # restart icingadb (restore không tự bật lại)
@@ -630,8 +638,8 @@ satellite
 
 #### Case 4 — Chỉ còn bản backup DB, mất cả hai master và không có backup CA/config
 
-Runbook thao tác đầy đủ, gồm cả tạo 1 deployment + 2 master + 3 DB trên OpenStack bằng IP mới,
-safety gate trước khi xóa VM và các lệnh verify sau restore: [`DR_DB_ONLY_STEP_BY_STEP.md`](DR_DB_ONLY_STEP_BY_STEP.md).
+Runbook thao tác đầy đủ, gồm topology, safety gate và lệnh verify sau restore nằm trong
+[`OPERATIONS-RUNBOOK-VI.md`](OPERATIONS-RUNBOOK-VI.md), mục recovery khi chỉ còn DB.
 
 Đây không phải full restore: DB giữ history/state và database của Director/Web, nhưng **không chứa**
 CA private key, `globals.yml`, `passwords.yml`, file `zones.d`, SSH key hay credential OpenStack.
@@ -664,8 +672,10 @@ $EDITOR /etc/icinga-ansible/passwords.yml
 ./tools/icinga-ansible bootstrap-servers -i ansible/inventory/my-cluster
 ./tools/icinga-ansible deploy -i ansible/inventory/my-cluster
 
-# 3. Copy physical backup lên galera[0], rồi restore đè DB tạm.
-scp db-full-20260908-120000.xb.gz db1:/var/backups/icinga-db/
+# 3. Đặt physical backup vào controller backup directory; restore sẽ validate rồi tự stage lên galera[0].
+sudo install -d -m 0700 /var/backups/icinga-ansible-config/database
+sudo install -m 0600 db-full-20260908-120000.xb.gz \
+  /var/backups/icinga-ansible-config/database/db-full-20260908-120000.xb.gz
 ./tools/icinga-ansible mariadb-recovery -i ansible/inventory/my-cluster \
   -e recovery_mode=restore-backup -e restore_backup_ts=20260908-120000 -e confirm=yes
 
@@ -686,6 +696,33 @@ Sau recovery phải xác nhận hai master trả cùng nội dung JSON ở
 `/var/lib/icinga2/icingadb.env`, DB không phát sinh thêm environment ngoài dự kiến, history cũ đọc
 được và mọi agent/satellite đã enroll lại. File environment ID tạm trước recovery được giữ cạnh file
 thật với suffix `.before-db-only-recovery` để audit; không được dùng lại file tạm này.
+
+#### Case 5 — Còn nguyên deployment node (config/password/inventory) và DB backup; mất toàn bộ service node
+
+Đây là trường hợp thuận lợi hơn Case 4 và là drill đã chạy thật ngày 2026-10-04 với 2 master, 2 satellite,
+3 Galera. Không chạy `init-config`/`genpwd`, vì `/etc/icinga-ansible/globals.yml`, `passwords.yml`, inventory
+và override trên deployment node chính là desired state cần giữ. Nếu không còn PKI backup, để lần deploy đầu
+tạo CA mới; các satellite/agent được dựng lại phải enroll bằng CA mới.
+
+```bash
+# 1. Dựng runtime tạm từ đúng config/inventory còn lại trên deployment node.
+./tools/icinga-ansible bootstrap-servers -i ansible/inventory/my-cluster
+./tools/icinga-ansible deploy -i ansible/inventory/my-cluster
+
+# 2. Restore trực tiếp artifact do backup-full đã fetch về deployment node.
+# Không cần scp lên galera[0]; restore tự đọc LATEST_FULL, validate rồi stage sang Galera mới.
+./tools/icinga-ansible mariadb-recovery -i ansible/inventory/my-cluster \
+  -e recovery_mode=restore-backup -e restore_backup_tag=full -e confirm=yes
+
+# 3. Khôi phục environment ID cũ từ DB, sau đó hội tụ toàn stack và kiểm tra sâu.
+./tools/icinga-ansible recover-db-only -i ansible/inventory/my-cluster -e confirm=yes
+./tools/icinga-ansible deploy -i ansible/inventory/my-cluster
+./tools/icinga-ansible check -i ansible/inventory/my-cluster
+```
+
+Director DB được restore nguyên vẹn. Lần deploy cuối chạy migration và kickstart reconcile với topology hiện
+tại. Nếu inventory mới vẫn là 2 master + 2 satellite, Director phải có đúng bốn endpoint đó và đúng các zone
+khai trong `satellite_zones`; `check` sẽ fail nếu còn endpoint/zone cũ hoặc thiếu object mới.
 
 ## 8. Thêm/bớt node vào cụm đang chạy (HA)
 
@@ -731,9 +768,13 @@ khớp version binary, để tránh chạy sai. Log luôn nêu rõ số hiện t
 
 **Cách 1 — dùng lệnh `upgrade` có sẵn (khuyến nghị, tự làm hết các bước):**
 ```bash
+./tools/icinga-ansible pull         -i ansible/inventory/my-cluster   # phải thành công trên mọi host
 ./tools/icinga-ansible upgrade-plan -i ansible/inventory/my-cluster   # xem trước, không đổi gì
 ./tools/icinga-ansible upgrade      -i ansible/inventory/my-cluster   # tự backup + migrate + redeploy
 ```
+
+`upgrade-plan` đọc schema thật từ image đích nên yêu cầu image đã được `pull`. `upgrade` cũng kiểm
+tra tất cả image cần thiết đã có trên đúng host trước khi tạo backup hoặc gây downtime.
 
 **Cách 2 — tự migrate tay rồi restart** (đúng những gì lệnh `upgrade` làm ở bước migrate, chỉ khác
 là bạn tự tay): tìm file SQL migrate ĐÚNG version trong

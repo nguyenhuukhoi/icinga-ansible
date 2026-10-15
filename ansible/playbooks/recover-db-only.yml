@@ -1,13 +1,13 @@
 ---
-# Disaster recovery when the only surviving artifact is a physical MariaDB
-# backup. Run this AFTER mariadb-recovery has restored the backup. The first
+# Disaster recovery when deployment config/passwords and a physical MariaDB backup survive, but
+# all node runtime/PKI is lost. Run this AFTER mariadb-recovery has restored the backup. The first
 # temporary deploy creates a new CA and a temporary Icinga DB environment ID;
 # this playbook replaces that ID with the one stored in the restored DB and
 # clears Redis before Icinga 2 is started again. Icinga DB/Web remain stopped
 # until the final deploy reconciles service credentials from passwords.yml.
 #
-# This cannot reconstruct Icinga configuration, secrets or the old CA private
-# key. Those inputs must be recreated before the final deploy.
+# The original deployment configuration and passwords must be used. The old CA private key is not
+# reconstructed; every node receives a new certificate during the rebuild.
 
 - name: DB-only recovery | validate request
   hosts: "{{ groups['master'][0] }}"
@@ -22,7 +22,8 @@
     - name: Require explicit acknowledgement and a managed database
       ansible.builtin.assert:
         that:
-          - confirm | bool
+          # So sánh chuỗi CHÍNH XÁC "yes" — xem giải thích ở restore.yml/remove-master.yml.
+          - confirm == 'yes'
           - icinga_database_type == 'managed_db'
           - (groups['master'] | default([]) | length) >= 1
           - (groups['galera'] | default([]) | length) >= 1
@@ -31,22 +32,9 @@
           Run it with -e confirm=yes after mariadb-recovery restore-backup has
           completed. External databases must be recovered by their DBA.
 
-- name: DB-only recovery | stop all database publishers and consumers
-  hosts: master
-  become: true
-  gather_facts: false
-  vars_files:
-    - "{{ playbook_dir }}/../group_vars/all.yml"
-  tasks:
-    - name: Stop Web, Icinga DB and Icinga 2 before changing environment identity
-      ansible.builtin.command:
-        argv: [docker, stop, icingaweb2, icingadb, icinga2]
-      register: _db_only_stopped
-      changed_when: _db_only_stopped.stdout | trim | length > 0
-      failed_when: false
-
 - name: DB-only recovery | discover the environment identity from restored DB
   hosts: "{{ groups['galera'][0] }}"
+  any_errors_fatal: true
   become: true
   gather_facts: false
   vars_files:
@@ -61,8 +49,7 @@
           - exec
           - mariadb
           - mariadb
-          - "-uroot"
-          - "-p{{ mariadb_root_password }}"
+          - "--defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf"
           - --batch
           - --skip-column-names
           - icingadb
@@ -107,17 +94,15 @@
           Selected environment ID '{{ _db_only_environment_id }}' is invalid or
           does not exist in the restored database. Nothing has been changed.
 
-- name: DB-only recovery | seed both masters and rebuild Redis state
+# All read-only validation stays before service shutdown. An ambiguous DB or an
+# uninitialised master must leave the currently running temporary deployment intact.
+- name: DB-only recovery | validate every temporary master before shutdown
   hosts: master
+  any_errors_fatal: true
   become: true
   gather_facts: false
   vars_files:
     - "{{ playbook_dir }}/../group_vars/all.yml"
-  vars:
-    _db_only_environment_id: >-
-      {{ hostvars[groups['galera'][0]]._db_only_environment_id }}
-    _db_only_env_path: >-
-      {{ icinga_base_dir }}/icinga2/data/var/lib/icinga2/icingadb.env
   tasks:
     - name: Verify the temporary deployment data tree exists
       ansible.builtin.stat:
@@ -131,6 +116,64 @@
           {{ inventory_hostname }} has no initialized Icinga 2 data tree. Run
           bootstrap-servers and the temporary deploy before recover-db-only.
 
+    - name: Inspect containers required by DB-only recovery
+      community.docker.docker_container_info:
+        name: "{{ item }}"
+      loop: >-
+        {{ (['icingaweb2-director-daemon']
+            if 'director' in (enable_icingaweb2_modules | default([])) else [])
+           + ['icingaweb2', 'icingadb', 'icinga2', 'icingadb-redis'] }}
+      register: _db_only_required_containers
+      no_log: true
+
+    - name: Reduce container inspection to non-secret status
+      ansible.builtin.set_fact:
+        _db_only_container_statuses: >-
+          {{ (_db_only_container_statuses | default([]))
+             + [{'name': item.item, 'exists': item.exists | default(false)}] }}
+      loop: "{{ _db_only_required_containers.results }}"
+      no_log: true
+
+    - name: Require every recovery container before stopping services
+      ansible.builtin.assert:
+        that: item.exists
+        fail_msg: >-
+          {{ item.name }} không tồn tại trên {{ inventory_hostname }}. Temporary deploy chưa hoàn chỉnh;
+          sửa deploy trước khi chạy recover-db-only để tránh dừng cụm nửa chừng.
+      loop: "{{ _db_only_container_statuses }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+- name: DB-only recovery | stop all database publishers and consumers
+  hosts: master
+  any_errors_fatal: true
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Stop Web, Icinga DB and Icinga 2 before changing environment identity
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: stopped
+      loop: >-
+        {{ (['icingaweb2-director-daemon']
+            if 'director' in (enable_icingaweb2_modules | default([])) else [])
+           + ['icingaweb2', 'icingadb', 'icinga2'] }}
+
+- name: DB-only recovery | seed both masters and rebuild Redis state
+  hosts: master
+  any_errors_fatal: true
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _db_only_environment_id: >-
+      {{ hostvars[groups['galera'][0]]._db_only_environment_id }}
+    _db_only_env_path: >-
+      {{ icinga_base_dir }}/icinga2/data/var/lib/icinga2/icingadb.env
+  tasks:
     - name: Check whether a temporary environment ID already exists
       ansible.builtin.stat:
         path: "{{ _db_only_env_path }}"
@@ -160,13 +203,15 @@
         argv:
           - docker
           - exec
+          - -e
+          - REDISCLI_AUTH
           - icingadb-redis
           - redis-cli
           - -p
           - "{{ icingadb_redis_port | string }}"
-          - -a
-          - "{{ icingadb_redis_password }}"
           - FLUSHALL
+      environment:
+        REDISCLI_AUTH: "{{ icingadb_redis_password }}"
       register: _db_only_redis_flush
       changed_when: "'OK' in _db_only_redis_flush.stdout"
       no_log: true
@@ -211,8 +256,7 @@
           - exec
           - mariadb
           - mariadb
-          - "-uroot"
-          - "-p{{ mariadb_root_password }}"
+          - "--defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf"
           - --batch
           - --skip-column-names
           - icingadb

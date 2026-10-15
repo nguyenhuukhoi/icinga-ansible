@@ -146,16 +146,30 @@ def check_masakari(conn, auth):
         if not endpoint:
             print("UNKNOWN - Masakari (instance-ha) endpoint not found in catalog")
             sys.exit(UNKNOWN)
-        resp = sess.get(f"{endpoint}/v1/hosts")
+        base_url = endpoint.rstrip("/")
+        segment_resp = sess.get(f"{base_url}/segments")
+        if segment_resp.status_code != 200:
+            print(f"UNKNOWN - Masakari segments API returned HTTP {segment_resp.status_code}")
+            sys.exit(UNKNOWN)
+        segments = segment_resp.json().get("segments", [])
+        hosts = []
+        for segment in segments:
+            segment_id = segment.get("uuid") or segment.get("id")
+            if not segment_id:
+                print("UNKNOWN - Masakari segment response has no uuid/id")
+                sys.exit(UNKNOWN)
+            host_resp = sess.get(f"{base_url}/segments/{segment_id}/hosts")
+            if host_resp.status_code != 200:
+                print(
+                    "UNKNOWN - Masakari hosts API for segment "
+                    f"{segment_id} returned HTTP {host_resp.status_code}"
+                )
+                sys.exit(UNKNOWN)
+            hosts.extend(host_resp.json().get("hosts", []))
     except Exception as exc:
         print(f"UNKNOWN - error querying Masakari: {exc}")
         sys.exit(UNKNOWN)
 
-    if resp.status_code != 200:
-        print(f"UNKNOWN - Masakari API returned HTTP {resp.status_code}")
-        sys.exit(UNKNOWN)
-
-    hosts = resp.json().get("hosts", [])
     problems = [
         f"{h.get('name')} (reserved={h.get('reserved')}, on_maintenance={h.get('on_maintenance')})"
         for h in hosts

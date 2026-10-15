@@ -24,10 +24,25 @@
         msg: >-
           remove-master cần: -e target_host=<tên host trong inventory, vd master2> -e confirm=yes.
           Đây là thao tác PHÁ HUỶ container+dữ liệu icinga2/redis/icingadb/web TRÊN HOST ĐÓ.
-      when: not (confirm | bool) or (target_host | default('')) | length == 0
+      # So sánh chuỗi CHÍNH XÁC "yes" (không phải "confirm | bool") — "| bool" coi cả "true"/"on"/"1"
+      # là hợp lệ, nghĩa là 1 giá trị "confirm: true" sót lại trong group_vars/host_vars (vd copy-paste
+      # nhầm từ chỗ khác) sẽ ÂM THẦM cho qua thao tác PHÁ HUỶ này mà không cần ai chủ động gõ gì thêm.
+      when: confirm != 'yes' or (target_host | default('')) | length == 0
+
+    # BUG THẬT (đọc trước khi xoá check này) — xem giải thích đầy đủ ở remove-node.yml: gõ nhầm
+    # target_host khiến play xoá bên dưới chỉ bị Ansible "skip" (không fail), nhưng play "Nhắc việc
+    # còn lại" vẫn in "Đã xoá..." như thể thành công dù không đụng gì. Chặn sớm, fail rõ ràng.
+    - name: "Xác nhận target_host tồn tại trong inventory (tránh gõ sai tên bị bỏ qua âm thầm)"
+      ansible.builtin.fail:
+        msg: >-
+          target_host='{{ target_host }}' không khớp host nào trong inventory đang dùng
+          ({{ groups['all'] | join(', ') }}). Kiểm tra lại chính tả — gõ sai tên sẽ khiến play xoá bị
+          Ansible tự "skip" (không fail), dễ tưởng nhầm là đã gỡ xong dù chưa đụng gì.
+      when: target_host not in groups['all']
 
 - name: Xoá container + dữ liệu trên master bị gỡ
   hosts: "{{ target_host }}"
+  any_errors_fatal: true
   become: true
   gather_facts: false
   vars_files:
@@ -36,6 +51,7 @@
     - name: Xác nhận host này thật sự thuộc [master] (an toàn — tránh gõ nhầm target_host)
       ansible.builtin.assert:
         that:
+          - confirm == 'yes'
           - inventory_hostname in groups['master']
           - groups['master'] | length > 1
           - inventory_hostname != ca_host
@@ -44,24 +60,31 @@
           hiện tại, hãy đưa master đã có bản sao CA lên đầu nhóm [master], chạy reconfigure/check,
           rồi mới chạy remove-master với inventory đã đổi thứ tự.
 
-    - name: Dừng & xoá container icinga2/redis/icingadb/web trên host này
+    - name: Dừng & xoá container icinga2/redis/icingadb/web/Director trên host này
       community.docker.docker_container:
         name: "{{ item }}"
         state: absent
         force_kill: true
-      loop: [icingaweb2, icingadb, icingadb-redis, icinga2]
-      ignore_errors: true
+      loop: [icingaweb2-director-daemon, icingaweb2, icingadb, icingadb-redis, icinga2]
 
-    - name: Xoá dữ liệu cục bộ ({{ icinga_base_dir }}) — để add lại sạch sau này nếu cần
+    - name: Xoá riêng dữ liệu workload của master, giữ nguyên MariaDB nếu host kiêm [galera]
       ansible.builtin.file:
-        path: "{{ icinga_base_dir }}"
+        path: "{{ icinga_base_dir }}/{{ item }}"
         state: absent
+      loop: [icinga2, icingadb-redis, icingadb, icingaweb2]
 
-    - name: Tạo lại thư mục gốc rỗng
+    - name: Tạo lại cây thư mục workload rỗng
       ansible.builtin.file:
-        path: "{{ icinga_base_dir }}"
+        path: "{{ icinga_base_dir }}/{{ item }}"
         state: directory
-        mode: "0755"
+        mode: "0750"
+      loop: [icinga2/etc, icinga2/var, icinga2/pki, icingadb-redis, icingadb, icingaweb2]
+
+    - name: Xoá config workload master, giữ nguyên config MariaDB và thành phần vai trò khác
+      ansible.builtin.file:
+        path: "{{ icinga_etc_dir }}/{{ item }}"
+        state: absent
+      loop: [icinga2, icingadb, icingaweb2]
 
 - name: Nhắc việc còn lại (đọc kỹ trước khi coi remove-master đã xong)
   hosts: localhost

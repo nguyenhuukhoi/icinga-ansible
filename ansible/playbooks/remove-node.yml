@@ -22,10 +22,26 @@
         msg: >-
           remove-node cần: -e target_host=<tên host trong inventory, vd sat02> -e confirm=yes.
           Đây là thao tác PHÁ HUỶ container+dữ liệu icinga2 TRÊN HOST ĐÓ.
-      when: not (confirm | bool) or (target_host | default('')) | length == 0
+      # So sánh chuỗi CHÍNH XÁC "yes" — xem giải thích ở remove-master.yml (cùng bug class: "| bool"
+      # coi cả "true"/"on"/"1" hợp lệ, dễ bị 1 giá trị sót lại trong vars file kích hoạt nhầm).
+      when: confirm != 'yes' or (target_host | default('')) | length == 0
+
+    # BUG THẬT (đọc trước khi xoá check này): gõ nhầm target_host (không khớp host nào trong
+    # inventory) khiến play "Xoá container..." bên dưới chỉ in "skipping: no hosts matched" — KHÔNG
+    # fail — rồi play "Nhắc việc còn lại" vẫn chạy và in "Đã xoá container + dữ liệu trên
+    # '<target_host>'" dù thực tế KHÔNG đụng gì cả. Chặn sớm ở đây để gõ sai tên fail rõ ràng ngay,
+    # không phải im lặng tưởng đã xoá xong.
+    - name: "Xác nhận target_host tồn tại trong inventory (tránh gõ sai tên bị bỏ qua âm thầm)"
+      ansible.builtin.fail:
+        msg: >-
+          target_host='{{ target_host }}' không khớp host nào trong inventory đang dùng
+          ({{ groups['all'] | join(', ') }}). Kiểm tra lại chính tả — gõ sai tên sẽ khiến play xoá bị
+          Ansible tự "skip" (không fail), dễ tưởng nhầm là đã gỡ xong dù chưa đụng gì.
+      when: target_host not in groups['all']
 
 - name: Xoá container + dữ liệu trên satellite bị gỡ
   hosts: "{{ target_host }}"
+  any_errors_fatal: true
   become: true
   gather_facts: false
   vars_files:
@@ -33,7 +49,9 @@
   tasks:
     - name: Xác nhận host này thật sự thuộc [satellite] (an toàn — tránh gõ nhầm target_host)
       ansible.builtin.assert:
-        that: inventory_hostname in groups['satellite']
+        that:
+          - confirm == 'yes'
+          - inventory_hostname in groups['satellite']
         fail_msg: "'{{ inventory_hostname }}' không thuộc nhóm [satellite] trong inventory — dừng lại."
 
     - name: Dừng & xoá container icinga2 trên host này
@@ -41,18 +59,23 @@
         name: icinga2
         state: absent
         force_kill: true
-      ignore_errors: true
 
-    - name: Xoá dữ liệu cục bộ ({{ icinga_base_dir }}) — để add lại sạch sau này nếu cần
+    - name: Xoá riêng dữ liệu icinga2, giữ nguyên dữ liệu của vai trò khác trên cùng host
       ansible.builtin.file:
-        path: "{{ icinga_base_dir }}"
+        path: "{{ icinga_base_dir }}/icinga2"
         state: absent
 
-    - name: Tạo lại thư mục gốc rỗng
+    - name: Tạo lại cây thư mục icinga2 rỗng
       ansible.builtin.file:
-        path: "{{ icinga_base_dir }}"
+        path: "{{ icinga_base_dir }}/icinga2/{{ item }}"
         state: directory
-        mode: "0755"
+        mode: "0750"
+      loop: [etc, var, pki]
+
+    - name: Xoá config icinga2 của satellite bị gỡ
+      ansible.builtin.file:
+        path: "{{ icinga_etc_dir }}/icinga2"
+        state: absent
 
 - name: Nhắc việc còn lại (đọc kỹ trước khi coi remove-node đã xong)
   hosts: localhost

@@ -1,8 +1,8 @@
 ---
 # Cứu cụm Galera chết (mọi node dừng/crash) mà KHÔNG cần backup — dữ liệu vẫn còn nguyên trên đĩa
 # (design.md mục 10.4 "Recover cụm chết"). Tự động hoá đúng quy trình đã làm TAY thành công trong lúc
-# verify Galera cluster thật (2026-07-21): dừng hết -> đọc grastate.dat mọi node -> chọn node
-# safe_to_bootstrap:1 (hoặc seqno cao nhất nếu không node nào có cờ đó) -> bootstrap đúng node đó ->
+# verify Galera cluster thật (2026-07-21): dừng hết -> chạy wsrep-recover trên mọi node -> chọn node
+# có recovered seqno cao nhất -> bootstrap đúng node đó ->
 # các node còn lại join lại (IST, không mất data vì datadir vẫn còn).
 #
 # Gọi qua: ansible/playbooks/mariadb-recovery.yml -e recovery_mode=recover-cluster -e confirm=yes
@@ -14,7 +14,8 @@
     msg: >-
       recover-cluster sẽ dừng + khởi động lại container mariadb trên MỌI node [galera] để cứu cụm chết.
       Chạy lại kèm xác nhận: icinga-ansible mariadb-recovery -e recovery_mode=recover-cluster -e confirm=yes
-  when: not (confirm | default(false) | bool)
+  # So sánh chuỗi CHÍNH XÁC "yes" — xem giải thích ở restore.yml (cùng bug class với remove-master.yml).
+  when: (confirm | default('')) != 'yes'
   run_once: true
 
 - name: Xác định đường dẫn MariaDB
@@ -26,47 +27,109 @@
   community.docker.docker_container:
     name: mariadb
     state: stopped
-  ignore_errors: true
 
-- name: Đọc grastate.dat từng node
-  ansible.builtin.slurp:
-    src: "{{ mariadb_data }}/grastate.dat"
-  register: _grastate_raw
+- name: Kiểm tra grastate.dat tồn tại trên từng node (trước khi đọc)
+  ansible.builtin.stat:
+    path: "{{ mariadb_data }}/grastate.dat"
+  register: _grastate_stat
 
-- name: Parse seqno + safe_to_bootstrap từ grastate.dat (mỗi host tự parse của chính nó)
+- name: "Chặn rõ ràng nếu node chưa từng bootstrap/join (không có grastate.dat) — không phải 1 phần của cụm cần cứu"
+  ansible.builtin.fail:
+    msg: >-
+      {{ inventory_hostname }} không có {{ mariadb_data }}/grastate.dat — node này chưa từng
+      bootstrap/join lần nào (không phải thành viên cụm Galera đã formed). Gỡ host này khỏi
+      [galera] trước khi chạy recover-cluster, hoặc xác nhận đây đúng là node cần recover trước
+      khi tiếp tục.
+  when: not _grastate_stat.stat.exists
+
+- name: Chạy wsrep-recover trên từng datadir để lấy transaction position thật
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --user
+      - mysql
+      - --network
+      - "{{ docker_network_name }}"
+      - -v
+      - "{{ mariadb_data }}:/var/lib/mysql"
+      - -v
+      - "{{ mariadb_etc }}/server.cnf:/etc/mysql/mariadb.conf.d/99-icinga.cnf:ro"
+      - "{{ images.mariadb }}"
+      - mariadbd
+      - --wsrep-recover
+      - --datadir=/var/lib/mysql
+  register: _wsrep_recover
+  changed_when: false
+  failed_when: >-
+    'Recovered position:' not in
+    ((_wsrep_recover.stdout | default('')) ~ '\n' ~ (_wsrep_recover.stderr | default('')))
+
+- name: Parse UUID và seqno do wsrep-recover trả về
   ansible.builtin.set_fact:
-    _grastate_seqno: "{{ (_grastate_raw.content | b64decode | regex_search('seqno:\\s*(-?\\d+)', '\\1'))[0] | int }}"
-    _grastate_safe: "{{ (_grastate_raw.content | b64decode | regex_search('safe_to_bootstrap:\\s*(\\d+)', '\\1'))[0] | int }}"
+    _wsrep_recovered_position: >-
+      {{ (((_wsrep_recover.stdout | default('')) ~ '\n' ~ (_wsrep_recover.stderr | default('')))
+          | regex_findall('Recovered position: *([0-9a-fA-F-]+:[-0-9]+)') | first) }}
 
-- name: In grastate từng node (để log lại quyết định chọn node bootstrap)
+- name: Tách recovered UUID và seqno trên từng node
+  ansible.builtin.set_fact:
+    _wsrep_recovered_uuid: "{{ _wsrep_recovered_position.split(':')[0] }}"
+    _wsrep_recovered_seqno: "{{ _wsrep_recovered_position.split(':')[1] | int }}"
+
+- name: Chọn history UUID chiếm đa số (chịu được một lần recovery bị gián đoạn)
+  ansible.builtin.set_fact:
+    _wsrep_majority_uuid: >-
+      {%- set uuids = groups['galera'] | map('extract', hostvars, '_wsrep_recovered_uuid') | list -%}
+      {%- set ns = namespace(uuid='', count=0) -%}
+      {%- for candidate in uuids | unique -%}
+        {%- set candidate_count = uuids | select('equalto', candidate) | list | length -%}
+        {%- if candidate_count > ns.count -%}
+          {%- set ns.uuid = candidate -%}
+          {%- set ns.count = candidate_count -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.uuid }}
+    _wsrep_majority_count: >-
+      {%- set uuids = groups['galera'] | map('extract', hostvars, '_wsrep_recovered_uuid') | list -%}
+      {%- set ns = namespace(count=0) -%}
+      {%- for candidate in uuids | unique -%}
+        {%- set candidate_count = uuids | select('equalto', candidate) | list | length -%}
+        {%- if candidate_count > ns.count -%}{%- set ns.count = candidate_count -%}{%- endif -%}
+      {%- endfor -%}
+      {{ ns.count }}
+  run_once: true
+
+- name: Chặn bootstrap nếu không có history chiếm đa số hoặc seqno không hợp lệ
+  ansible.builtin.assert:
+    that:
+      - _wsrep_majority_count | int > ((galera_count | int) // 2)
+      - (groups['galera'] | map('extract', hostvars, '_wsrep_recovered_seqno') | map('int') | min) >= 0
+    fail_msg: >-
+      Không thể tự động chọn node bootstrap an toàn: cần một recovered UUID xuất hiện trên đa số
+      tuyệt đối node và mọi seqno phải >= 0. Dừng nguyên trạng để operator kiểm tra; không ghi
+      grastate.dat và không khởi động cụm.
+  run_once: true
+
+- name: In transaction position từng node
   ansible.builtin.debug:
-    msg: "{{ inventory_hostname }}: seqno={{ _grastate_seqno }} safe_to_bootstrap={{ _grastate_safe }}"
+    msg: "{{ inventory_hostname }}: recovered={{ _wsrep_recovered_position }}"
 
-# Tính 1 LẦN (run_once chạy trên host đầu tiên của batch = groups['galera'][0] vì play không serial) —
-# ưu tiên node có safe_to_bootstrap=1 (Galera tự đánh dấu lúc cụm tan rã, đáng tin nhất); nếu KHÔNG
-# node nào có cờ đó thì chọn node seqno cao nhất. Dùng {% set %}/namespace vì cần "tìm phần tử thoả
-# điều kiện qua nhiều host" — selectattr không lọc được list string thuần theo giá trị tra qua hostvars.
+# Luôn dựa trên wsrep-recover thay vì seqno trong grastate.dat. Sau crash toàn cụm, grastate có thể
+# ghi -1 trên tất cả node dù datadir chứa transaction khác nhau; chọn theo file đó có thể mất dữ liệu.
 - name: Chọn node bootstrap để cứu cụm (tính 1 lần, dùng hostvars mọi node)
   ansible.builtin.set_fact:
     mariadb_bootstrap_host: >-
-      {%- set safe_pick = namespace(host='') -%}
+      {%- set majority_uuid = hostvars[groups['galera'][0]]._wsrep_majority_uuid -%}
+      {%- set best = namespace(host='', seqno=-1) -%}
       {%- for h in groups['galera'] -%}
-        {%- if safe_pick.host == '' and hostvars[h]._grastate_safe == 1 -%}
-          {%- set safe_pick.host = h -%}
+        {%- if hostvars[h]._wsrep_recovered_uuid == majority_uuid and
+               (hostvars[h]._wsrep_recovered_seqno | int) > best.seqno -%}
+          {%- set best.host = h -%}
+          {%- set best.seqno = hostvars[h]._wsrep_recovered_seqno | int -%}
         {%- endif -%}
       {%- endfor -%}
-      {%- if safe_pick.host != '' -%}
-        {{ safe_pick.host }}
-      {%- else -%}
-        {%- set best = namespace(host=groups['galera'][0], seqno=hostvars[groups['galera'][0]]._grastate_seqno) -%}
-        {%- for h in groups['galera'] -%}
-          {%- if hostvars[h]._grastate_seqno > best.seqno -%}
-            {%- set best.host = h -%}
-            {%- set best.seqno = hostvars[h]._grastate_seqno -%}
-          {%- endif -%}
-        {%- endfor -%}
-        {{ best.host }}
-      {%- endif -%}
+      {{ best.host }}
   run_once: true
 
 - name: Đồng bộ mariadb_bootstrap_host cho mọi host (run_once chỉ set trên 1 host)
@@ -79,19 +142,27 @@
     msg: "Chọn {{ mariadb_bootstrap_host }} làm node bootstrap cứu cụm."
   run_once: true
 
-# Nếu node được chọn KHÔNG tự có safe_to_bootstrap=1 (nghĩa là chọn qua nhánh seqno cao nhất, không
-# phải node Galera tự đánh dấu an toàn) — MariaDB sẽ TỪ CHỐI --wsrep-new-cluster giống hệt bug đã gặp
-# lúc verify thật (2026-07-21: "It may not be safe to bootstrap..."). Đây là lúc OPERATOR (script này,
-# sau khi đã so sánh seqno mọi node) chủ động ghi đè cờ — đúng thủ tục chính thức Galera khi người vận
-# hành xác nhận thủ công node nào an toàn nhất, không phải bỏ qua an toàn bừa bãi.
-- name: Ghi safe_to_bootstrap=1 nếu node được chọn qua nhánh seqno (chưa tự có cờ đó)
-  ansible.builtin.replace:
+# Phải ghi CẢ uuid/seqno do wsrep-recover tìm được. Chỉ đổi safe_to_bootstrap trong khi grastate vẫn
+# chứa seqno=-1 làm Galera tạo history UUID mới và tách dữ liệu khi bỏ cờ bootstrap.
+- name: Ghi recovered UUID vào grastate.dat trên node bootstrap
+  ansible.builtin.lineinfile:
     path: "{{ mariadb_data }}/grastate.dat"
-    regexp: 'safe_to_bootstrap:\s*\d+'
-    replace: "safe_to_bootstrap: 1"
-  when:
-    - inventory_hostname == mariadb_bootstrap_host
-    - _grastate_safe != 1
+    regexp: '^uuid:'
+    line: "uuid: {{ _wsrep_recovered_uuid }}"
+  when: inventory_hostname == mariadb_bootstrap_host
+
+- name: Ghi recovered seqno vào grastate.dat trên node bootstrap
+  ansible.builtin.lineinfile:
+    path: "{{ mariadb_data }}/grastate.dat"
+    regexp: '^seqno:'
+    line: "seqno: {{ _wsrep_recovered_seqno }}"
+  when: inventory_hostname == mariadb_bootstrap_host
+
+- name: Chỉ đánh dấu node bootstrap là safe_to_bootstrap
+  ansible.builtin.lineinfile:
+    path: "{{ mariadb_data }}/grastate.dat"
+    regexp: '^safe_to_bootstrap:'
+    line: "safe_to_bootstrap: {{ 1 if inventory_hostname == mariadb_bootstrap_host else 0 }}"
 
 # ---------- Bootstrap node được chọn + các node còn lại join lại (IST, không mất data) ----------
 - name: Bootstrap node được chọn + các node còn lại join

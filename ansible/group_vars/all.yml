@@ -49,6 +49,9 @@ icinga_etc_dir: "/etc/icinga-ansible"
 # giá trị dưới đây chỉ là fallback nếu role bị gọi tay không qua CLI (vd test/debug). KHÔNG dùng
 # để merge vào output, chỉ là NGUỒN Ansible đọc trên chính control node trước khi ghi ra target node.
 deploy_config_dir: "/etc/icinga-ansible/config"
+# Directory on the Ansible control node. This can differ from icinga_etc_dir
+# when ICINGA_ANSIBLE_CONFIG_DIR is used to manage multiple deployments.
+controller_config_dir: "/etc/icinga-ansible"
 
 # --- Thư mục backup-full (config + icingaweb2), trên DEPLOY NODE --------------------
 # CỐ Ý đặt NGOÀI icinga_etc_dir (khác {{ icinga_etc_dir }}/backups trước đây, 2026-07-29 sau khi
@@ -61,6 +64,11 @@ deploy_config_dir: "/etc/icinga-ansible/config"
 # Tác dụng phụ: hết luôn bug "exclude_path không hoạt động" (design.md 10.6) — trước đây backups/
 # nằm trong chính icinga_etc_dir nên mỗi lần backup-full lại vô tình đóng gói backup cũ vào tar mới.
 icinga_config_backup_dir: "/var/backups/icinga-ansible-config"
+# Database/PKI artifacts copied back to the deployment node by backup-full. Keeping the physical DB
+# backup only on galera[0] makes it disappear in the exact disaster scenario backup-full is meant to
+# cover. These directories live under the controller backup root and survive loss of all service nodes.
+mariadb_controller_backup_dir: "{{ icinga_config_backup_dir }}/database"
+pki_controller_backup_dir: "{{ icinga_config_backup_dir }}/pki"
 
 # --- Suy diễn topology từ inventory -------------------------------------------
 master_count:    "{{ groups['master'] | default([]) | length }}"
@@ -106,13 +114,13 @@ _proxy_group_match: >-
       | list | first) | default('', true) }}
 
 proxy_http_effective: >-
-  {{ (proxy_group_overrides[_proxy_group_match].http | default(proxy_http, true))
+  {{ (proxy_group_overrides[_proxy_group_match].http | default(proxy_http))
      if _proxy_group_match | length > 0 else proxy_http }}
 proxy_https_effective: >-
-  {{ (proxy_group_overrides[_proxy_group_match].https | default(proxy_https, true))
+  {{ (proxy_group_overrides[_proxy_group_match].https | default(proxy_https))
      if _proxy_group_match | length > 0 else proxy_https }}
 proxy_no_proxy_effective: >-
-  {{ (proxy_group_overrides[_proxy_group_match].no_proxy | default(proxy_no_proxy, true))
+  {{ (proxy_group_overrides[_proxy_group_match].no_proxy | default(proxy_no_proxy))
      if _proxy_group_match | length > 0 else proxy_no_proxy }}
 
 # Dùng làm "environment:" cho task apt/get_url lúc bootstrap + systemd drop-in Docker daemon

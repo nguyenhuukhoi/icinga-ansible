@@ -20,7 +20,9 @@
 
 - name: (cluster) Chờ node đầu SELECT 1 được lại sau khi bỏ cờ
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }} -e "SELECT 1"
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: mariadb_bootstrap_ping2
   retries: 24
   delay: 5
@@ -34,8 +36,10 @@
 
 - name: (cluster) Chờ node đầu wsrep_local_state_comment=Synced lại sau khi bỏ cờ
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }}
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot
     -N -e "SHOW STATUS LIKE 'wsrep_local_state_comment'"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: mariadb_bootstrap_synced2
   retries: 24
   delay: 5
@@ -51,8 +55,10 @@
 
 - name: (cluster) Đọc wsrep_cluster_size + wsrep_ready thật (xác nhận cluster form đúng)
   ansible.builtin.command: >
-    docker exec mariadb mariadb -uroot -p{{ mariadb_root_password }}
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot
     -N -e "SHOW STATUS LIKE 'wsrep_%';"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   register: wsrep_status
   changed_when: false
   no_log: true
@@ -80,20 +86,43 @@
   no_log: true
   when: inventory_hostname == mariadb_bootstrap_host
 
+- name: "Ping lại root trước khi check credential (tránh nhầm transient blip thành 'sai credential' — xem BUG THẬT bên dưới)"
+  # BUG THẬT đã gặp (đọc trước khi xoá task này): task check credential/grant ngay sau đây trước kia
+  # không có bước đệm nào — 1 lỗi kết nối THOÁNG QUA đúng lúc DB vừa Synced (vd server.cnf vừa đổi ở
+  # phase1 khiến mariadb container vẫn còn đang khởi động lại) bị hiểu nhầm là "credential sai", kéo
+  # theo task "Dừng consumer DB trước khi rotate credential" tắt icingadb/icingaweb2 trên MỌI master —
+  # 1 outage hoàn toàn tránh được. Fix: retry ping ngắn bằng root trước, đảm bảo DB thật sự ổn định
+  # (không chỉ Synced — Synced ở trên đo lúc join, có thể đã trôi qua vài giây/handler khác xen vào)
+  # trước khi tin kết quả check credential ngay sau.
+  ansible.builtin.command: >
+    docker exec -e MYSQL_PWD mariadb mariadb -uroot -h127.0.0.1 -e "SELECT 1"
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
+  register: _managed_db_preflight_ping
+  retries: 6
+  delay: 5
+  until: _managed_db_preflight_ping.rc == 0
+  changed_when: false
+  no_log: true
+  when: inventory_hostname == mariadb_bootstrap_host
+
 - name: Kiểm tra credential và grant hiện tại của từng service DB
   ansible.builtin.command:
     argv:
       - docker
       - exec
+      - -e
+      - MYSQL_PWD
       - mariadb
       - mariadb
       - -h127.0.0.1
       - "-u{{ item.name }}"
-      - "-p{{ item.password }}"
       - -N
       - "{{ item.database }}"
       - -e
       - "SHOW GRANTS FOR CURRENT_USER;"
+  environment:
+    MYSQL_PWD: "{{ item.password }}"
   loop: "{{ _managed_db_services | default([]) }}"
   register: _managed_db_auth_checks
   changed_when: false
@@ -120,17 +149,28 @@
     argv:
       - docker
       - exec
+      - -e
+      - MYSQL_PWD
       - mariadb
       - mariadb
       - "-uroot"
-      - "-p{{ mariadb_root_password }}"
       - -e
       - >-
         CREATE DATABASE IF NOT EXISTS `{{ item.item.database }}` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-        CREATE USER IF NOT EXISTS '{{ item.item.name }}'@'%' IDENTIFIED BY '{{ item.item.password }}';
-        ALTER USER '{{ item.item.name }}'@'%' IDENTIFIED BY '{{ item.item.password }}';
+        CREATE USER IF NOT EXISTS '{{ item.item.name }}'@'%';
+        SET @icinga_password = CONVERT(FROM_BASE64('{{ item.item.password | b64encode }}') USING utf8mb4);
+        SET @icinga_alter_user = CONCAT(
+          'ALTER USER ''{{ item.item.name }}''@''%'' IDENTIFIED BY ',
+          QUOTE(@icinga_password)
+        );
+        PREPARE icinga_alter_user_stmt FROM @icinga_alter_user;
+        EXECUTE icinga_alter_user_stmt;
+        DEALLOCATE PREPARE icinga_alter_user_stmt;
+        SET @icinga_password = NULL;
         GRANT ALL ON `{{ item.item.database }}`.* TO '{{ item.item.name }}'@'%';
         FLUSH PRIVILEGES;
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   loop: "{{ _managed_db_auth_checks.results | default([]) }}"
   loop_control:
     label: "{{ item.item.name }}"
@@ -140,3 +180,70 @@
       item.rc != 0 or
       ('ON `' ~ item.item.database ~ '`.*' not in (item.stdout | default('')))
   no_log: true
+
+# Backup định kỳ chạy ngay trên galera[0], nơi có datadir và Docker socket. Dùng
+# cron vì globals.yml đã dùng cú pháp cron 5 trường; flock trong script ngăn hai
+# lượt chồng nhau. Artifact chỉ được đổi tên/cập nhật con trỏ sau khi giải nén
+# toàn bộ stream thành công.
+- name: Kiểm tra cấu hình lịch backup MariaDB
+  ansible.builtin.assert:
+    that:
+      - mariadb_backup.schedule is string
+      - mariadb_backup.schedule.split() | length == 5
+      - "'\n' not in mariadb_backup.schedule"
+      - mariadb_backup.retention_days | int >= 1
+    fail_msg: "mariadb_backup.schedule phải là cron 5 trường và retention_days phải >= 1."
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - mariadb_backup.enabled | bool
+
+- name: Tạo thư mục đích cho backup định kỳ
+  ansible.builtin.file:
+    path: "{{ mariadb_backup.destination }}"
+    state: directory
+    mode: "0700"
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - mariadb_backup.enabled | bool
+
+- name: Cài script backup MariaDB định kỳ
+  ansible.builtin.template:
+    src: scheduled-backup.sh.j2
+    dest: /usr/local/sbin/icinga-mariadb-backup
+    owner: root
+    group: root
+    mode: "0700"
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - mariadb_backup.enabled | bool
+
+- name: Cài lịch backup MariaDB
+  ansible.builtin.cron:
+    name: icinga-ansible MariaDB backup
+    user: root
+    minute: "{{ mariadb_backup.schedule.split()[0] }}"
+    hour: "{{ mariadb_backup.schedule.split()[1] }}"
+    day: "{{ mariadb_backup.schedule.split()[2] }}"
+    month: "{{ mariadb_backup.schedule.split()[3] }}"
+    weekday: "{{ mariadb_backup.schedule.split()[4] }}"
+    job: /usr/local/sbin/icinga-mariadb-backup
+    state: present
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - mariadb_backup.enabled | bool
+
+- name: Gỡ lịch và script backup định kỳ khi đã tắt
+  block:
+    - name: Gỡ cron backup MariaDB
+      ansible.builtin.cron:
+        name: icinga-ansible MariaDB backup
+        user: root
+        state: absent
+
+    - name: Gỡ script backup MariaDB
+      ansible.builtin.file:
+        path: /usr/local/sbin/icinga-mariadb-backup
+        state: absent
+  when:
+    - inventory_hostname == mariadb_bootstrap_host
+    - not (mariadb_backup.enabled | bool)

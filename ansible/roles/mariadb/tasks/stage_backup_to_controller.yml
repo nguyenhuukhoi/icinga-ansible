@@ -1,0 +1,113 @@
+---
+# Copy the backup just created by backup.yml away from service nodes.  Upgrade
+# uses this so a failure that also loses Galera does not destroy the only
+# rollback artifact.  Run this immediately after tasks_from: backup in the same
+# play; backup_ts, backup_filename, backup_tag_norm and do_backup are host facts.
+
+- name: (controller backup) Validate backup context from backup.yml
+  ansible.builtin.assert:
+    that:
+      - backup_ts | default('') | length > 0
+      - backup_filename | default('') | length > 0
+      - backup_tag_norm | default('') | length > 0
+    fail_msg: "Không có đủ metadata để đưa backup về deployment node."
+  when: do_backup | default(false) | bool
+
+- name: (controller backup) Create protected database and PKI directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0700"
+    owner: "{{ lookup('pipe', 'id -un') }}"
+    group: "{{ lookup('pipe', 'id -gn') }}"
+  loop:
+    - "{{ mariadb_controller_backup_dir }}"
+    - "{{ pki_controller_backup_dir }}"
+  delegate_to: localhost
+  become: true
+  when: do_backup | default(false) | bool
+
+- name: (controller backup) Verify DB artifact on primary Galera node
+  ansible.builtin.stat:
+    path: "{{ mariadb_backup.destination }}/{{ backup_filename }}"
+    checksum_algorithm: sha256
+  register: _controller_stage_db_source
+  when: do_backup | default(false) | bool
+
+- name: (controller backup) Reject a missing or empty DB artifact
+  ansible.builtin.assert:
+    that:
+      - _controller_stage_db_source.stat.exists
+      - _controller_stage_db_source.stat.isreg
+      - _controller_stage_db_source.stat.size | int > 0
+    fail_msg: "DB backup không hợp lệ; không cập nhật pointer trên deployment node."
+  when: do_backup | default(false) | bool
+
+- name: (controller backup) Fetch DB artifact with checksum validation
+  ansible.builtin.fetch:
+    src: "{{ mariadb_backup.destination }}/{{ backup_filename }}"
+    dest: "{{ mariadb_controller_backup_dir }}/{{ backup_filename }}"
+    flat: true
+    validate_checksum: true
+  when: do_backup | default(false) | bool
+
+- name: (controller backup) Protect the fetched DB artifact
+  ansible.builtin.file:
+    path: "{{ mariadb_controller_backup_dir }}/{{ backup_filename }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: do_backup | default(false) | bool
+
+- name: (controller backup) Verify matching PKI artifact on CA host
+  ansible.builtin.stat:
+    path: "{{ mariadb_backup.destination }}/pki-{{ backup_ts }}.tar.gz"
+    checksum_algorithm: sha256
+  register: _controller_stage_pki_source
+  delegate_to: "{{ ca_host }}"
+  when:
+    - do_backup | default(false) | bool
+    - ca_host | length > 0
+
+- name: (controller backup) Reject a missing or empty PKI artifact
+  ansible.builtin.assert:
+    that:
+      - _controller_stage_pki_source.stat.exists
+      - _controller_stage_pki_source.stat.isreg
+      - _controller_stage_pki_source.stat.size | int > 0
+    fail_msg: "PKI backup không hợp lệ; pre-upgrade backup chưa đủ để recovery."
+  when:
+    - do_backup | default(false) | bool
+    - ca_host | length > 0
+
+- name: (controller backup) Fetch matching PKI artifact with checksum validation
+  ansible.builtin.fetch:
+    src: "{{ mariadb_backup.destination }}/pki-{{ backup_ts }}.tar.gz"
+    dest: "{{ pki_controller_backup_dir }}/pki-{{ backup_ts }}.tar.gz"
+    flat: true
+    validate_checksum: true
+  delegate_to: "{{ ca_host }}"
+  when:
+    - do_backup | default(false) | bool
+    - ca_host | length > 0
+
+- name: (controller backup) Protect the fetched PKI artifact
+  ansible.builtin.file:
+    path: "{{ pki_controller_backup_dir }}/pki-{{ backup_ts }}.tar.gz"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when:
+    - do_backup | default(false) | bool
+    - ca_host | length > 0
+
+- name: (controller backup) Update pointer after both DB and PKI are durable
+  ansible.builtin.copy:
+    content: "{{ backup_ts }}"
+    dest: "{{ mariadb_controller_backup_dir }}/LATEST_{{ backup_tag_norm | upper }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when:
+    - do_backup | default(false) | bool
+    - ca_host | length > 0

@@ -16,6 +16,12 @@
 # NÀY (master/satellite/galera/client) — rơi về proxy_http/https/no_proxy global nếu nhóm không có
 # override riêng. Dùng *_effective ở đây (thay vì proxy_http thẳng) để 1 host thuộc nhóm có override
 # riêng (vd satellite ở DC khác, ra Internet qua proxy khác) nhận đúng proxy của NHÓM ĐÓ.
+# mode 0644 GIỮ NGUYÊN (không siết như http-proxy.conf bên dưới) — /etc/environment BẮT BUỘC
+# world-readable để pam_env đọc được cho MỌI user đăng nhập vào host, đây là quy ước chung của Linux,
+# không phải lựa chọn của role này. Hệ quả: nếu proxy_http/proxy_https chứa Basic-Auth credential
+# (dạng "http://user:pass@proxy:3128"), credential đó sẽ world-readable qua file này — hạn chế cố
+# hữu khi dùng /etc/environment cho proxy có auth, không riêng gì icinga-ansible. Cân nhắc dùng
+# proxy không yêu cầu auth (allowlist theo IP nguồn) nếu đây là rủi ro cần tránh.
 - name: (bootstrap) Cấu hình proxy hệ thống (/etc/environment) — chỉ khi khai proxy_http hiệu lực
   ansible.builtin.blockinfile:
     path: /etc/environment
@@ -32,11 +38,28 @@
   when: (proxy_http_effective | default('')) | length > 0
   tags: [bootstrap]
 
+- name: (bootstrap) Xoá proxy icinga-ansible khỏi /etc/environment khi đã tắt proxy
+  ansible.builtin.blockinfile:
+    path: /etc/environment
+    marker: "# {mark} icinga-ansible proxy"
+    state: absent
+  when: (proxy_http_effective | default('')) | length == 0
+  tags: [bootstrap]
+
 - name: (bootstrap) Cài chrony + phụ thuộc Docker
   ansible.builtin.apt:
     name: [chrony, ca-certificates, curl, gnupg, python3-docker]
     update_cache: true
+    lock_timeout: 300
     state: present
+  environment:
+    http_proxy: "{{ proxy_http_effective }}"
+    https_proxy: "{{ proxy_https_effective }}"
+    no_proxy: "{{ proxy_no_proxy_effective }}"
+  register: _bootstrap_base_packages_result
+  retries: 8
+  delay: 10
+  until: _bootstrap_base_packages_result is succeeded
   tags: [bootstrap]
 
 # Plugin nằm trên host bị monitor; Icinga master chỉ gọi executable qua check_by_ssh. Dùng repo
@@ -54,6 +77,14 @@
     url: https://repo.linuxfabrik.ch/linuxfabrik.key
     dest: /etc/apt/keyrings/linuxfabrik.asc
     mode: "0644"
+  environment:
+    http_proxy: "{{ proxy_http_effective }}"
+    https_proxy: "{{ proxy_https_effective }}"
+    no_proxy: "{{ proxy_no_proxy_effective }}"
+  register: _bootstrap_linuxfabrik_key_result
+  retries: 8
+  delay: 10
+  until: _bootstrap_linuxfabrik_key_result is succeeded
   when: enable_check_by_ssh_target_plugins | default(false) | bool
   tags: [bootstrap]
 
@@ -65,6 +96,14 @@
       {{ ansible_distribution_release }}-release main
     filename: linuxfabrik-monitoring-plugins
     state: present
+  environment:
+    http_proxy: "{{ proxy_http_effective }}"
+    https_proxy: "{{ proxy_https_effective }}"
+    no_proxy: "{{ proxy_no_proxy_effective }}"
+  register: _bootstrap_linuxfabrik_repo_result
+  retries: 8
+  delay: 10
+  until: _bootstrap_linuxfabrik_repo_result is succeeded
   when: enable_check_by_ssh_target_plugins | default(false) | bool
   tags: [bootstrap]
 
@@ -72,7 +111,16 @@
   ansible.builtin.apt:
     name: linuxfabrik-monitoring-plugins
     update_cache: true
+    lock_timeout: 300
     state: present
+  environment:
+    http_proxy: "{{ proxy_http_effective }}"
+    https_proxy: "{{ proxy_https_effective }}"
+    no_proxy: "{{ proxy_no_proxy_effective }}"
+  register: _bootstrap_linuxfabrik_packages_result
+  retries: 8
+  delay: 10
+  until: _bootstrap_linuxfabrik_packages_result is succeeded
   when: enable_check_by_ssh_target_plugins | default(false) | bool
   tags: [bootstrap]
 
@@ -100,9 +148,15 @@
         state: directory
         mode: "0755"
     - name: Ghi http-proxy.conf cho Docker daemon
+      # mode 0600 (không phải 0644 mặc định trước đây) — proxy_http/proxy_https có thể chứa
+      # Basic-Auth credential (dạng "http://user:pass@proxy:3128", format chuẩn của biến http_proxy,
+      # hợp lý với đúng use-case "mỗi nhóm 1 proxy riêng" mà proxy_group_overrides phục vụ). Khác
+      # /etc/environment ngay trên (BẮT BUỘC world-readable để pam_env đọc được cho MỌI user đăng
+      # nhập — hạn chế chung của Linux, không phải bug riêng ở đây), file drop-in systemd này CHỈ cần
+      # root đọc được (systemd đọc lúc start docker.service bằng quyền root) — siết mode không phá gì.
       ansible.builtin.copy:
         dest: /etc/systemd/system/docker.service.d/http-proxy.conf
-        mode: "0644"
+        mode: "0600"
         content: |
           [Service]
           Environment="HTTP_PROXY={{ proxy_http_effective }}"
@@ -111,6 +165,16 @@
       notify:
         - Reload systemd daemon
         - Restart docker
+
+- name: (bootstrap) Xoá Docker proxy drop-in khi đã tắt proxy
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d/http-proxy.conf
+    state: absent
+  when: (proxy_http_effective | default('')) | length == 0
+  notify:
+    - Reload systemd daemon
+    - Restart docker
+  tags: [bootstrap]
 
 - name: (bootstrap) Cài Docker Engine (bỏ qua nếu đã có)
   when: docker_check.rc != 0
@@ -125,16 +189,41 @@
         url: https://download.docker.com/linux/ubuntu/gpg
         dest: /etc/apt/keyrings/docker.asc
         mode: "0644"
+      environment:
+        http_proxy: "{{ proxy_http_effective }}"
+        https_proxy: "{{ proxy_https_effective }}"
+        no_proxy: "{{ proxy_no_proxy_effective }}"
+      register: _bootstrap_docker_key_result
+      retries: 8
+      delay: 10
+      until: _bootstrap_docker_key_result is succeeded
     - name: Khai báo repo Docker
       ansible.builtin.apt_repository:
         repo: "deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         filename: docker
         state: present
+      environment:
+        http_proxy: "{{ proxy_http_effective }}"
+        https_proxy: "{{ proxy_https_effective }}"
+        no_proxy: "{{ proxy_no_proxy_effective }}"
+      register: _bootstrap_docker_repo_result
+      retries: 8
+      delay: 10
+      until: _bootstrap_docker_repo_result is succeeded
     - name: Cài Docker Engine
       ansible.builtin.apt:
         name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
         update_cache: true
+        lock_timeout: 300
         state: present
+      environment:
+        http_proxy: "{{ proxy_http_effective }}"
+        https_proxy: "{{ proxy_https_effective }}"
+        no_proxy: "{{ proxy_no_proxy_effective }}"
+      register: _bootstrap_docker_packages_result
+      retries: 8
+      delay: 10
+      until: _bootstrap_docker_packages_result is succeeded
     - name: Bật & khởi động Docker
       ansible.builtin.service:
         name: docker

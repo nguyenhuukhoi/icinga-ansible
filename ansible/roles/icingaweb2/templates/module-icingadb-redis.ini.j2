@@ -10,12 +10,12 @@ tls = "0"
 [redis1]
 host     = "127.0.0.1"
 port     = "{{ icingadb_redis_port }}"
-password = "{{ icingadb_redis_password }}"
+password = {{ icingadb_redis_password | to_json }}
 {% if is_ha_master | bool %}
 {% set peer = (groups['master'] | reject('equalto', inventory_hostname) | list)[0] %}
 
 [redis2]
 host     = "{{ hostvars[peer].ansible_host | default(peer) }}"
 port     = "{{ icingadb_redis_port }}"
-password = "{{ icingadb_redis_password }}"
+password = {{ icingadb_redis_password | to_json }}
 {% endif %}

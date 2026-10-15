@@ -50,6 +50,46 @@
       when: confirm != 'yes-i-really-really-mean-it'
       run_once: true
 
+    - name: Resolve data/config directories before any destructive task
+      ansible.builtin.command:
+        argv: [readlink, -m, --, "{{ item }}"]
+      loop:
+        - "{{ icinga_base_dir }}"
+        - "{{ icinga_etc_dir }}"
+      register: _destroy_resolved_paths
+      changed_when: false
+
+    - name: Refuse unsafe data/config directory roots
+      ansible.builtin.assert:
+        that:
+          - item.stdout.startswith('/')
+          - item.stdout not in ['/', '/etc', '/var', '/usr', '/home', '/root', '/opt', '/srv']
+          - item.stdout | length > 5
+        fail_msg: >-
+          Từ chối destroy vì đường dẫn {{ item.item }} resolve thành {{ item.stdout }}, quá rộng hoặc
+          là thư mục hệ thống được bảo vệ. Dùng thư mục con chuyên biệt cho icinga-ansible.
+      loop: "{{ _destroy_resolved_paths.results }}"
+      loop_control:
+        label: "{{ item.item }} -> {{ item.stdout }}"
+
+    # BUG THẬT (đọc trước khi bỏ điều kiện managed_db ở đây) — phát hiện khi người dùng hỏi "chuyển
+    # sang external managed thì destroy có đụng vào DB không": trước đây danh sách container này LUÔN
+    # có "mariadb" và thư mục dữ liệu xoá NGUYÊN icinga_base_dir (chứa cả datadir mariadb bên trong)
+    # — hoàn toàn KHÔNG xét icinga_database_type. Nghĩa là dù đã đổi globals.yml sang
+    # icinga_database_type=external (ý định: icinga-ansible không còn quản lý DB này nữa, coi như
+    # "đã ngắt ra"), destroy vẫn cứ dừng+xoá container "mariadb" và xoá sạch datadir trên bất kỳ host
+    # nào còn nằm trong inventory (vd galera1/2/3 chưa kịp gỡ khỏi [all_hosts]) — phá dữ liệu DB mà
+    # người dùng chủ đích muốn giữ nguyên, ngược hẳn lý do chuyển sang external. Fix: chỉ đụng tới
+    # "mariadb" (container lẫn thư mục dữ liệu) khi icinga_database_type == 'managed_db'; external thì
+    # bỏ hẳn "mariadb" khỏi cả 2 danh sách — destroy không còn chạm gì tới DB nữa, bất kể host đó có
+    # còn trong inventory hay không.
+    - name: Xây danh sách container cần dọn (mariadb CHỈ khi managed_db — external thì bỏ hẳn)
+      ansible.builtin.set_fact:
+        _destroy_containers: >-
+          {{ ['icingaweb2', 'icingaweb2-director-daemon', 'icingadb', 'icinga2', 'icingadb-redis',
+              'haproxy', 'keepalived']
+             + (['mariadb'] if icinga_database_type == 'managed_db' else []) }}
+
     # keep_volumes: false — dọn cả anonymous volume đi kèm container (nếu có, vd image khai VOLUME
     # mà không được mount tường minh) — phòng ngừa, KHÔNG phải nguồn rò rỉ chính (xem bug thật ở
     # roles/icinga2 + roles/icingadb: "docker create" tạo container TẠM lúc deploy, không phải các
@@ -60,21 +100,21 @@
         state: absent
         force_kill: true
         keep_volumes: false
-      loop:
-        - icingaweb2
-        - icingaweb2-director-daemon
-        - icingadb
-        - icinga2
-        - icingadb-redis
-        - mariadb
-        - haproxy
-        - keepalived
-      ignore_errors: true
+      loop: "{{ _destroy_containers }}"
 
-    - name: Xoá thư mục dữ liệu ({{ icinga_base_dir }})
+    - name: Xây danh sách thư mục dữ liệu con cần xoá (mariadb CHỈ khi managed_db — external thì KHÔNG đụng datadir DB)
+      ansible.builtin.set_fact:
+        _destroy_base_subdirs: >-
+          {{ ['icinga2', 'icingadb-redis', 'icingadb', 'icingaweb2']
+             + (['mariadb'] if icinga_database_type == 'managed_db' else []) }}
+
+    # Xoá TỪNG thư mục con dưới icinga_base_dir (KHÔNG xoá nguyên icinga_base_dir 1 lần như trước) —
+    # bắt buộc phải tách ra để loại trừ được đúng "mariadb" khi external mà vẫn xoá sạch phần còn lại.
+    - name: "Xoá thư mục dữ liệu con dưới {{ icinga_base_dir }}"
       ansible.builtin.file:
-        path: "{{ icinga_base_dir }}"
+        path: "{{ icinga_base_dir }}/{{ item }}"
         state: absent
+      loop: "{{ _destroy_base_subdirs }}"
 
     # KHÔNG xoá NGUYÊN icinga_etc_dir nữa (khác trước) — xoá TỪNG MỤC bên trong, GIỮ LẠI
     # globals.yml/passwords.yml (xem giải thích đầy đủ ở header). Không tái tạo thư mục rỗng sau khi
@@ -93,7 +133,14 @@
       register: _etc_top_entries
       when: _etc_dir_stat.stat.exists
 
-    - name: "Xoá mọi thứ trong {{ icinga_etc_dir }}, GIỮ LẠI globals.yml + passwords.yml"
+    # BUG THẬT phát hiện qua chính dry-run (--check) khi verify fix "external không đụng DB" ở trên —
+    # task này xoá CẢ config đã render (icinga_etc_dir/mariadb/server.cnf, mount :ro vào container)
+    # KHÔNG hề xét icinga_database_type, dù đã loại "mariadb" khỏi 2 chỗ data/container ở trên. Xoá
+    # mất file config này không giết container đang chạy ngay (container đã mở file, không tự đọc
+    # lại), nhưng lần restart/reboot host TIẾP THEO container sẽ cố bind-mount 1 file không còn tồn
+    # tại trên host — vỡ đúng thứ mà việc chuyển sang "external" cố tình muốn giữ nguyên. Loại trừ
+    # "mariadb" khỏi danh sách bị xoá khi external, giống 2 chỗ trên.
+    - name: "Xoá mọi thứ trong {{ icinga_etc_dir }}, GIỮ LẠI globals.yml + passwords.yml (+ mariadb nếu external)"
       ansible.builtin.file:
         path: "{{ item.path }}"
         state: absent
@@ -103,6 +150,7 @@
       when:
         - _etc_dir_stat.stat.exists
         - (item.path | basename) not in ['globals.yml', 'passwords.yml']
+        - icinga_database_type == 'managed_db' or (item.path | basename) != 'mariadb'
 
     # Tái tạo lại ĐÚNG cây thư mục state mà roles/common (tag bootstrap) tạo — CỐ Ý (2026-07-22,
     # sau khi tách "deploy" khỏi "bootstrap-servers", nhận ra hệ quả không lường trước: destroy xoá
@@ -113,19 +161,14 @@
     # "destroy" tự tái tạo lại đúng những gì nó vừa xoá (thư mục state rỗng — same danh sách với
     # roles/common/tasks/main.yml, KHÔNG đụng docker network nữa) — giữ đúng tinh thần "destroy dọn
     # sạch dữ liệu" nhưng không kéo theo yêu cầu bootstrap lại.
-    - name: Tái tạo cây thư mục state rỗng (đồng bộ danh sách với roles/common)
+    - name: Tái tạo cây thư mục state rỗng (đồng bộ danh sách với roles/common; mariadb CHỈ khi managed_db)
       ansible.builtin.file:
         path: "{{ icinga_base_dir }}/{{ item }}"
         state: directory
         mode: "0750"
-      loop:
-        - icinga2/etc
-        - icinga2/var
-        - icinga2/pki
-        - icingadb-redis
-        - icingadb
-        - icingaweb2
-        - mariadb
+      loop: >-
+        {{ ['icinga2/etc', 'icinga2/var', 'icinga2/pki', 'icingadb-redis', 'icingadb', 'icingaweb2']
+           + (['mariadb'] if icinga_database_type == 'managed_db' else []) }}
 
     # KHÔNG xoá docker network "{{ docker_network_name }}" nữa (trước đây có) — network do
     # bootstrap-servers tạo, không chứa dữ liệu cần "dọn sạch", xoá đi chỉ buộc phải bootstrap lại
@@ -147,15 +190,37 @@
   vars:
     confirm: ""
   tasks:
-    - name: "Kiểm tra $CONFIG_DIR ({{ icinga_etc_dir }}) có tồn tại không"
+    - name: Chặn control-node cleanup nếu chưa xác nhận đúng cụm từ
+      ansible.builtin.assert:
+        that: confirm == 'yes-i-really-really-mean-it'
+        fail_msg: >-
+          destroy cần -e confirm=yes-i-really-really-mean-it; không xử lý control node.
+
+    - name: Resolve controller config directory before cleanup
+      ansible.builtin.command:
+        argv: [readlink, -m, --, "{{ controller_config_dir }}"]
+      register: _destroy_controller_config_real
+      changed_when: false
+
+    - name: Refuse an unsafe controller config root
+      ansible.builtin.assert:
+        that:
+          - _destroy_controller_config_real.stdout.startswith('/')
+          - _destroy_controller_config_real.stdout not in ['/', '/etc', '/var', '/usr', '/home', '/root', '/opt', '/srv']
+          - _destroy_controller_config_real.stdout | length > 5
+        fail_msg: >-
+          Từ chối cleanup vì controller_config_dir={{ controller_config_dir }} resolve thành
+          {{ _destroy_controller_config_real.stdout }}, quá rộng hoặc là thư mục hệ thống được bảo vệ.
+
+    - name: "Kiểm tra $CONFIG_DIR ({{ controller_config_dir }}) có tồn tại không"
       ansible.builtin.stat:
-        path: "{{ icinga_etc_dir }}"
+        path: "{{ controller_config_dir }}"
       register: _etc_dir_stat
       when: confirm == 'yes-i-really-really-mean-it'
 
     - name: "Liệt kê nội dung cấp cao nhất của $CONFIG_DIR"
       ansible.builtin.find:
-        paths: "{{ icinga_etc_dir }}"
+        paths: "{{ controller_config_dir }}"
         file_type: any
         hidden: true
       register: _etc_top_entries
@@ -163,7 +228,7 @@
         - confirm == 'yes-i-really-really-mean-it'
         - _etc_dir_stat.stat.exists
 
-    - name: "Xoá mọi thứ trong $CONFIG_DIR, GIỮ LẠI globals.yml + passwords.yml"
+    - name: "Xoá mọi thứ trong $CONFIG_DIR, giữ globals/passwords và MariaDB khi external"
       ansible.builtin.file:
         path: "{{ item.path }}"
         state: absent
@@ -174,3 +239,4 @@
         - confirm == 'yes-i-really-really-mean-it'
         - _etc_dir_stat.stat.exists
         - (item.path | basename) not in ['globals.yml', 'passwords.yml']
+        - icinga_database_type == 'managed_db' or (item.path | basename) != 'mariadb'

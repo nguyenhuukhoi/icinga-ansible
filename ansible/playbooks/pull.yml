@@ -18,6 +18,13 @@
         - "{{ images.icingaweb2 }}"
         - "{{ images.icingadb_redis }}"
         - "{{ images.mariadb }}"
+      register: _pull_master_image
+      # Docker Hub/CDN occasionally returns transient 429/5xx for one manifest
+      # or layer while the same proxy succeeds on another node.  A bounded
+      # retry keeps pull preflight read-only and avoids touching runtime.
+      retries: 8
+      delay: 10
+      until: _pull_master_image is succeeded
 
 - name: Pull image Icinga 2 trên satellite/client
   hosts: "{{ (groups['satellite'] | default([]) + groups['client'] | default([])) | unique }}"
@@ -31,6 +38,10 @@
         name: "{{ images.icinga2 }}"
         source: pull
         force_source: true
+      register: _pull_satellite_image
+      retries: 8
+      delay: 10
+      until: _pull_satellite_image is succeeded
 
 - name: Pull image MariaDB trên node managed DB
   hosts: galera
@@ -44,4 +55,8 @@
         name: "{{ images.mariadb }}"
         source: pull
         force_source: true
+      register: _pull_mariadb_image
+      retries: 8
+      delay: 10
+      until: _pull_mariadb_image is succeeded
       when: icinga_database_type == 'managed_db'

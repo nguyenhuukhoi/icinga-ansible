@@ -32,11 +32,16 @@
     state: started
     restart_policy: unless-stopped
     network_mode: host
-    command: >-
-      redis-server
-      --port {{ icingadb_redis_port }}
-      --requirepass {{ icingadb_redis_password }}
-      --appendonly yes
+    # Dạng LIST (không phải chuỗi "command: >-") — tránh Docker/module tự shlex-split chuỗi, làm vỡ
+    # --requirepass nếu password sinh ra (hoặc đặt tay) chứa khoảng trắng/ký tự đặc biệt.
+    command:
+      - redis-server
+      - "--port"
+      - "{{ icingadb_redis_port | string }}"
+      - "--requirepass"
+      - "{{ icingadb_redis_password }}"
+      - "--appendonly"
+      - "yes"
     volumes:
       - "{{ icinga_base_dir }}/icingadb-redis:/data"
     healthcheck:
@@ -48,7 +53,9 @@
 
 - name: Chờ Redis phản hồi PING
   ansible.builtin.command: >
-    docker exec icingadb-redis redis-cli -p {{ icingadb_redis_port }} -a {{ icingadb_redis_password }} ping
+    docker exec -e REDISCLI_AUTH icingadb-redis redis-cli -p {{ icingadb_redis_port }} ping
+  environment:
+    REDISCLI_AUTH: "{{ icingadb_redis_password }}"
   register: redis_ping
   retries: 10
   delay: 3

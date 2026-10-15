@@ -1,8 +1,10 @@
-/* {{ ansible_managed }} — API user cho Icinga Web 2 (deploy config chung, dùng bởi các lệnh CLI/API
+/* {{ ansible_managed }} — API users chỉ tồn tại trên master. */
+{% if inventory_hostname in groups['master'] %}
+/* API user cho Icinga Web 2 (deploy config chung, dùng bởi các lệnh CLI/API
  * chung của dự án — vd icinga-ansible tự query API để verify, các action ack/downtime/reschedule
  * nếu Icinga Web core cần). */
 object ApiUser "icingaweb2" {
-  password = "{{ icinga2_api_user_password }}"
+  password = {{ icinga2_api_user_password | to_json }}
   permissions = [ "*" ]
 }
 
@@ -14,7 +16,7 @@ object ApiUser "icingaweb2" {
  * user "director", password lấy từ icinga2_director_api_user_password (passwords.yml) — xem
  * "In thông tin truy cập" (post-deploy) để lấy lại giá trị đã sinh. */
 object ApiUser "director" {
-  password = "{{ icinga2_director_api_user_password }}"
+  password = {{ icinga2_director_api_user_password | to_json }}
   permissions = [ "*" ]
 }
 
@@ -23,6 +25,7 @@ object ApiUser "director" {
  * (https://icinga.com/docs/icinga-db-web/latest/doc/03-Configuration/): CHỈ 4 quyền cần thiết, KHÔNG
  * dùng "*" (least-privilege thật, khác Director/icingaweb2 vốn cần full quyền để deploy config). */
 object ApiUser "icingadb-web" {
-  password = "{{ icingadb_web_api_user_password }}"
+  password = {{ icingadb_web_api_user_password | to_json }}
   permissions = [ "actions/*", "objects/query/*", "objects/modify/*", "status/query" ]
 }
+{% endif %}

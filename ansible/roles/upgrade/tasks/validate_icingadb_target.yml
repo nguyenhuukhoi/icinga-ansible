@@ -1,0 +1,82 @@
+---
+# Validate the actual schema embedded in the selected Icinga DB image before an
+# upgrade can touch MariaDB.  Version tags alone are not enough: a future image
+# may bump the SQL schema while this repository still lacks its incremental SQL.
+
+- name: (Icinga DB target) Check that the target image was pulled
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ images.icingadb }}"]
+  register: _idb_target_image_info
+  changed_when: false
+  failed_when: false
+
+- name: (Icinga DB target) Refuse an upgrade without the target image
+  ansible.builtin.assert:
+    that: _idb_target_image_info.rc == 0
+    fail_msg: >-
+      Chưa có image Icinga DB đích {{ images.icingadb }} trên {{ inventory_hostname }}.
+      Chạy `icinga-ansible pull -i <inventory>` trước upgrade-plan/upgrade để kiểm tra
+      proxy/registry và đưa toàn bộ image về host trước maintenance window.
+
+- name: (Icinga DB target) Read schema version embedded in the target image
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp=$(mktemp /tmp/icingadb-target-schema.XXXXXX.sql)
+    tmp_bz2="${tmp}.bz2"
+    cid=$(docker create {{ images.icingadb | quote }})
+    trap 'docker rm -vf "$cid" >/dev/null 2>&1 || true; rm -f "$tmp" "$tmp_bz2"' EXIT
+
+    if docker cp "$cid:/schema/mysql/schema.sql" "$tmp" 2>/dev/null; then
+      :
+    else
+      docker cp "$cid:/mysql.schema.sql.bz2" "$tmp_bz2"
+      python3 -c 'import bz2, shutil, sys; shutil.copyfileobj(bz2.open(sys.argv[1]), open(sys.argv[2], "wb"))' "$tmp_bz2" "$tmp"
+    fi
+
+    python3 - "$tmp" <<'PY'
+    import re
+    import sys
+
+    sql = open(sys.argv[1], encoding="utf-8").read()
+    versions = [int(value) for value in re.findall(
+        r"INSERT\s+INTO\s+`?icingadb_schema`?\b.*?\bVALUES\s*\(\s*([0-9]+)",
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )]
+    if not versions:
+        raise SystemExit("cannot find icingadb_schema version in target image")
+    print(max(versions))
+    PY
+  args:
+    executable: /bin/bash
+  register: _idb_target_schema_probe
+  changed_when: false
+
+- name: (Icinga DB target) Store target schema version
+  ansible.builtin.set_fact:
+    _idb_target_schema_version: "{{ _idb_target_schema_probe.stdout | trim | int }}"
+    _idb_bundle_versions: [6]
+
+- name: (Icinga DB target) Read every bundled incremental schema version
+  ansible.builtin.set_fact:
+    _idb_bundle_versions: >-
+      {{ _idb_bundle_versions + [
+           (lookup('file', item)
+             | regex_search('INSERT\s+INTO\s+icingadb_schema[^;]*VALUES\s*\(\s*([0-9]+)', '\1')
+             | first | int) ] }}
+  loop: "{{ query('fileglob', role_path + '/files/icingadb-upgrades/*.sql') | sort }}"
+  loop_control:
+    label: "{{ item | basename }}"
+
+- name: (Icinga DB target) Require a complete migration chain for the selected image
+  ansible.builtin.assert:
+    that:
+      - _idb_target_schema_version | int >= 6
+      - >-
+        (range(6, (_idb_target_schema_version | int) + 1) | list
+         | difference(_idb_bundle_versions | map('int') | list)) | length == 0
+    fail_msg: >-
+      Image {{ images.icingadb }} chứa schema {{ _idb_target_schema_version }}, nhưng migration bundle
+      chỉ có các schema {{ _idb_bundle_versions | unique | sort | join(', ') }}. Dừng trước khi backup/
+      restart/migrate. Hãy thêm đầy đủ SQL chính thức cho mọi bước schema còn thiếu vào
+      roles/upgrade/files/icingadb-upgrades/ rồi review và chạy lại test upgrade.

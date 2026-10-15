@@ -37,6 +37,14 @@
   vars_files:
     - "{{ playbook_dir }}/../group_vars/all.yml"
   tasks:
+    - name: Chặn timestamp/tag không an toàn trước khi tạo config archive
+      ansible.builtin.assert:
+        that:
+          - backup_ts is regex('^[0-9]{8}-[0-9]{6}$')
+          - (backup_tag | default('full') | replace('-', '_')) is regex('^[A-Za-z0-9_]+$')
+        fail_msg: >-
+          backup-full yêu cầu backup_ts dạng YYYYMMDD-HHMMSS và backup_tag chỉ gồm chữ/số/gạch dưới.
+
     # icinga_config_backup_dir (mặc định /var/backups/icinga-ansible-config, 2026-07-29) nằm dưới
     # /var/backups — thư mục hệ thống, user CLI thường không có quyền tạo — CẦN sudo riêng ở ĐÚNG
     # task này (không phải cấp play, tránh lặp lại bug ở trên), rồi chown thẳng về user CLI qua
@@ -53,11 +61,20 @@
     # icinga_config_backup_dir CỐ Ý nằm NGOÀI icinga_etc_dir (xem group_vars/all.yml) — nên archive
     # toàn bộ icinga_etc_dir không còn tự lồng backup cũ vào trong nữa, không cần exclude_path (vốn
     # không hoạt động đúng như kỳ vọng với community.general.archive — bug đã ghi nhận, tự hết theo).
-    - name: "Archive toàn bộ {{ icinga_etc_dir }} (globals.yml, passwords.yml, mọi override)"
+    - name: "Archive toàn bộ {{ controller_config_dir }} (globals.yml, passwords.yml, mọi override)"
+      become: true
       community.general.archive:
-        path: "{{ icinga_etc_dir }}"
+        path: "{{ controller_config_dir }}"
         dest: "{{ icinga_config_backup_dir }}/config-{{ backup_ts }}.tar.gz"
         format: gz
+        mode: "0600"
+
+    - name: Trả ownership config archive về user chạy Ansible
+      become: true
+      ansible.builtin.file:
+        path: "{{ icinga_config_backup_dir }}/config-{{ backup_ts }}.tar.gz"
+        owner: "{{ lookup('pipe', 'id -un') }}"
+        group: "{{ lookup('pipe', 'id -gn') }}"
         mode: "0600"
 
 - name: "Backup full (2/3) — database + PKI (tái dùng roles/mariadb backup.yml, tag 'full')"
@@ -71,6 +88,110 @@
   roles:
     - role: mariadb
       when: icinga_database_type == 'managed_db'
+
+- name: "Backup full (2b/3) — đưa database + PKI về deployment node"
+  hosts: "{{ (groups['galera'] | default([]) | first) | default('localhost', true) }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Tạo thư mục lưu DB và PKI trên deployment node
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ mariadb_controller_backup_dir }}"
+        - "{{ pki_controller_backup_dir }}"
+      delegate_to: localhost
+      become: false
+      when: icinga_database_type == 'managed_db'
+
+    - name: Xác minh DB artifact vừa tạo trên node Galera chính
+      ansible.builtin.stat:
+        path: "{{ mariadb_backup.destination }}/{{ backup_filename }}"
+        checksum_algorithm: sha256
+      register: _full_db_remote
+      when: icinga_database_type == 'managed_db'
+
+    - name: Chặn nếu DB artifact nguồn không tồn tại hoặc rỗng
+      ansible.builtin.assert:
+        that:
+          - _full_db_remote.stat.exists
+          - _full_db_remote.stat.isreg
+          - _full_db_remote.stat.size | int > 0
+        fail_msg: "Không thể gom backup-full: DB artifact trên galera[0] không hợp lệ."
+      when: icinga_database_type == 'managed_db'
+
+    - name: Fetch DB artifact về deployment node
+      ansible.builtin.fetch:
+        src: "{{ mariadb_backup.destination }}/{{ backup_filename }}"
+        dest: "{{ mariadb_controller_backup_dir }}/{{ backup_filename }}"
+        flat: true
+        validate_checksum: true
+      when: icinga_database_type == 'managed_db'
+
+    - name: Siết quyền DB artifact đã fetch
+      ansible.builtin.file:
+        path: "{{ mariadb_controller_backup_dir }}/{{ backup_filename }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: icinga_database_type == 'managed_db'
+
+    - name: Xác minh PKI artifact vừa tạo trên CA host
+      ansible.builtin.stat:
+        path: "{{ mariadb_backup.destination }}/pki-{{ backup_ts }}.tar.gz"
+        checksum_algorithm: sha256
+      register: _full_pki_remote
+      delegate_to: "{{ ca_host }}"
+      when:
+        - icinga_database_type == 'managed_db'
+        - ca_host | length > 0
+
+    - name: Chặn nếu PKI artifact nguồn không tồn tại hoặc rỗng
+      ansible.builtin.assert:
+        that:
+          - _full_pki_remote.stat.exists
+          - _full_pki_remote.stat.isreg
+          - _full_pki_remote.stat.size | int > 0
+        fail_msg: "Không thể gom backup-full: PKI artifact trên CA host không hợp lệ."
+      when:
+        - icinga_database_type == 'managed_db'
+        - ca_host | length > 0
+
+    - name: Fetch PKI artifact về deployment node
+      ansible.builtin.fetch:
+        src: "{{ mariadb_backup.destination }}/pki-{{ backup_ts }}.tar.gz"
+        dest: "{{ pki_controller_backup_dir }}/pki-{{ backup_ts }}.tar.gz"
+        flat: true
+        validate_checksum: true
+      delegate_to: "{{ ca_host }}"
+      when:
+        - icinga_database_type == 'managed_db'
+        - ca_host | length > 0
+
+    - name: Siết quyền PKI artifact đã fetch
+      ansible.builtin.file:
+        path: "{{ pki_controller_backup_dir }}/pki-{{ backup_ts }}.tar.gz"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when:
+        - icinga_database_type == 'managed_db'
+        - ca_host | length > 0
+
+    - name: Ghi con trỏ DB backup-full sau khi cả DB và PKI đã fetch thành công
+      ansible.builtin.copy:
+        content: "{{ backup_ts }}"
+        dest: "{{ mariadb_controller_backup_dir }}/LATEST_{{ backup_tag_norm | upper }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when:
+        - icinga_database_type == 'managed_db'
+        - ca_host | length > 0
 
 - name: "Backup full (3/3) — icingaweb2 config (resources.ini... sửa qua UI) trên mọi master"
   hosts: master
@@ -104,18 +225,81 @@
         path: "/tmp/icingaweb2-{{ inventory_hostname }}-{{ backup_ts }}.tar.gz"
         state: absent
 
-- name: "Backup full — tóm tắt"
+- name: "Backup full — xác minh bundle và công bố completion marker"
   hosts: localhost
   connection: local
   gather_facts: false
   vars_files:
     - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _full_backup_tag: "{{ backup_tag | default('full') | replace('-', '_') }}"
   tasks:
+    - name: Khởi tạo danh sách artifact bắt buộc của full backup
+      ansible.builtin.set_fact:
+        _full_bundle_paths:
+          - "{{ icinga_config_backup_dir }}/config-{{ backup_ts }}.tar.gz"
+
+    - name: Thêm archive Icinga Web của từng master vào danh sách bắt buộc
+      ansible.builtin.set_fact:
+        _full_bundle_paths: >-
+          {{ _full_bundle_paths + [icinga_config_backup_dir ~ '/icingaweb2-' ~ item ~ '-' ~ backup_ts ~ '.tar.gz'] }}
+      loop: "{{ groups['master'] | default([]) }}"
+
+    - name: Thêm DB và PKI vào danh sách bắt buộc với managed DB
+      ansible.builtin.set_fact:
+        _full_bundle_paths: >-
+          {{
+            _full_bundle_paths
+            + [mariadb_controller_backup_dir ~ '/db-' ~ _full_backup_tag ~ '-' ~ backup_ts ~ '.xb.gz']
+            + [pki_controller_backup_dir ~ '/pki-' ~ backup_ts ~ '.tar.gz']
+          }}
+      when: icinga_database_type == 'managed_db'
+
+    - name: Tính SHA-256 cho mọi artifact bắt buộc của full backup
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop: "{{ _full_bundle_paths }}"
+      register: _full_bundle_stats
+
+    - name: Chặn công bố full backup nếu bất kỳ artifact nào thiếu hoặc rỗng
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.size | int > 0
+          - item.stat.checksum | default('') | length == 64
+        fail_msg: >-
+          Full backup chưa hoàn chỉnh tại {{ item.item }}; không tạo manifest và không cập nhật
+          LATEST_COMPLETE.
+      loop: "{{ _full_bundle_stats.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Ghi manifest checksum của bundle đã hoàn chỉnh
+      ansible.builtin.copy:
+        content: |
+          # icinga-ansible full backup {{ backup_ts }}
+          # database_type={{ icinga_database_type }} masters={{ groups['master'] | default([]) | join(',') }}
+          {% for artifact in _full_bundle_stats.results %}
+          {{ artifact.stat.checksum }}  {{ artifact.item | replace(icinga_config_backup_dir ~ '/', '') }}
+          {% endfor %}
+        dest: "{{ icinga_config_backup_dir }}/manifest-{{ backup_ts }}.sha256"
+        mode: "0600"
+
+    - name: Cập nhật LATEST_COMPLETE sau cùng
+      ansible.builtin.copy:
+        content: "{{ backup_ts }}"
+        dest: "{{ icinga_config_backup_dir }}/LATEST_COMPLETE"
+        mode: "0600"
+
     - name: In vị trí backup
       ansible.builtin.debug:
         msg: >-
-          Backup xong — xem {{ icinga_config_backup_dir }}/ (config-{{ backup_ts }}.tar.gz,
-          icingaweb2-*-{{ backup_ts }}.tar.gz). DB + PKI nằm trên node DB chính
-          ({{ groups['galera'][0] | default('(không có, external_db)') }},
-          {{ mariadb_backup.destination }}/, tên db-full-*.xb.gz + pki-*.tar.gz, con trỏ
-          LATEST_FULL) — nhớ copy CẢ 2 nơi ra ngoài hạ tầng lab để backup có ý nghĩa thật.
+          Backup xong — toàn bộ artifact DR đã được gom về {{ icinga_config_backup_dir }}/:
+          config-{{ backup_ts }}.tar.gz, icingaweb2-*-{{ backup_ts }}.tar.gz,
+          database/db-{{ backup_tag | default('full') | replace('-', '_') }}-{{ backup_ts }}.xb.gz,
+          database/LATEST_{{ backup_tag | default('full') | replace('-', '_') | upper }} và
+          pki/pki-{{ backup_ts }}.tar.gz. Bundle hoàn chỉnh được xác nhận bởi
+          manifest-{{ backup_ts }}.sha256 và LATEST_COMPLETE. Hãy sao chép thư mục này sang storage
+          nằm ngoài hạ tầng.

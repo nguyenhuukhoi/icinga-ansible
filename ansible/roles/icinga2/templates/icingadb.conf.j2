@@ -4,5 +4,5 @@ library "icingadb"
 object IcingaDB "icingadb" {
   host = "127.0.0.1"
   port = {{ icingadb_redis_port }}
-  password = "{{ icingadb_redis_password }}"
+  password = {{ icingadb_redis_password | to_json }}
 }

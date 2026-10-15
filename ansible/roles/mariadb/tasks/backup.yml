@@ -17,6 +17,16 @@
     # cứng LATEST_PRE_UPGRADE gạch dưới). Chuẩn hoá '-' -> '_' vào biến riêng để tránh hẳn vấn đề này.
     backup_tag_norm: "{{ (backup_tag | default('')) | replace('-', '_') }}"
 
+- name: Chặn timestamp hoặc backup tag không an toàn trước khi tạo đường dẫn
+  ansible.builtin.assert:
+    that:
+      - backup_tag_norm | length == 0 or backup_tag_norm is regex('^[A-Za-z0-9_]+$')
+      - backup_ts is not defined or backup_ts is regex('^[0-9]{8}-[0-9]{6}$')
+    fail_msg: >-
+      backup_tag chỉ được dùng chữ/số/gạch dưới (gạch ngang sẽ được đổi thành gạch dưới), và
+      backup_ts nếu truyền vào phải có dạng YYYYMMDD-HHMMSS. Từ chối tạo đường dẫn/con trỏ không an toàn.
+  when: do_backup | bool
+
 - name: Tạo thư mục đích backup
   ansible.builtin.file:
     path: "{{ mariadb_backup.destination }}"
@@ -29,30 +39,60 @@
     backup_ts: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
   when: do_backup | bool
 
+- name: Xác nhận timestamp cuối cùng hợp lệ
+  ansible.builtin.assert:
+    that: backup_ts is regex('^[0-9]{8}-[0-9]{6}$')
+    fail_msg: "backup_ts cuối cùng không đúng dạng YYYYMMDD-HHMMSS."
+  when: do_backup | bool
+
 - name: Đặt tên file backup (có tag hoặc không)
   ansible.builtin.set_fact:
     backup_filename: "db-{{ (backup_tag_norm ~ '-') if backup_tag_norm | length > 0 else '' }}{{ backup_ts }}.xb.gz"
   when: do_backup | bool
 
 - name: Full backup bằng mariadb-backup (stream ra file nén)
-  ansible.builtin.shell: >
-    umask 077 && docker exec mariadb sh -c
-    'mariadb-backup --backup --stream=xbstream
-    --user=root --password={{ mariadb_root_password }}'
-    | gzip > {{ mariadb_backup.destination }}/{{ backup_filename }}
+  # Password truyền qua MYSQL_PWD (environment), KHÔNG nhúng vào chuỗi lệnh — "no_log: true" chỉ che
+  # được log của Ansible, KHÔNG che được "ps aux"/"/proc/<pid>/cmdline" trên host trong lúc lệnh đang
+  # chạy. mariadb-backup dùng chung thư viện client với mariadb/mysql nên cũng tự đọc MYSQL_PWD.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    final={{ (mariadb_backup.destination ~ '/' ~ backup_filename) | quote }}
+    tmp="${final}.tmp.$$"
+    validate_dir=$(mktemp -d {{ (mariadb_backup.destination ~ '/.validate.XXXXXX') | quote }})
+    trap 'rm -f "$tmp"; rm -rf "$validate_dir"' EXIT
+    docker exec -e MYSQL_PWD mariadb sh -c \
+      'mariadb-backup --backup --stream=xbstream --user=root' \
+      | gzip > "$tmp"
+    gzip -t "$tmp"
+    gzip -cd "$tmp" \
+      | docker run --rm -i -v "$validate_dir:/validate" \
+          --entrypoint mbstream {{ images.mariadb | quote }} -x -C /validate
+    test -s "$validate_dir/mariadb_backup_info"
+    test -s "$validate_dir/backup-my.cnf"
+    rm -rf "$validate_dir"
+    mv -f "$tmp" "$final"
+    trap - EXIT
   args:
     executable: /bin/bash
+  environment:
+    MYSQL_PWD: "{{ mariadb_root_password }}"
   no_log: true
   when: do_backup | bool
 
-- name: Ghi con trỏ LATEST_<TAG> (chỉ khi có backup_tag — vd rollback dùng để tìm bản pre-upgrade)
-  ansible.builtin.copy:
-    content: "{{ backup_ts }}"
-    dest: "{{ mariadb_backup.destination }}/LATEST_{{ backup_tag_norm | upper }}"
-    mode: "0600"
-  when:
-    - do_backup | bool
-    - backup_tag_norm | length > 0
+- name: Kiểm tra artifact backup trước khi cập nhật con trỏ
+  ansible.builtin.stat:
+    path: "{{ mariadb_backup.destination }}/{{ backup_filename }}"
+  register: _backup_artifact
+  when: do_backup | bool
+
+- name: Chặn nếu artifact backup không hợp lệ
+  ansible.builtin.assert:
+    that:
+      - _backup_artifact.stat.exists
+      - _backup_artifact.stat.size | int > 0
+    fail_msg: "mariadb-backup không tạo được artifact hợp lệ; con trỏ LATEST không được cập nhật."
+  when: do_backup | bool
 
 # BUG THẬT ĐÃ GẶP (2026-07-24, phát hiện lúc verify tính năng backup-full/restore-pki mới): CA thật
 # nằm ở "ca_host" (master đầu tiên), KHÔNG phải "galera[0]" — 2 vai trò hoàn toàn độc lập, có thể là
@@ -72,15 +112,67 @@
     - do_backup | bool
     - ca_host | length > 0
 
-- name: "Snapshot CA/PKI (state ngoài DB — mục 10.5) — chạy TRÊN ca_host, không phải galera[0]"
+- name: Verify canonical CA files before creating a PKI backup
+  ansible.builtin.stat:
+    path: "{{ icinga_base_dir }}/icinga2/data/var/lib/icinga2/ca/{{ item }}"
+  loop: [ca.crt, ca.key]
+  register: _pki_source_files
+  delegate_to: "{{ ca_host }}"
+  when:
+    - do_backup | bool
+    - ca_host | length > 0
+
+- name: Refuse a DB+PKI backup when the canonical CA is incomplete
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - item.stat.size | int > 0
+    fail_msg: >-
+      CA source {{ item.item }} trên {{ ca_host }} bị thiếu/rỗng; không cập nhật LATEST vì
+      bản backup này không đủ để disaster recovery.
+  loop: "{{ _pki_source_files.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - do_backup | bool
+    - ca_host | length > 0
+
+- name: "Snapshot canonical CA/PKI (state ngoài DB — mục 10.5) trên ca_host"
   community.general.archive:
-    path: "{{ icinga_base_dir }}/icinga2/pki"
+    path: "{{ icinga_base_dir }}/icinga2/data/var/lib/icinga2/ca"
     dest: "{{ mariadb_backup.destination }}/pki-{{ backup_ts }}.tar.gz"
     format: gz
     mode: "0600"
   delegate_to: "{{ ca_host }}"
   when:
     - do_backup | bool
+    - ca_host | length > 0
+
+- name: Validate that the PKI archive contains both CA files
+  ansible.builtin.shell: |
+    set -euo pipefail
+    members=$(tar -tzf {{ (mariadb_backup.destination ~ '/pki-' ~ backup_ts ~ '.tar.gz') | quote }})
+    grep -Eq '(^|/)ca\.crt$' <<<"$members"
+    grep -Eq '(^|/)ca\.key$' <<<"$members"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  delegate_to: "{{ ca_host }}"
+  when:
+    - do_backup | bool
+    - ca_host | length > 0
+
+# A LATEST pointer represents one complete rollback/DR point. Publish it only
+# after the physical DB stream and its matching PKI archive both validate.
+- name: Ghi con trỏ LATEST_<TAG> sau khi DB và PKI đều hợp lệ
+  ansible.builtin.copy:
+    content: "{{ backup_ts }}"
+    dest: "{{ mariadb_backup.destination }}/LATEST_{{ backup_tag_norm | upper }}"
+    mode: "0600"
+  when:
+    - do_backup | bool
+    - backup_tag_norm | length > 0
     - ca_host | length > 0
 
 - name: Xoá bản DB backup cũ hơn retention_days (trên galera[0])

@@ -1,0 +1,1361 @@
+# Runbook triển khai và vận hành Icinga bằng Ansible
+
+> Tài liệu vận hành độc lập cho project `icinga-ansible`.
+>
+> Phạm vi đã kiểm tra sâu: 2 Icinga master, 2 satellite trong một zone HA, 3 MariaDB Galera, Icinga DB, Redis, Icinga Web 2 và Icinga Director. Deployment node là máy quản trị riêng, không nằm trong inventory dịch vụ.
+>
+> Cập nhật theo đợt review và regression thật trên OpenStack ngày **2026-10-10**. Các bài DR phá huỷ,
+> add/remove node, cross-lineup và rollback gần nhất chạy ngày **2026-10-04**; fresh deploy, proxy pull,
+> backup-full, health check và upgrade rehearsal được chạy lại ngày **2026-10-10**.
+
+## 1. Mục tiêu và phạm vi hỗ trợ
+
+Runbook này hướng dẫn toàn bộ vòng đời:
+
+- chuẩn bị deployment node và các service node;
+- deploy mới một cụm Icinga;
+- thêm hoặc xóa master/satellite;
+- kiểm tra Icinga, Web, Director, Redis và Galera;
+- backup cấu hình, database và PKI;
+- restore database để rollback hoặc phục hồi sự cố;
+- cứu Galera khi toàn bộ cluster dừng bất thường;
+- disaster recovery khi mất toàn bộ service node nhưng còn deployment node và DB backup;
+- disaster recovery khi chỉ còn physical DB backup;
+- upgrade trong cùng dòng phiên bản và lên dòng cao hơn;
+- rollback bằng physical backup trước upgrade;
+- mô tả chi tiết các lỗi đã sửa và các case đã test thật.
+
+Project hiện hỗ trợ các topology chính sau:
+
+| Thành phần | Topology được hỗ trợ |
+|---|---|
+| Icinga master | 1 hoặc 2 master |
+| Satellite zone | Mỗi zone có 1 hoặc 2 satellite |
+| Managed MariaDB | 1 node standalone hoặc số lẻ từ 3 node Galera trở lên |
+| Database ngoài | Có hỗ trợ deploy dịch vụ, nhưng DBA phải tự backup, restore và migrate schema |
+| Load balancer | Role tích hợp chưa hoàn thiện; dùng LB/reverse proxy ngoài nếu cần VIP Web |
+
+Các giới hạn được kiểm tra cứng trong `prechecks`:
+
+- không cho hơn 2 endpoint trong zone `master`;
+- không cho satellite zone rỗng hoặc có hơn 2 member;
+- mọi member của `satellite_zones` phải nằm trong group `[satellite]`;
+- tên zone phải duy nhất, mỗi satellite thuộc đúng một zone và tên zone không được trùng zone client;
+- endpoint thuộc đúng một trong ba role master/satellite/client và mọi service host thuộc `all_hosts`;
+- managed DB chỉ chấp nhận 1 node hoặc số lẻ từ 3 node;
+- bắt buộc khai đủ tag của 5 image;
+- nhánh external DB phải có host và credential service đã được DBA tạo trước.
+
+## 2. Các quy tắc an toàn phải nhớ
+
+1. Chạy CLI bằng **user thường có passwordless sudo**. Không chạy cả câu lệnh bằng `sudo` và không `sudo su` trước khi chạy. Nếu chạy bằng root, Ansible thường dùng `/root/.ssh` và không SSH được sang các node khác.
+2. Không sửa file template trong `etc/examples/`. Cấu hình thật nằm ở `/etc/icinga-ansible` trên deployment node.
+3. Không đặt deployment node vào inventory nếu nó không chạy workload Icinga/MariaDB.
+4. Chỉ chạy `bootstrap-servers` trên host hoàn toàn mới hoặc host chưa từng được bootstrap.
+5. Trước mọi thao tác upgrade, restore, recovery hoặc thay topology, chạy `backup-full` và sao chép backup ra storage ngoài deployment node.
+6. `restore-backup`, `recover-db-only`, `remove-*`, `rollback` và `destroy` là thao tác có gián đoạn hoặc phá hủy dữ liệu. Dùng đúng chuỗi xác nhận được ghi trong từng phần.
+7. Restore physical MariaDB lần đầu bằng đúng version MariaDB đã tạo backup. Chỉ upgrade sau khi restore và `check` đã PASS.
+8. Không downgrade MariaDB/Galera tại chỗ. Rollback phải trả tag cũ rồi restore physical backup `pre-upgrade`.
+9. Không đặt VIP/LB trước cổng Icinga cluster 5665. Nếu dùng LB, chỉ đặt trước Web và bật sticky session vì Icinga Web dùng PHP file session.
+10. Backup còn nằm trên chính deployment node chưa phải backup DR. Phải đồng bộ sang storage độc lập.
+
+## 3. Kiến trúc mong muốn
+
+```mermaid
+flowchart TB
+    OP[Deployment node\nAnsible + inventory + config + backup]
+    M1[master1\nIcinga 2 + Icinga DB + Redis\nWeb 2 + Director]
+    M2[master2\nIcinga 2 + Icinga DB + Redis\nWeb 2 + Director]
+    S1[satellite1\nIcinga 2]
+    S2[satellite2\nIcinga 2]
+    G1[galera1\nMariaDB/Galera]
+    G2[galera2\nMariaDB/Galera]
+    G3[galera3\nMariaDB/Galera]
+
+    OP -->|SSH + sudo| M1
+    OP -->|SSH + sudo| M2
+    OP -->|SSH + sudo| S1
+    OP -->|SSH + sudo| S2
+    OP -->|SSH + sudo| G1
+    OP -->|SSH + sudo| G2
+    OP -->|SSH + sudo| G3
+    M1 <-->|Icinga cluster 5665| M2
+    S1 <-->|zone satellite-ha| S2
+    S1 -->|parent zone master| M1
+    S2 -->|parent zone master| M2
+    M1 --> G1
+    M2 --> G1
+    G1 <-->|Galera| G2
+    G2 <-->|Galera| G3
+    G3 <-->|Galera| G1
+```
+
+Deployment node giữ desired state và artifact DR:
+
+| Dữ liệu | Vị trí mặc định | Ý nghĩa |
+|---|---|---|
+| Global settings | `/etc/icinga-ansible/globals.yml` | topology logic, version, module, DB, proxy |
+| Secrets | `/etc/icinga-ansible/passwords.yml` | DB, Redis, API, Web admin, Telegram |
+| Override | `/etc/icinga-ansible/config/` | cấu hình ghi đè theo service/host/group/zone |
+| Full backup | `/var/backups/icinga-ansible-config/` | config, DB, PKI và Web config được fetch về deployment node |
+| Runtime data | `/var/lib/icinga-ansible/` trên service node | DB datadir, PKI, Redis và state container |
+| Rendered config | `/etc/icinga-ansible/` trên service node | output do Ansible render cho container |
+| DB backup gốc | `/var/backups/icinga-db/` trên `galera[0]` | physical mariabackup và pointer |
+
+Hai đường dẫn `/etc/icinga-ansible` có vai trò khác nhau:
+
+- trên deployment node: input quản trị;
+- trên service node: output đã render cho service.
+
+## 4. Topology lab đã dùng để kiểm thử
+
+| Vai trò | Host | IP lab |
+|---|---|---|
+| Deployment node | deploy | `172.28.83.220` |
+| Master | master1 | `172.28.83.221` |
+| Master | master2 | `172.28.83.228` |
+| Galera | galera1 | `172.28.83.223` |
+| Galera | galera2 | `172.28.83.224` |
+| Galera | galera3 | `172.28.83.225` |
+| Satellite | satellite1 | `172.28.83.226` |
+| Satellite | satellite2 | `172.28.83.227` |
+
+IP trên chỉ là bằng chứng test lab. Thay bằng IP thật của môi trường triển khai.
+
+Director sau deploy hoặc restore phải có đúng:
+
+- endpoint: `master1`, `master2`, `satellite1`, `satellite2`;
+- zone: `director-global`, `global-templates`, `master`, `satellite-ha`.
+
+`check` hiện xác nhận chính xác tập endpoint/zone external của Director. Nó sẽ fail nếu còn node cũ hoặc thiếu node mới.
+
+## 5. Chuẩn bị hạ tầng
+
+### 5.1. Deployment node
+
+Khuyến nghị Ubuntu 24.04 hoặc 26.04, có:
+
+- Git;
+- Ansible;
+- Python Docker SDK;
+- SSH key đến tất cả service node;
+- user vận hành có passwordless sudo cục bộ;
+- đủ dung lượng để giữ ít nhất một full backup DB.
+
+```bash
+sudo apt update
+sudo apt install -y git ansible python3-docker
+
+cd /opt/icinga-ansible
+ansible-galaxy collection install -r ansible/requirements.yml
+```
+
+Không chạy lệnh project bằng `sudo`:
+
+```bash
+# Đúng
+./tools/icinga-ansible help
+
+# Sai trong cụm nhiều host
+sudo ./tools/icinga-ansible help
+```
+
+### 5.2. Service node
+
+- OS Ubuntu được project hỗ trợ;
+- hostname ổn định;
+- đồng bộ thời gian;
+- deployment node SSH được bằng key;
+- user SSH có passwordless sudo;
+- đủ disk cho Docker và MariaDB;
+- các node Galera nằm trên failure domain khác nhau trong production.
+
+Kiểm tra từ deployment node:
+
+```bash
+for host in master1 master2 satellite1 satellite2 galera1 galera2 galera3; do
+  ssh "$host" 'hostname; sudo -n true'
+done
+```
+
+### 5.3. Network và firewall
+
+Tối thiểu cần xem xét:
+
+| Port | Luồng | Mục đích |
+|---|---|---|
+| TCP 22 | deployment → mọi node | Ansible/SSH |
+| TCP 5665 | master ↔ master/satellite/agent | Icinga API và cluster |
+| TCP 8080 | user/LB → master | Web mặc định |
+| TCP 3306 | master → DB, DB ↔ DB | MariaDB client |
+| TCP/UDP 4567 | Galera ↔ Galera | replication |
+| TCP 4568 | Galera ↔ Galera | IST |
+| TCP 4444 | Galera ↔ Galera | SST |
+| TCP 6380 | nội bộ master | Redis của Icinga DB |
+| UDP 123 | các node → NTP | đồng bộ thời gian |
+
+Không public MariaDB, Galera hoặc Redis ra Internet. Web production nên đi qua reverse proxy/LB có TLS thay vì public thẳng HTTP 8080.
+
+Nếu các host đi Internet qua proxy, khai `proxy_http`, `proxy_https`, `proxy_no_proxy`. Có thể dùng `proxy_group_overrides` cho từng group `master`, `satellite`, `galera`, `client`.
+
+Ví dụ cấu hình đã kiểm thử trên lab OpenStack:
+
+```yaml
+proxy_http: "http://proxy.example.vn:80"
+proxy_https: "http://proxy.example.vn:80"
+proxy_no_proxy: "localhost,127.0.0.1,::1,10.20.0.0/24"
+proxy_group_overrides: {}
+```
+
+`bootstrap-servers` truyền proxy trực tiếp vào các task `apt`, tải key/repository, đồng thời ghi proxy
+vào môi trường hệ thống và Docker daemon. Việc truyền trực tiếp là bắt buộc trong lần chạy đầu vì
+SSH/Ansible process hiện tại chưa tự đọc lại `/etc/environment`. Sau khi đổi proxy, chạy lại
+`bootstrap-servers`, rồi xác nhận `systemctl show docker --property=Environment` trên từng node.
+Lệnh `pull` luôn kiểm tra lại digest và retry tối đa 8 lần, cách nhau 10 giây, cho từng image. Retry này
+xử lý lỗi tạm thời 429/5xx từ registry/CDN; nếu hết retry vẫn lỗi thì không có runtime nào bị thay đổi.
+Trong lab, truy cập Docker Hub trực tiếp bị timeout, đi qua proxy nhận phản hồi registry hợp lệ; pull đủ
+image trên 7 node PASS dù một số request đầu nhận HTTP 503 từ CDN.
+
+## 6. Tạo inventory
+
+Tạo inventory riêng ngoài file mẫu, ví dụ `inventory-prod`:
+
+```ini
+[all_hosts]
+master1    ansible_host=10.20.0.11
+master2    ansible_host=10.20.0.12
+satellite1 ansible_host=10.20.0.21
+satellite2 ansible_host=10.20.0.22
+galera1    ansible_host=10.20.0.31
+galera2    ansible_host=10.20.0.32
+galera3    ansible_host=10.20.0.33
+
+[master]
+master1
+master2
+
+[satellite]
+satellite1
+satellite2
+
+[client]
+
+[galera]
+galera1
+galera2
+galera3
+
+[loadbalancer]
+
+[icinga:children]
+master
+satellite
+```
+
+Nếu deployment node là máy riêng, không thêm nó vào `[all_hosts]`. Nếu deployment node chính là một service node, chỉ host đó mới dùng `ansible_connection=local`.
+
+Tên trong inventory là identity Icinga. `satellite_zones[].members` dùng tên này, không dùng IP.
+
+Kiểm tra inventory:
+
+```bash
+ansible-inventory -i inventory-prod --graph
+ansible -i inventory-prod all_hosts -m ping
+```
+
+## 7. Khởi tạo cấu hình và secret
+
+```bash
+./tools/icinga-ansible init-config
+./tools/icinga-ansible genpwd
+```
+
+Kết quả:
+
+- `/etc/icinga-ansible/globals.yml`;
+- `/etc/icinga-ansible/passwords.yml` mode `0600`;
+- `/etc/icinga-ansible/config/` cho override.
+
+`genpwd` không ghi đè `passwords.yml` đã tồn tại. Không chạy lại chỉ để đổi một password; hãy sửa đúng key rồi chạy `reconfigure`.
+
+Mã hóa secret:
+
+```bash
+ansible-vault encrypt /etc/icinga-ansible/passwords.yml
+```
+
+CLI tự nhận biết file Vault và hỏi vault password. Không commit plaintext secret vào Git.
+
+Các secret quan trọng:
+
+```yaml
+mariadb_root_password: "..."
+icingadb_db_password: "..."
+icingaweb2_db_password: "..."
+director_db_password: "..."
+icingadb_redis_password: "..."
+icinga2_ticket_salt: "..."
+icinga2_api_user_password: "..."
+icinga2_director_api_user_password: "..."
+icingadb_web_api_user_password: "..."
+icingaweb2_admin_user: "admin"
+icingaweb2_admin_password: "..."
+```
+
+Trong DR từ physical DB, `mariadb_root_password` cũ là bắt buộc để mở datadir được restore. Các password service có thể được rotate bởi lần deploy cuối, nhưng giữ nguyên bộ secret cũ vẫn là phương án ít rủi ro nhất.
+
+## 8. Cấu hình topology, version và Director
+
+Chỉnh `/etc/icinga-ansible/globals.yml`:
+
+```yaml
+base_distro: "ubuntu"
+network_interface: "eth0"
+
+icinga_image_versions:
+  icinga2: "2.16.5"
+  icingadb: "1.5.1"
+  icingadb_redis: "7.4.11"
+  icingaweb2: "2.14.0"
+  mariadb: "12.3.3"
+
+mariadb_allow_rolling_series_upgrade: false
+
+enable_icinga2_features:
+  - "icingadb"
+  - "checker"
+  - "notification"
+  - "api"
+  - "mainlog"
+
+satellite_zones:
+  - name: "satellite-ha"
+    members: ["satellite1", "satellite2"]
+    parent: "master"
+
+icinga_database_type: "managed_db"
+managed_db:
+  host: ""
+  port: 3306
+
+mariadb_galera_cluster_name: "icinga_galera"
+mariadb_backup:
+  enabled: true
+  schedule: "0 2 * * *"
+  retention_days: 14
+  destination: "/var/backups/icinga-db"
+
+icingaweb2_http_port: 8080
+icingaweb2_enable_tls: false
+icingaweb2_timezone: "Asia/Ho_Chi_Minh"
+
+enable_icingaweb2_modules:
+  - "icingadb"
+  - "director"
+```
+
+Các lưu ý:
+
+- `master[0]` tự động là `ca_host`. Trong ví dụ là `master1`.
+- `managed_db.host: ""` tự dùng IP của `galera[0]`.
+- Nếu có DB VIP/proxy riêng, điền IP đó vào `managed_db.host`.
+- Icinga không có một “lineup” bundle chung. Mỗi component có tag độc lập.
+- Không dùng tag `latest` trong production. Nên mirror vào registry nội bộ và pin immutable tag hoặc digest.
+- `icingaweb2_enable_tls: true` chưa được role cấu hình vhost/certificate hoàn chỉnh. Dùng reverse proxy ngoài.
+
+### External DB
+
+Nếu dùng DB ngoài:
+
+```yaml
+icinga_database_type: "external"
+external_db:
+  host: "10.20.1.10"
+  port: 3306
+```
+
+DBA phải tạo trước database/user/grant cho:
+
+- `icingadb`;
+- `icingaweb2`;
+- `director` nếu bật Director.
+
+Project không dùng root của external DB. `upgrade`, `rollback`, `mariadb-backup`, `mariadb-recovery` tự động không áp dụng cho external DB.
+
+## 9. Deploy mới
+
+Chạy tuần tự từ deployment node:
+
+```bash
+# 1. Bootstrap OS/Docker/chrony trên host mới
+./tools/icinga-ansible bootstrap-servers -i inventory-prod
+
+# 2. Kiểm tra topology, version, DB và port
+./tools/icinga-ansible prechecks -i inventory-prod
+
+# 3. Kéo image trước để phát hiện lỗi registry trước cửa sổ thay đổi
+./tools/icinga-ansible pull -i inventory-prod
+
+# 4. Deploy toàn stack
+./tools/icinga-ansible deploy -i inventory-prod
+
+# 5. In URL/user truy cập
+./tools/icinga-ansible post-deploy -i inventory-prod
+
+# 6. Kiểm tra sâu
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Chạy lại `deploy` một lần nữa để kiểm tra hội tụ:
+
+```bash
+./tools/icinga-ansible deploy -i inventory-prod
+```
+
+Sau khi ổn định, lần chạy thứ hai nên không còn thay đổi không mong muốn. Một số task probe có thể báo `ok`; thay đổi container/config lặp lại cần được điều tra.
+
+Web:
+
+```text
+http://<master1-or-master2>:8080/authentication/login
+```
+
+User/mật khẩu lấy từ `icingaweb2_admin_user` và `icingaweb2_admin_password`.
+
+### `check` đang xác nhận những gì
+
+- container bắt buộc tồn tại, running và healthy;
+- `icinga2 daemon -C` hợp lệ trên mỗi master;
+- Icinga API trả HTTP 200;
+- Redis trả `PONG`;
+- trang login Web trả đúng status;
+- đăng nhập Web thật bằng admin credential được quản lý;
+- heartbeat Icinga DB còn mới;
+- config sync trong DB có dữ liệu;
+- log Icinga DB 5 phút gần nhất không có fatal/panic/query failure nghiêm trọng;
+- Director health PASS;
+- endpoint/zone external trong Director khớp chính xác inventory hiện tại;
+- MariaDB trả `SELECT 1`;
+- Galera `Primary`, `wsrep_ready=ON` và đủ cluster size.
+
+## 10. Thay đổi cấu hình hằng ngày
+
+Sau khi sửa `globals.yml`, `passwords.yml` hoặc file override:
+
+```bash
+./tools/icinga-ansible prechecks -i inventory-prod
+./tools/icinga-ansible reconfigure -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Ví dụ rotate Web admin password:
+
+```bash
+$EDITOR /etc/icinga-ansible/passwords.yml
+./tools/icinga-ansible reconfigure -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Thêm Host/Service để monitor qua Director hoặc override không đồng nghĩa thêm infrastructure node. `add-master`/`add-node` chỉ dành cho host chạy container Icinga.
+
+## 11. Thêm và xóa node
+
+### 11.1. Thêm satellite
+
+1. Thêm host vào `[all_hosts]` và `[satellite]`.
+2. Thêm tên host vào `satellite_zones[].members`. Mỗi zone tối đa 2 member.
+3. Bootstrap riêng host mới.
+4. Chạy `add-node`.
+5. Chạy `check`.
+
+```bash
+./tools/icinga-ansible bootstrap-servers -i inventory-prod --limit satellite2
+./tools/icinga-ansible prechecks -i inventory-prod
+./tools/icinga-ansible add-node -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+```
+
+`add-node` chạy lại deploy idempotent cho topology. Node mới được cấp certificate; các node cũ được render lại `zones.conf`. Director kickstart được reconcile lại nên endpoint/zone mới phải xuất hiện.
+
+### 11.2. Xóa satellite
+
+Backup trước:
+
+```bash
+./tools/icinga-ansible backup-full -i inventory-prod
+```
+
+Xóa workload trên host khi host vẫn còn trong inventory:
+
+```bash
+./tools/icinga-ansible remove-node -i inventory-prod \
+  -e target_host=satellite2 -e confirm=yes
+```
+
+Sau khi lệnh trên thành công:
+
+1. xóa `satellite2` khỏi `[satellite]` và `[all_hosts]`;
+2. xóa nó khỏi `satellite_zones[].members`;
+3. nếu zone không còn member, xóa cả zone;
+4. reconfigure và check.
+
+```bash
+./tools/icinga-ansible prechecks -i inventory-prod
+./tools/icinga-ansible reconfigure -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Playbook chỉ xóa dữ liệu Icinga 2 trên host đích và giữ dữ liệu của role khác nếu nhiều role cùng đặt trên một host.
+
+### 11.3. Thêm master thứ hai
+
+Project chỉ hỗ trợ tối đa 2 master. Thêm master giống satellite:
+
+```bash
+# Sửa inventory trước: thêm master2 vào [all_hosts] và [master]
+./tools/icinga-ansible bootstrap-servers -i inventory-prod --limit master2
+./tools/icinga-ansible prechecks -i inventory-prod
+./tools/icinga-ansible add-master -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+```
+
+### 11.4. Xóa master
+
+Không được xóa master cuối cùng. `master[0]` là CA host và playbook chặn xóa trực tiếp CA host.
+
+Để xóa master không phải CA:
+
+```bash
+./tools/icinga-ansible backup-full -i inventory-prod
+./tools/icinga-ansible remove-master -i inventory-prod \
+  -e target_host=master2 -e confirm=yes
+
+# Sau khi thành công, xóa master2 khỏi inventory
+./tools/icinga-ansible reconfigure -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Nếu cần đổi `ca_host`, trước hết phải đảm bảo master sẽ lên vị trí đầu có bản CA hợp lệ, sửa thứ tự `[master]`, reconfigure và check. Không xóa CA cũ khi chưa xác nhận CA mới có thể ký certificate.
+
+## 12. Backup
+
+### 12.1. Backup DB định kỳ
+
+`mariadb_backup.schedule` cài lịch backup trên managed DB. Mặc định:
+
+```yaml
+mariadb_backup:
+  enabled: true
+  schedule: "0 2 * * *"
+  retention_days: 14
+  destination: "/var/backups/icinga-db"
+```
+
+Backup thủ công:
+
+```bash
+./tools/icinga-ansible mariadb-backup -i inventory-prod
+```
+
+Lệnh tạo physical MariaDB backup trên `galera[0]` và snapshot PKI trên `ca_host`. Backup thường chỉ nằm trên service node, vì vậy chưa đủ cho DR mất toàn bộ node.
+
+### 12.2. Full backup
+
+```bash
+./tools/icinga-ansible backup-full -i inventory-prod
+```
+
+Kết quả trên deployment node:
+
+```text
+/var/backups/icinga-ansible-config/
+├── config-<timestamp>.tar.gz
+├── icingaweb2-master1-<timestamp>.tar.gz
+├── icingaweb2-master2-<timestamp>.tar.gz
+├── database/
+│   ├── db-full-<timestamp>.xb.gz
+│   └── LATEST_FULL
+└── pki/
+    └── pki-<timestamp>.tar.gz
+```
+
+Ý nghĩa:
+
+- `config-*`: toàn bộ config đầu vào trên deployment node, gồm globals, passwords và override;
+- `db-full-*`: physical DB chứa database Icinga DB, Web và Director;
+- `LATEST_FULL`: timestamp của full DB backup mới nhất;
+- `pki-*`: CA certificate/private key;
+- `icingaweb2-*`: config runtime trên từng master, kể cả thay đổi qua UI.
+
+Artifact DB/PKI được kiểm tra tồn tại, kích thước và checksum trong lúc fetch. Pointer chỉ được cập nhật sau khi backup hợp lệ.
+
+### 12.3. Kiểm tra backup ngay sau khi tạo
+
+```bash
+sudo find /var/backups/icinga-ansible-config -maxdepth 2 -type f \
+  -printf '%M %u:%g %s %TY-%Tm-%Td %TH:%TM %p\n'
+
+sudo tar -tzf /var/backups/icinga-ansible-config/config-<timestamp>.tar.gz | head
+sudo gzip -t /var/backups/icinga-ansible-config/database/db-full-<timestamp>.xb.gz
+sudo cat /var/backups/icinga-ansible-config/database/LATEST_FULL
+```
+
+Đồng bộ cả thư mục backup sang storage khác:
+
+```bash
+sudo rsync -a --delete \
+  /var/backups/icinga-ansible-config/ \
+  backup-host:/srv/backup/icinga/prod/
+```
+
+Không dùng `--delete` nếu policy lưu nhiều generation ở storage đích.
+
+### 12.4. Lưu ý về archive Icinga Web
+
+`restore-config` chỉ restore archive `config-*` của deployment node. Nó không tự giải nén `icingaweb2-<host>-*.tar.gz` lên master.
+
+Database restore đã phục hồi database `icingaweb2` và `director`. Archive Web chỉ cần dùng khi có thay đổi file qua UI không tồn tại trong override. Trước khi merge thủ công:
+
+1. chạy `tar -tzf` để xem cấu trúc;
+2. so sánh từng file với `/etc/icinga-ansible/icingaweb2` trên master mới;
+3. đưa phần cần giữ trở lại `/etc/icinga-ansible/config/` để trở thành desired state;
+4. chạy `reconfigure` và `check`.
+
+Không giải nén mù toàn bộ archive của master cũ lên topology mới vì có thể ghi đè endpoint hoặc credential vừa được reconcile.
+
+## 13. Khôi phục và sửa MariaDB/Galera
+
+Hai mode có mục đích khác nhau:
+
+| Mode | Dùng khi | Có ghi đè dữ liệu? |
+|---|---|---|
+| `recover-cluster` | Toàn bộ Galera dừng/crash nhưng datadir còn | Không chủ động restore backup |
+| `restore-backup` | DB corrupt, rollback hoặc cần trả DB về thời điểm backup | Có, xóa datadir hiện tại trên mọi Galera node |
+
+### 13.1. Cứu cluster Galera chết nhưng còn datadir
+
+Không chạy khi một cluster vẫn còn Primary khỏe. Kiểm tra tình trạng và backup filesystem nếu có thể.
+
+```bash
+./tools/icinga-ansible mariadb-recovery -i inventory-prod \
+  -e recovery_mode=recover-cluster -e confirm=yes
+
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Luồng đã sửa và test:
+
+1. dừng toàn bộ MariaDB;
+2. chạy `wsrep-recover` trên từng node;
+3. parse UUID/seqno, bao gồm output của MariaDB 12.3;
+4. chỉ xét UUID thuộc majority component;
+5. chọn node có seqno cao nhất trong majority làm bootstrap node;
+6. ghi UUID/seqno hợp lệ vào `grastate.dat`;
+7. bootstrap đúng một node;
+8. join các node còn lại;
+9. chỉ bỏ bootstrap flag sau khi mọi node đều `Primary`, `Synced`, `ON` và cluster size đủ.
+
+Nếu các node không có majority UUID rõ ràng, dừng để điều tra. Không tự chọn node theo cảm tính vì có thể làm mất transaction mới hơn.
+
+### 13.2. Restore một full backup
+
+Restore full backup mới nhất đã được fetch về deployment node:
+
+```bash
+./tools/icinga-ansible mariadb-recovery -i inventory-prod \
+  -e recovery_mode=restore-backup \
+  -e restore_backup_tag=full \
+  -e confirm=yes
+
+./tools/icinga-ansible deploy -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Role tìm `LATEST_FULL` theo thứ tự:
+
+1. `/var/backups/icinga-db/LATEST_FULL` trên `galera[0]`;
+2. `/var/backups/icinga-ansible-config/database/LATEST_FULL` trên deployment node.
+
+Nếu service node đã mất artifact, role validate file trên deployment node rồi tự stage sang `galera[0]` trước khi dừng DB.
+
+Chọn timestamp cụ thể:
+
+```bash
+./tools/icinga-ansible mariadb-recovery -i inventory-prod \
+  -e recovery_mode=restore-backup \
+  -e restore_backup_ts=20261004-023938 \
+  -e confirm=yes
+```
+
+Trong lúc restore, Icinga DB consumer được dừng để không ghi xen vào Galera đang rebuild. Sau restore phải chạy `deploy` để hội tụ và bật lại đầy đủ service.
+
+## 14. Disaster recovery
+
+### 14.1. Chỉ mất deployment node, service node vẫn khỏe
+
+Trên deployment node mới:
+
+```bash
+cd /opt/icinga-ansible
+ansible-galaxy collection install -r ansible/requirements.yml
+
+CONFIRM=yes-i-really-mean-it ./tools/icinga-ansible restore-config \
+  --config-backup /safe-backup/config-<timestamp>.tar.gz
+
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Không bootstrap, deploy, restore PKI hoặc restore DB vì cụm vẫn đang chạy.
+
+Nếu `/etc/icinga-ansible/globals.yml` đã tồn tại, `restore-config` yêu cầu biến môi trường `CONFIRM=yes-i-really-mean-it`. Đây là biến môi trường của shell, không phải `-e confirm=...`.
+
+`restore-config` kiểm tra gzip/tar, chặn path traversal, yêu cầu đúng một thư mục gốc có `globals.yml`,
+giải nén thử vào staging, rồi mới xóa nội dung config directory và thay bằng bản backup. Vì vậy file
+override cũ không có trong backup sẽ không còn sót lại. Directory không rỗng luôn yêu cầu
+`CONFIRM=yes-i-really-mean-it`; các path hệ thống nguy hiểm như `/`, `/etc`, `/var` bị từ chối.
+
+### 14.2. Mất service node, còn deployment node và DB backup
+
+Đây là case người vận hành xác nhận cần hỗ trợ chính. Còn:
+
+- repo hoặc có thể clone lại repo;
+- inventory;
+- `/etc/icinga-ansible/globals.yml`;
+- `/etc/icinga-ansible/passwords.yml`;
+- override trong `/etc/icinga-ansible/config/`;
+- physical DB backup trên deployment node hoặc storage ngoài.
+
+Không chạy `init-config` hoặc `genpwd`.
+
+Nếu file backup được mang về từ storage ngoài, đặt đúng layout:
+
+```bash
+sudo install -d -m 0700 -o "$(id -un)" -g "$(id -gn)" \
+  /var/backups/icinga-ansible-config/database
+sudo cp db-full-20261004-023938.xb.gz \
+  /var/backups/icinga-ansible-config/database/
+printf '%s' '20261004-023938' | sudo tee \
+  /var/backups/icinga-ansible-config/database/LATEST_FULL >/dev/null
+sudo chown -R "$(id -un):$(id -gn)" /var/backups/icinga-ansible-config
+sudo chmod -R go-rwx /var/backups/icinga-ansible-config
+```
+
+Khôi phục:
+
+```bash
+# 1. Sửa IP trong inventory nếu hạ tầng mới dùng IP khác.
+#    Giữ hostname logic nếu muốn Director/topology khớp mô hình cũ.
+ansible -i inventory-prod all_hosts -m ping
+
+# 2. Bootstrap và dựng stack tạm. Deploy này tạo CA mới và environment ID tạm
+#    nếu không restore PKI cũ.
+./tools/icinga-ansible bootstrap-servers -i inventory-prod
+./tools/icinga-ansible prechecks -i inventory-prod
+./tools/icinga-ansible pull -i inventory-prod
+./tools/icinga-ansible deploy -i inventory-prod
+
+# 3. Restore physical DB từ deployment node. Role tự stage artifact sang Galera.
+./tools/icinga-ansible mariadb-recovery -i inventory-prod \
+  -e recovery_mode=restore-backup \
+  -e restore_backup_tag=full \
+  -e confirm=yes
+
+# 4. Lấy environment ID cũ trong DB, seed cùng ID lên cả hai master,
+#    dừng publisher/consumer và xóa Redis state tạm.
+./tools/icinga-ansible recover-db-only -i inventory-prod -e confirm=yes
+
+# 5. Reconcile credential, schema, Director và toàn bộ container.
+./tools/icinga-ansible deploy -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Nếu DB chứa nhiều environment ID, playbook dừng trước khi thay đổi. Chọn ID production:
+
+```bash
+./tools/icinga-ansible recover-db-only -i inventory-prod \
+  -e confirm=yes \
+  -e recover_environment_id=<40-hex-characters>
+```
+
+Sau recovery cần xác nhận:
+
+- file `/var/lib/icinga2/icingadb.env` trên cả hai master chứa cùng ID JSON;
+- DB chỉ có environment mong muốn;
+- history cũ đọc được trên Web;
+- Director health PASS;
+- Director có đúng endpoint/zone theo inventory hiện tại;
+- mọi satellite/agent đã enroll lại nếu CA mới được tạo.
+
+Trong drill 2026-10-04, environment ID cũ được giữ nguyên là:
+
+```text
+6ab4dcf9e826d92f9618c48774925e9525d3ee4d
+```
+
+Đây là giá trị của lab, không được copy làm ID cho môi trường khác.
+
+### 14.3. Có full backup và muốn giữ CA cũ
+
+Sau `bootstrap-servers` nhưng trước `deploy` lần đầu:
+
+```bash
+# Copy archive PKI lên đúng ca_host mới, tức master[0]
+scp pki-<timestamp>.tar.gz master1:/home/ubuntu/
+
+./tools/icinga-ansible restore-pki -i inventory-prod \
+  -e pki_backup=/home/ubuntu/pki-<timestamp>.tar.gz \
+  -e confirm=yes
+
+./tools/icinga-ansible deploy -i inventory-prod
+```
+
+`restore-pki` chỉ chấp nhận CA host mới chưa có CA, tránh ghi đè CA đang hoạt động. Giữ CA cũ giúp agent/satellite cũ tiếp tục trust chain hiện tại.
+
+Sau đó restore DB như phần 13.2. Nếu restore nguyên PKI và environment runtime phù hợp, vẫn chạy `check` để xác nhận identity. Nếu chỉ giữ CA nhưng mất runtime master, có thể vẫn cần `recover-db-only` để seed environment ID cũ.
+
+### 14.4. Chỉ còn DB backup, mất cả config và PKI
+
+Physical DB không chứa:
+
+- CA private key;
+- plaintext MariaDB root password;
+- inventory;
+- `globals.yml` và `passwords.yml`;
+- override/file DSL trên deployment node;
+- SSH key hoặc OpenStack credential trên filesystem.
+
+Điều kiện tối thiểu:
+
+- phải biết `mariadb_root_password` tại thời điểm tạo backup;
+- phải biết topology cần dựng lại;
+- dùng MariaDB version đã tạo backup;
+- tạo CA mới và enroll lại tất cả node/agent;
+- tái tạo config filesystem từ SCM/tài liệu;
+- chạy `recover-db-only` để giữ Icinga DB environment ID cũ.
+
+Quy trình:
+
+```bash
+./tools/icinga-ansible init-config
+./tools/icinga-ansible genpwd
+$EDITOR /etc/icinga-ansible/globals.yml
+$EDITOR /etc/icinga-ansible/passwords.yml
+
+# Điền mariadb_root_password cũ trước khi tiếp tục.
+./tools/icinga-ansible bootstrap-servers -i inventory-prod
+./tools/icinga-ansible deploy -i inventory-prod
+
+# Đặt backup vào controller backup dir hoặc copy lên galera[0], rồi:
+./tools/icinga-ansible mariadb-recovery -i inventory-prod \
+  -e recovery_mode=restore-backup \
+  -e restore_backup_ts=<timestamp> \
+  -e confirm=yes
+
+./tools/icinga-ansible recover-db-only -i inventory-prod -e confirm=yes
+./tools/icinga-ansible deploy -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Director database có thể giữ basket/config do Director quản lý, nhưng không thể tái tạo những file DSL chỉ từng tồn tại trên filesystem. Sau recovery, Director kickstart sẽ import topology endpoint/zone hiện tại và reconcile stale object.
+
+### 14.5. Director khi restore từ 2 master sang 2 master + 2 satellite
+
+DB Director được restore cùng physical DB. Lần `deploy` cuối thực hiện:
+
+1. migrate schema Director nếu cần;
+2. tạo hoặc cập nhật API user `director`;
+3. chạy kickstart lại ngay cả khi module đã tồn tại;
+4. import topology từ Icinga 2 hiện tại;
+5. reconcile endpoint/zone external cũ;
+6. `check` so sánh chính xác DB Director với inventory và `satellite_zones`.
+
+Với topology 2 master + 2 satellite trong `satellite-ha`, kết quả hợp lệ:
+
+```text
+Endpoints: master1, master2, satellite1, satellite2
+Zones: director-global, global-templates, master, satellite-ha
+```
+
+Nếu đổi tên node, node cũ không nên còn trong tập `external_object`. Nếu `check` fail:
+
+```bash
+./tools/icinga-ansible reconfigure -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+```
+
+Sau đó kiểm tra Director Activity Log/Deployments trước khi deploy object do Director quản lý.
+
+## 15. Upgrade
+
+### 15.1. Khái niệm “cùng lineup” và “lineup cao hơn”
+
+Project quản lý tag từng component độc lập:
+
+- Icinga 2: `2.16.4 → 2.16.5` là patch cùng series;
+- Redis: `7.4.x → 7.4.y` là patch cùng series;
+- MariaDB: `12.3.x → 12.3.y` là cùng series;
+- MariaDB `11.8.x → 12.3.x` là đổi series và cần review đường nâng cấp.
+
+Không suy ra tương thích chỉ từ số version. Trước khi đổi series phải đọc release notes/schema requirements của chính component và kiểm tra image đích có Galera provider không thấp hơn image nguồn.
+
+Ranh giới Icinga đã được kiểm tra cứng trong `prechecks`:
+
+- Icinga 2 `< 2.15.0` phải đi cùng Icinga DB `< 1.4.0` (Redis schema 5);
+- Icinga 2 `>= 2.15.0` phải đi cùng Icinga DB `>= 1.4.0` (Redis schema 6);
+- tag của hai component này phải là `x.y.z` tường minh để precheck so sánh được.
+
+Icinga công bố Icinga DB 1.4.0 cùng Icinga 2 2.15.0 và yêu cầu Icinga 2 2.15.0 trở lên:
+[Icinga DB changelog 1.4.0](https://icinga.com/docs/icinga-db/latest/CHANGELOG/#140-2025-06-18).
+Không bỏ guard để ép một cặp sai chạy. Lab đã tái hiện `2.14.10 + 1.5.1`: Icinga DB crash-loop vì nhận
+Redis schema 5 nhưng chờ schema 6. Cluster được trả ngay về cấu hình tốt và deep check lại PASS.
+
+### 15.2. Quy trình upgrade chuẩn
+
+Lưu lại tag hiện tại:
+
+```bash
+sudo cp /etc/icinga-ansible/globals.yml \
+  /etc/icinga-ansible/globals.yml.before-upgrade-$(date +%Y%m%d-%H%M%S)
+```
+
+Tạo full backup và đưa ra storage ngoài:
+
+```bash
+./tools/icinga-ansible check -i inventory-prod
+./tools/icinga-ansible backup-full -i inventory-prod
+```
+
+Sửa `icinga_image_versions`, rồi:
+
+```bash
+./tools/icinga-ansible prechecks -i inventory-prod
+./tools/icinga-ansible pull -i inventory-prod
+./tools/icinga-ansible upgrade-plan -i inventory-prod
+./tools/icinga-ansible upgrade -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+./tools/icinga-ansible upgrade-plan -i inventory-prod
+```
+
+`pull` trước maintenance window giúp phát hiện registry/CDN/proxy lỗi mà chưa đụng runtime và tự retry
+tối đa 8 lần cho lỗi tạm thời. `upgrade-plan` đọc schema trực tiếp từ image Icinga DB/Web đích nên
+phải chạy sau `pull`. `upgrade` và `rollback` kiểm tra mọi image cần thiết đã có trên đúng host trước
+khi backup, restore, restart hoặc migrate. Nếu thiếu image, lệnh dừng khi runtime vẫn còn nguyên.
+
+`upgrade` thực hiện:
+
+1. chạy lại topology/version precheck và đọc schema thật từ image đích trước khi đụng runtime;
+2. xác nhận toàn bộ target image đã có trên đúng host;
+3. physical backup có tag `pre-upgrade`; chỉ publish pointer `LATEST_PRE_UPGRADE` sau khi cả DB và PKI hợp lệ, rồi fetch cả hai về deployment node;
+4. rolling MariaDB từng node, `serial: 1`, dừng toàn bộ play nếu một node fail;
+5. trước và sau từng DB node đều yêu cầu Galera đủ size, Primary, Synced, ready;
+6. chỉ áp migration Icinga DB đến đúng schema của image đích; chặn schema downgrade và thiếu migration bundle; Icinga Web cũng phải kết thúc đúng schema đọc từ image;
+7. rolling/redeploy các service;
+8. postcheck runtime.
+
+### 15.3. Upgrade MariaDB trong cùng series
+
+Giữ:
+
+```yaml
+mariadb_allow_rolling_series_upgrade: false
+```
+
+Role cho phép target version bằng hoặc cao hơn trong cùng series, cấm binary downgrade và Galera provider downgrade.
+
+### 15.4. Upgrade MariaDB sang series cao hơn
+
+Chỉ sau khi review source → target cụ thể, chuẩn bị rollback và test staging:
+
+```yaml
+mariadb_allow_rolling_series_upgrade: true
+```
+
+Không bật cờ này như mặc định lâu dài. Tắt lại sau change.
+
+Đường đã có bằng chứng lịch sử trong project là `11.8.9 → 12.3.3`. Không dùng `11.8.9 → 12.0.2`: image đích có Galera provider thấp hơn và đã gây crash trong test trước đây.
+
+Với mọi đường mới:
+
+1. mirror/pull đủ image;
+2. restore một bản backup production vào staging;
+3. chạy upgrade staging;
+4. xác nhận schema, Director, Web login, history và Galera;
+5. mới cho phép production.
+
+### 15.5. Kết quả verify upgrade ngày 2026-10-04
+
+- `upgrade-plan` PASS.
+- Full rehearsal chạy `upgrade` cùng version hiện tại PASS: backup pre-upgrade, rolling Galera, schema probe/migration, redeploy và postcheck.
+- Rollback từ `LATEST_PRE_UPGRADE` PASS.
+- Bài test phát hiện bản `pre-upgrade` trước đây chỉ nằm trên `galera[0]`. Code đã được sửa để lưu thêm DB, PKI và pointer trên deployment node; SHA-256 của hai bản sao đã được đối chiếu khớp tuyệt đối.
+- Patch cùng series `Icinga 2 2.16.4 → 2.16.5` PASS thật trên 2 master + 2 satellite; deep check sau upgrade PASS.
+- Minor liên-lineup `Icinga 2 2.15.0 + Icinga DB 1.4.0 → Icinga 2 2.16.5 + Icinga DB 1.5.1` PASS thật.
+- Baseline 2.15.0/1.4.0 đã được deep check trước upgrade: container, config, API, Web login, Redis,
+  Icinga DB heartbeat/config sync, Director exact topology và Galera 3/3 đều PASS.
+- Plan nhận đúng hai image thay đổi và xác nhận schema Icinga DB đang ở v7, target v7 nên không chạy migration thừa.
+- Upgrade tạo DB + PKI `pre-upgrade`, fetch về deployment node, rolling/redeploy, postcheck và deep check độc lập đều PASS.
+- Runtime cuối: Icinga 2 2.16.5 trên `master1`, `master2`, `satellite1`, `satellite2`; Icinga DB 1.5.1 trên cả hai master.
+- Proxy pull PASS sau khi thêm bounded retry. Các HTTP 503 tạm thời được retry thành công, không còn là blocker của bài test.
+
+Đây là bằng chứng cho đúng hai đường version nêu trên. Với source/target khác, vẫn phải chạy staging theo
+quy trình ở mục 15.4; đặc biệt nếu target có schema migration mới hoặc đổi MariaDB series.
+
+## 16. Rollback upgrade
+
+Rollback chỉ dùng cho managed DB và yêu cầu physical backup pre-upgrade.
+
+1. Trả toàn bộ tag trong `globals.yml` về version cũ.
+2. Xác nhận image cũ pull được.
+3. Chạy rollback.
+
+```bash
+./tools/icinga-ansible pull -i inventory-prod
+
+./tools/icinga-ansible rollback -i inventory-prod -e confirm=yes
+
+./tools/icinga-ansible check -i inventory-prod
+./tools/icinga-ansible upgrade-plan -i inventory-prod
+```
+
+Rollback đọc `LATEST_PRE_UPGRADE`, restore physical DB, rebuild Galera, deploy lại version cũ và postcheck. Đây không phải downgrade datadir MariaDB tại chỗ.
+
+Nếu rollback fail vì không có pointer, không tự chọn file gần nhất. Liệt kê artifact, đối chiếu timestamp change và dùng `mariadb-recovery` với `restore_backup_ts` rõ ràng.
+
+## 17. Destroy và dựng lại
+
+```bash
+./tools/icinga-ansible destroy -i inventory-prod \
+  -e confirm=yes-i-really-really-mean-it
+```
+
+Lệnh xóa container, runtime data và rendered config trên service node. Nó giữ Docker/chrony/network đã bootstrap và giữ `globals.yml`/`passwords.yml` trên deployment node. Vì vậy sau destroy có thể deploy lại trực tiếp:
+
+```bash
+./tools/icinga-ansible deploy -i inventory-prod
+```
+
+Không chạy destroy để “sửa” một lỗi chưa xác định. Hãy dùng `check`, log và recovery mode phù hợp trước.
+
+## 18. Những thay đổi đã thực hiện trong đợt review
+
+### 18.1. CLI, dependency và precheck
+
+- tách rõ config khỏi repo theo mô hình `/etc/kolla`;
+- sửa callback/config để tương thích Ansible hiện đại;
+- chuẩn hóa dependency collection;
+- thêm precheck topology, version, DB type và external DB credential;
+- giữ `bootstrap-servers` và `deploy` thành hai bước riêng;
+- cảnh báo khi chạy CLI bằng root;
+- thêm safety gate xác nhận chuỗi chính xác cho thao tác phá hủy.
+
+### 18.2. Backup và restore
+
+- chỉ cập nhật pointer khi cả artifact DB và archive PKI cùng timestamp đều hợp lệ;
+- archive trực tiếp CA canonical và xác nhận có cả `ca.crt` lẫn `ca.key` trước khi publish pointer;
+- thêm backup DB theo lịch và retention;
+- `backup-full` fetch DB và PKI về deployment node;
+- chỉ ghi `LATEST_COMPLETE` sau khi config, DB, PKI và archive Web của mọi master đều tồn tại, không
+  rỗng và đã được ghi vào manifest SHA-256;
+- đưa backup controller ra ngoài `/etc/icinga-ansible` để `destroy` không xóa nhầm;
+- thêm controller fallback: nếu DB artifact mất trên `galera[0]`, restore tự lấy từ deployment node;
+- validate gzip/mbstream và metadata trước khi dừng MariaDB;
+- chỉ dừng Icinga DB sau khi đã tìm thấy và đọc thử thành công backup cần restore;
+- thêm tag `full`, `pre-upgrade` và pointer riêng;
+- đưa cả DB và PKI `pre-upgrade` về deployment node ngay trong lệnh `upgrade`; pointer phía controller chỉ được cập nhật sau khi fetch/checksum thành công;
+- thêm `recover-db-only` để phục hồi environment ID cũ và flush Redis state tạm.
+- `recover-db-only` xác định environment ID và kiểm tra data tree của mọi master trước khi dừng service;
+  cấu hình không dùng Director cũng không còn cố dừng container Director không tồn tại.
+
+### 18.3. Galera recovery
+
+- sửa parser `wsrep-recover` cho MariaDB 12.3;
+- chọn bootstrap node theo majority UUID và seqno cao nhất;
+- ghi lại `grastate.dat` hợp lệ;
+- đợi toàn bộ cluster `Primary/Synced/ON/đủ size` trước khi bỏ bootstrap mode;
+- sửa race sau SST: `SELECT 1` có thể thành công trước khi SST hoàn tất thay datadir và làm mất `.my-healthcheck.cnf`; recovery giờ đợi từng joiner đạt `wsrep_local_state_comment=Synced`, ghi lại credential, xác nhận file tồn tại rồi mới vào safety gate cuối;
+- dừng Icinga DB consumer trong restore để tránh write xen vào quá trình rebuild;
+- giữ `any_errors_fatal` để một node fail thì toàn bộ rolling operation dừng.
+
+### 18.4. PKI và node enrollment
+
+- pull/inspect image đích trước khi mutate PKI;
+- dừng an toàn nếu `pki verify` trả mã không dự kiến;
+- sửa luồng CA/TicketSalt cho CA restore;
+- kiểm tra fingerprint và enrollment;
+- tự tái tạo container hiện tại sau một số lỗi node setup/inode;
+- tránh ghi đè CA đang chạy trong `restore-pki`.
+
+### 18.5. Director và Web
+
+- Director kickstart luôn reconcile thay vì chỉ chạy lần đầu;
+- xóa tình trạng stale endpoint sau remove-node;
+- `check` xác nhận exact endpoint/zone theo topology;
+- kiểm tra Director health;
+- kiểm tra login Web thật bằng credential được quản lý;
+- sửa resource/Redis/API command transport và credential rendering;
+- schema task dùng `/bin/bash` khi cần `pipefail` hoặc process substitution.
+
+### 18.6. Upgrade và rollback
+
+- thêm upgrade plan, schema probe/migration và postcheck;
+- precheck chặn cặp Icinga 2/Icinga DB khác thế hệ Redis schema trước khi deploy;
+- `pull` retry có giới hạn khi registry/CDN trả lỗi tạm thời;
+- chặn MariaDB downgrade và Galera provider downgrade;
+- đổi series MariaDB yêu cầu opt-in;
+- rolling MariaDB `serial: 1` và fail toàn play khi một node lỗi;
+- marker `mariadb_upgrade_info` chỉ bắt buộc khi container node thực sự được thay;
+- lưu bản rollback pre-upgrade trên cả Galera và deployment node để vẫn rollback được khi service node mất;
+- rollback dùng physical backup pre-upgrade.
+- chạy precheck trước mọi thay đổi DB/runtime trong cả upgrade và rollback;
+- đọc schema thật từ image Icinga DB và Icinga Web 2 thay vì suy đoán từ tag;
+- chặn thiếu migration, migration vượt quá target, schema downgrade và kết quả schema không khớp target;
+- yêu cầu target image đã có trên tất cả host trước khi vào maintenance.
+
+### 18.7. Remove node/master
+
+- fail rõ khi `target_host` gõ sai thay vì Ansible skip im lặng;
+- chỉ xóa dữ liệu thuộc role cần gỡ;
+- giữ MariaDB nếu master/satellite đồng thời mang role DB;
+- chặn xóa last master và CA host;
+- hướng dẫn bắt buộc sửa inventory, `satellite_zones`, reconfigure và check.
+
+### 18.8. Kiểm tra tích hợp khác
+
+- sửa script Telegram notification;
+- sửa OpenStack service check và cách truyền credential;
+- sửa handler/reload và một số trường hợp idempotency;
+- tăng độ sâu của `check` để phát hiện container “running” nhưng DB/Web/Director thực tế hỏng.
+
+## 19. Ma trận test đã chạy trong đợt cuối
+
+| Case | Kết quả | Bằng chứng chính |
+|---|---|---|
+| Fresh deploy 2 master + 2 satellite + 3 Galera + Director | PASS | container/API/Web/DB/Director/Galera khỏe |
+| Xóa satellite2 | PASS sau fix | stale endpoint Director được phát hiện và sửa |
+| Thêm lại satellite2 | PASS | certificate, zone, Director import đúng |
+| Full backup | PASS | config, DB, PKI, Web config về deployment node |
+| Galera total crash | PASS sau fix | canary `before-total-crash-20261004` còn nguyên trên 3/3 node; majority UUID/max seqno; cụm hội tụ |
+| Restore DB bình thường | PASS | physical restore và deep check |
+| Restore từ controller fallback | PASS | đã xóa/đổi tên artifact trên service node, restore vẫn stage từ deployment node |
+| Mất toàn bộ service runtime/PKI, còn deployment config + DB backup | PASS | destroy 7 node → restore config → clean deploy → controller fallback restore → recover ID → deploy → deep check |
+| Director sau DR 2 master + 2 satellite | PASS | đúng 4 endpoint và 4 zone mong đợi |
+| Upgrade plan | PASS | đọc current/target/schema |
+| Upgrade rehearsal cùng version | PASS | backup, rolling, schema, redeploy, postcheck |
+| Patch upgrade Icinga 2 `2.16.4 → 2.16.5` | PASS | 4/4 node đúng v2.16.5; deep check PASS |
+| Cross-lineup `2.15.0/1.4.0 → 2.16.5/1.5.1` | PASS | baseline, plan, backup, upgrade, postcheck, version runtime và deep check PASS |
+| Cặp sai `Icinga 2 2.14.10 + Icinga DB 1.5.1` | FAIL an toàn, đã sửa | tái hiện Redis schema 5/6 mismatch; precheck mới chặn trước runtime |
+| Proxy pull qua `proxy.fpt.vn:80` | PASS sau fix | direct timeout; proxy hoạt động; retry vượt qua Docker Hub/CDN HTTP 503 trên 7 node |
+| Rollback `LATEST_PRE_UPGRADE` | PASS | DB/Galera/runtime trở lại và check PASS |
+| Sao lưu pre-upgrade ngoài service nodes | PASS sau fix | controller có DB+PKI+pointer `20261004-055301`; DB SHA-256 `d419cba5…09be53` khớp nguồn Galera |
+| Syntax check các playbook chính | PASS | site, backup-full, check, recovery, DB-only, upgrade, rollback |
+| `git diff --check` | PASS | chỉ có cảnh báo line ending LF/CRLF trên Windows |
+
+### 19.1. Trạng thái review bổ sung ngày 2026-10-10
+
+Đợt này review lại toàn bộ diff và sửa thêm các failure path chưa được case ngày 2026-10-04 bao phủ:
+
+- precheck/version compatibility trước backup, rolling DB và restore rollback;
+- kiểm tra image đích trên từng host trước maintenance;
+- đọc schema thật từ Icinga DB/Icinga Web image đích, giới hạn migration đúng target và xác nhận schema sau migrate;
+- backup DB + PKI có tính nguyên tử ở mức pointer; CA archive bắt buộc có cả certificate và private key;
+- full backup có manifest SHA-256 và `LATEST_COMPLETE`, nên bundle dở dang không bị coi là điểm DR hoàn chỉnh;
+- DB/PKI/Web/config artifact sau khi fetch về deployment node đều được siết mode `0600`;
+- validate hoàn chỉnh trước khi dừng Icinga DB trong restore;
+- DB-only recovery không dừng service trước khi chọn được environment ID hợp lệ;
+- `restore-config` thay hoàn toàn desired state, không để file override cũ tồn tại;
+- bỏ `ignore_errors` ở destroy trước bước xóa data, chặn đường dẫn gốc/nguy hiểm và tránh password Redis trên argv trong check/recovery;
+- kiểm tra topology chặt hơn: unique zone, mỗi satellite đúng một zone, role endpoint không chồng nhau;
+- validate timestamp/tag/path trước backup/restore và bảo vệ đường dẫn destroy;
+- truyền proxy ngay trong lượt `bootstrap-servers`, thêm retry giới hạn cho apt/key/repository;
+- bỏ dependency `passlib` không được khai báo: bcrypt admin Web được tạo bằng PHP runtime của chính image,
+  password truyền qua stdin; fresh deploy trên deployment node sạch đã tái hiện và xác nhận bản sửa;
+- bỏ Jinja loop variable khỏi tên task để log Ansible 2.19 không còn `item is undefined`.
+
+Kiểm tra thực hiện trên workspace và cluster OpenStack dựng lại ngày 2026-10-10:
+
+| Kiểm tra | Kết quả |
+|---|---|
+| Parse YAML toàn bộ `ansible/**/*.yml` với unique-key validation | PASS, 54 file, 0 lỗi |
+| Parse mọi đầu vào Jinja trong task/template | PASS, 1018 input, 0 lỗi |
+| `bash -n tools/icinga-ansible` bằng Git Bash | PASS |
+| Ansible syntax-check toàn bộ playbook vận hành | PASS: deploy, backup/check/destroy, recovery, remove, rollback, upgrade |
+| `git diff --check` | PASS; chỉ có cảnh báo line ending của Git trên Windows |
+| OpenStack fresh cluster | PASS: deployment node + 2 master + 2 satellite + 3 Galera |
+| `bootstrap-servers` qua proxy | PASS 7/7; retry tự vượt HTTP 503 tạm thời |
+| `pull` qua `proxy.fpt.vn:80` | PASS 7/7; có retry thật trên master/satellite/Galera |
+| Fresh `deploy` và retry từ trạng thái deploy dở dang | PASS; Director migration/kickstart/deploy thành công |
+| `check` sâu sau deploy | PASS: container, API, Web login, Redis, Icinga DB heartbeat, Director topology, Galera 3/3 |
+| `backup-full` + verify manifest/permission | PASS; 5/5 artifact SHA-256 OK, DB/PKI mode `0600`, `LATEST_COMPLETE=20261010-020930` |
+| `upgrade-plan` | PASS; schema thật Icinga DB `7`, Icinga Web `2.12.0`, đúng target image |
+| Upgrade rehearsal cùng version | PASS; preflight image toàn cluster, pre-upgrade DB+PKI về controller, rolling Galera, schema exact-match, redeploy và postcheck |
+
+Lab được dựng lại từ OpenStack API vì Terraform state cũ trỏ tới VM đã bị xóa. Địa chỉ `.222` đang do
+service khác sử dụng nên `master2` chuyển sang `.228`. Security group lab được bổ sung ingress self-group
+để các service node liên lạc nội bộ; không mở thêm port công khai.
+
+Các bài destructive DR, total Galera crash, remove/add satellite, cross-lineup và rollback không được
+lặp lại trong cluster mới ngày 2026-10-10; bằng chứng runtime gần nhất của chúng vẫn là ngày 2026-10-04
+trong bảng mục 19. Các guard restore/path mới được parse, syntax-check và review thứ tự fail-before-downtime;
+proxy bootstrap, fresh deploy/retry, manifest và schema/upgrade path đã được chạy thật trên cluster mới.
+
+Artifact test mẫu:
+
+```text
+/var/backups/icinga-ansible-config/config-20261010-020930.tar.gz
+/var/backups/icinga-ansible-config/icingaweb2-master1-20261010-020930.tar.gz
+/var/backups/icinga-ansible-config/icingaweb2-master2-20261010-020930.tar.gz
+/var/backups/icinga-ansible-config/database/db-full-20261010-020930.xb.gz
+/var/backups/icinga-ansible-config/database/LATEST_FULL
+/var/backups/icinga-ansible-config/pki/pki-20261010-020930.tar.gz
+/var/backups/icinga-ansible-config/manifest-20261010-020930.sha256
+/var/backups/icinga-ansible-config/LATEST_COMPLETE
+/var/backups/icinga-ansible-config/database/db-pre_upgrade-20261004-055301.xb.gz
+/var/backups/icinga-ansible-config/database/LATEST_PRE_UPGRADE
+/var/backups/icinga-ansible-config/pki/pki-20261004-055301.tar.gz
+```
+
+Bằng chứng identity của bài DR cuối:
+
+```text
+DB trước sự cố       : 6ab4dcf9e826d92f9618c48774925e9525d3ee4d
+DB clean deploy tạm : 2ae320aab83252a9c6776599fbec616cce972880
+DB sau recovery      : 6ab4dcf9e826d92f9618c48774925e9525d3ee4d
+master1 sau recovery : 6ab4dcf9e826d92f9618c48774925e9525d3ee4d
+master2 sau recovery : 6ab4dcf9e826d92f9618c48774925e9525d3ee4d
+CA cũ SHA-256        : b35cfcf6227e8705b3d172b213c7f73f19914ba64cd29d8b79bfeab0daba6a18
+CA mới SHA-256       : cca3e85d49cfc48ef1b1fb78b812d111ec2d6336a404c54c30b8ef9fc50625e1
+```
+
+CA mới được giữ là đúng vì drill giả định PKI cũ đã mất. Director sau khi restore vẫn khớp đúng `master1`, `master2`, `satellite1`, `satellite2` và bốn zone mong đợi.
+
+Các timestamp trên chỉ là artifact lab và không được giả định còn tồn tại ở môi trường hiện tại.
+
+## 20. Troubleshooting
+
+| Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
+|---|---|---|
+| `UNREACHABLE` hàng loạt | Chạy CLI bằng root nên dùng sai SSH key | Chạy lại bằng user thường có passwordless sudo |
+| `deploy` thiếu directory/network | Host mới chưa bootstrap | Chạy `bootstrap-servers --limit <host>` |
+| Docker pull lỗi 429/5xx/timeout | Docker Hub/CDN, proxy hoặc rate limit | Chạy `pull`; code mới tự retry 8 lần. Nếu vẫn lỗi, kiểm tra Docker daemon proxy và mirror image vào registry nội bộ |
+| Icinga DB log `unexpected Redis schema version` | Trộn Icinga 2 `<2.15` với Icinga DB `>=1.4`, hoặc ngược lại | Trả về cặp cùng thế hệ; chạy `prechecks`; không ép bỏ compatibility guard |
+| Web không mở | Dùng nhầm 80/443 | Mặc định dùng `http://host:8080` |
+| Web login trả về lại trang login | Credential DB/admin không hội tụ | Chạy `reconfigure`, sau đó `check`; kiểm tra DB restore/passwords.yml |
+| Director còn endpoint node đã xóa | Chưa chạy reconcile hoặc inventory/globals chưa sửa | Sửa inventory + `satellite_zones`, chạy `reconfigure`, `check` |
+| `recover-db-only` báo nhiều environment | DB chứa nhiều ID | Chọn đúng ID bằng `recover_environment_id` |
+| Restore không tìm thấy backup | Thiếu pointer hoặc sai timestamp/layout | Kiểm tra `LATEST_FULL`, filename và controller backup dir |
+| Galera không đủ cluster size | node join/SST lỗi hoặc firewall | Không upgrade tiếp; xem log MariaDB và chạy recovery phù hợp |
+| MariaDB joiner chạy nhưng `unhealthy`, thiếu `.my-healthcheck.cnf` | SST thay datadir sau khi SQL đã bắt đầu trả lời | Dùng code mới có gate `wsrep Synced`; chạy lại `recover-cluster`, không tự bỏ bootstrap flag |
+| Upgrade MariaDB bị chặn đổi series | Cờ opt-in đang false | Review path, test staging, sau đó bật tạm `mariadb_allow_rolling_series_upgrade` |
+| Upgrade bị chặn Galera downgrade | image đích chứa provider thấp hơn | Chọn target image khác; không ép bỏ guard |
+| `restore-pki` từ chối chạy | CA host đã có CA | Không ghi đè; dùng host sạch hoặc điều tra quy trình |
+| Config file permission denied trên deployment node | `/etc/icinga-ansible` bị root sở hữu | `sudo chown -R $(id -un):$(id -gn) /etc/icinga-ansible` |
+
+Lệnh thu thập nhanh:
+
+```bash
+./tools/icinga-ansible check -i inventory-prod
+
+ssh master1 'sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"'
+ssh master1 'sudo docker logs --since 15m icinga2'
+ssh master1 'sudo docker logs --since 15m icingadb'
+ssh master1 'sudo docker logs --since 15m icingaweb2'
+ssh galera1 'sudo docker logs --since 15m mariadb'
+```
+
+Không đưa output có password, container environment hoặc decrypted Vault vào ticket công khai.
+
+## 21. Bảng lệnh nhanh
+
+| Mục đích | Lệnh |
+|---|---|
+| Tạo config | `icinga-ansible init-config` |
+| Sinh secret | `icinga-ansible genpwd` |
+| Bootstrap host mới | `icinga-ansible bootstrap-servers -i <inventory>` |
+| Precheck | `icinga-ansible prechecks -i <inventory>` |
+| Pull image | `icinga-ansible pull -i <inventory>` |
+| Deploy | `icinga-ansible deploy -i <inventory>` |
+| Apply config | `icinga-ansible reconfigure -i <inventory>` |
+| Deep health check | `icinga-ansible check -i <inventory>` |
+| Thêm satellite | `icinga-ansible add-node -i <inventory>` |
+| Thêm master | `icinga-ansible add-master -i <inventory>` |
+| Xóa satellite | `icinga-ansible remove-node -i <inventory> -e target_host=<host> -e confirm=yes` |
+| Xóa master | `icinga-ansible remove-master -i <inventory> -e target_host=<host> -e confirm=yes` |
+| Backup DB | `icinga-ansible mariadb-backup -i <inventory>` |
+| Full backup | `icinga-ansible backup-full -i <inventory>` |
+| Cứu Galera crash | `icinga-ansible mariadb-recovery -i <inventory> -e recovery_mode=recover-cluster -e confirm=yes` |
+| Restore DB | `icinga-ansible mariadb-recovery -i <inventory> -e recovery_mode=restore-backup -e restore_backup_tag=full -e confirm=yes` |
+| Khôi phục environment ID | `icinga-ansible recover-db-only -i <inventory> -e confirm=yes` |
+| Xem upgrade plan | `icinga-ansible upgrade-plan -i <inventory>` |
+| Upgrade | `icinga-ansible upgrade -i <inventory>` |
+| Rollback | `icinga-ansible rollback -i <inventory> -e confirm=yes` |
+| Destroy | `icinga-ansible destroy -i <inventory> -e confirm=yes-i-really-really-mean-it` |
+
+Nếu gọi từ repo mà chưa cài symlink vào PATH, thêm prefix:
+
+```bash
+./tools/icinga-ansible <command> ...
+```
+
+## 22. Checklist production
+
+### Trước go-live
+
+- [ ] Deployment node không nằm trong service inventory nếu chỉ làm control node.
+- [ ] SSH key, host key và passwordless sudo đã kiểm tra trên mọi node.
+- [ ] Master nằm trên hai failure domain khác nhau.
+- [ ] Ba Galera node nằm trên ba failure domain khác nhau nếu hạ tầng cho phép.
+- [ ] Firewall chỉ mở đúng luồng cần thiết.
+- [ ] Image đã mirror/pin trong registry nội bộ.
+- [ ] `passwords.yml` đã Vault encrypt và mode `0600`.
+- [ ] Reverse proxy/LB TLS cho Web đã sẵn sàng.
+- [ ] `prechecks`, `deploy` lần hai và `check` PASS.
+- [ ] Director có đúng endpoint/zone.
+- [ ] `backup-full` đã tạo và copy ra storage độc lập.
+- [ ] Đã thực hiện ít nhất một restore drill.
+
+### Trước maintenance/upgrade
+
+- [ ] `check` đang PASS.
+- [ ] Không có Galera node đang `Donor/Desynced` hoặc cluster mất quorum.
+- [ ] Full backup mới đã kiểm tra gzip/tar/pointer.
+- [ ] Backup đã copy ra storage ngoài cụm.
+- [ ] Image source và target đều pull được.
+- [ ] Đã lưu `globals.yml` cũ.
+- [ ] `upgrade-plan` đã review.
+- [ ] Có cửa sổ và lệnh rollback cụ thể.
+
+### Sau maintenance/recovery
+
+- [ ] `deploy`/`upgrade` kết thúc không có failed/unreachable.
+- [ ] `check` PASS trên toàn inventory.
+- [ ] Galera Primary, ready, đủ node.
+- [ ] Web admin login được trên cả hai master.
+- [ ] Icinga DB heartbeat mới và history cũ còn đọc được.
+- [ ] Director health PASS, endpoint/zone chính xác.
+- [ ] Không có fatal/panic/corruption log mới.
+- [ ] Tạo một full backup baseline mới sau khi hệ thống ổn định.
+
+## 23. Quy trình regression khuyến nghị
+
+Sau khi thay code Ansible hoặc nâng version, chạy tối thiểu:
+
+```bash
+./tools/validate
+./tools/icinga-ansible prechecks -i inventory-prod
+./tools/icinga-ansible deploy -i inventory-prod
+./tools/icinga-ansible check -i inventory-prod
+./tools/icinga-ansible upgrade-plan -i inventory-prod
+./tools/icinga-ansible backup-full -i inventory-prod
+```
+
+Trong staging, chạy định kỳ các drill sau:
+
+1. remove và add lại một satellite;
+2. stop toàn bộ Galera rồi chạy `recover-cluster`;
+3. restore DB từ controller fallback sau khi xóa artifact trên service node;
+4. rebuild toàn bộ service node từ deployment node + DB backup;
+5. upgrade source → target thật;
+6. rollback bằng `LATEST_PRE_UPGRADE`;
+7. xác nhận Director exact topology sau mỗi thay đổi.
+
+Một file backup chỉ được coi là sử dụng được sau khi restore drill thành công. `gzip -t` và checksum phát hiện file hỏng, nhưng không chứng minh được schema, credential, Director và environment identity sẽ khôi phục đúng.

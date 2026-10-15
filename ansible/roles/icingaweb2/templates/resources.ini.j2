@@ -6,7 +6,7 @@ host     = "{{ db_host }}"
 port     = "{{ db_port }}"
 dbname   = "icingaweb2"
 username = "icingaweb2"
-password = "{{ icingaweb2_db_password }}"
+password = {{ icingaweb2_db_password | to_json }}
 charset  = "utf8mb4"
 
 [icingadb]
@@ -16,7 +16,7 @@ host     = "{{ db_host }}"
 port     = "{{ db_port }}"
 dbname   = "icingadb"
 username = "icingadb"
-password = "{{ icingadb_db_password }}"
+password = {{ icingadb_db_password | to_json }}
 charset  = "utf8mb4"
 {% if 'director' in (enable_icingaweb2_modules | default([])) %}
 
@@ -27,6 +27,6 @@ host     = "{{ db_host }}"
 port     = "{{ db_port }}"
 dbname   = "director"
 username = "director"
-password = "{{ director_db_password }}"
+password = {{ director_db_password | to_json }}
 charset  = "utf8mb4"
 {% endif %}

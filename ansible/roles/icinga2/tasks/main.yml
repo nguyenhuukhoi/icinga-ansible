@@ -13,6 +13,15 @@
     ic_uid: "5665"          # uid/gid 'icinga' trong image
     ic_etc: "{{ icinga_base_dir }}/icinga2/data/etc/icinga2"
 
+# Mọi lệnh bootstrap/verify bên dưới đều chạy bằng image đích. Nếu image chưa có
+# và registry tạm lỗi, `docker run` trả rc=125; tuyệt đối không được hiểu đó là
+# certificate hỏng rồi xóa PKI đang hoạt động.
+- name: Đảm bảo image Icinga 2 đích có sẵn trước khi đụng tới PKI
+  community.docker.docker_image:
+    name: "{{ images.icinga2 }}"
+    source: pull
+    force_source: false
+
 - name: Tạo thư mục /data trên host
   ansible.builtin.file:
     path: "{{ ic_data }}"
@@ -77,7 +86,7 @@
   ansible.builtin.lineinfile:
     path: "{{ ic_data }}/etc/icinga2/constants.conf"
     regexp: '^const TicketSalt = ".*"$'
-    line: 'const TicketSalt = "{{ icinga2_ticket_salt }}"'
+    line: 'const TicketSalt = {{ (icinga2_ticket_salt if inventory_hostname in groups["master"] else "") | to_json }}'
   when: not data_init.stat.exists
 
 - name: Helper one-off (mount /data)
@@ -169,7 +178,7 @@
 # BUG THẬT ĐÃ GẶP: "copy" với remote_src:true KHÔNG tự tạo thư mục cha (khác bản copy thường từ
 # control node) — thiếu bước này làm mọi file trong conf.d/, features-available/ (đều nằm trong
 # thư mục con) fail "Destination directory ... does not exist" ngay lần chạy đầu.
-- name: "Đảm bảo thư mục cha cho base config (1 lần — {{ item }})"
+- name: Đảm bảo thư mục cha cho từng file base config
   ansible.builtin.file:
     path: "{{ (icinga_etc_dir + '/icinga2/' + item) | dirname }}"
     state: directory
@@ -179,7 +188,7 @@
   loop: "{{ _ic_base_relpaths }}"
   loop_control: { label: "{{ item }}" }
 
-- name: "Seed base config ra node (1 lần, không đè nếu node đã có — {{ item }})"
+- name: Seed từng file base config ra node (1 lần, không đè nếu node đã có)
   ansible.builtin.copy:
     src: "{{ ic_etc }}/{{ item }}"
     dest: "{{ icinga_etc_dir }}/icinga2/{{ item }}"
@@ -320,12 +329,62 @@
   register: ca_host_own_cert_stat
   when: inventory_hostname == ca_host
 
+- name: Kiểm tra ApiListener config của ca_host đã được tạo chưa
+  ansible.builtin.stat:
+    path: "{{ ic_etc }}/features-available/api.conf"
+  register: ca_host_api_stat
+  when: inventory_hostname == ca_host
+
+- name: Xác minh cert ca_host bằng CA hiện tại
+  ansible.builtin.command: >-
+    {{ ic_run }} icinga2 pki verify
+    --cert /var/lib/icinga2/certs/{{ inventory_hostname }}.crt
+    --cacert /var/lib/icinga2/ca/ca.crt
+  register: ca_host_cert_verify
+  changed_when: false
+  failed_when: false
+  when:
+    - inventory_hostname == ca_host
+    - ca_host_own_cert_stat.stat.exists
+    - ca_host_api_stat.stat.exists
+
+- name: Chặn nếu không thực thi được phép kiểm tra cert ca_host
+  ansible.builtin.assert:
+    that: (ca_host_cert_verify.rc | int) in [0, 1]
+    fail_msg: >-
+      Không thể chạy icinga2 pki verify (rc={{ ca_host_cert_verify.rc }}).
+      Dừng an toàn và giữ nguyên PKI; kiểm tra image/Docker/registry trước khi retry.
+  when:
+    - inventory_hostname == ca_host
+    - ca_host_own_cert_stat.stat.exists
+    - ca_host_api_stat.stat.exists
+
+- name: Chốt trạng thái bootstrap ca_host hoàn chỉnh
+  ansible.builtin.set_fact:
+    _ca_host_setup_complete: >-
+      {{ ca_stat.stat.exists and ca_host_own_cert_stat.stat.exists and
+         ca_host_api_stat.stat.exists and (ca_host_cert_verify.rc | default(1)) == 0 }}
+  when: inventory_hostname == ca_host
+
+- name: Dọn cert node dở dang của ca_host để node setup có thể retry
+  ansible.builtin.file:
+    path: "{{ ic_data }}/var/lib/icinga2/certs/{{ item }}"
+    state: absent
+  loop:
+    - "{{ inventory_hostname }}.crt"
+    - "{{ inventory_hostname }}.key"
+    - ca.crt
+  when:
+    - inventory_hostname == ca_host
+    - not _ca_host_setup_complete
+
 - name: Bootstrap master node (tạo CA + cert + ApiListener)
   ansible.builtin.command: >
     {{ ic_run }} icinga2 node setup --master --cn {{ inventory_hostname }} --zone master
+  register: _ca_host_node_setup
   when:
     - inventory_hostname == ca_host
-    - not ca_host_own_cert_stat.stat.exists
+    - not _ca_host_setup_complete
 
 - name: Sao CA ra thư mục pki riêng (để backup — mục 10.5)
   ansible.builtin.shell: >
@@ -347,16 +406,91 @@
     - inventory_hostname in groups['master']
     - inventory_hostname != ca_host
 
+- name: (master2) Kiểm tra api.conf đã được node setup hoàn tất chưa
+  ansible.builtin.stat:
+    path: "{{ ic_etc }}/features-available/api.conf"
+  register: master2_api_stat
+  when:
+    - is_ha_master | bool
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
+
+- name: (master2) Xác minh cert hiện tại thực sự do CA ký
+  ansible.builtin.command: >-
+    {{ ic_run }} icinga2 pki verify
+    --cert /var/lib/icinga2/certs/{{ inventory_hostname }}.crt
+    --cacert /var/lib/icinga2/certs/ca.crt
+  register: master2_cert_verify
+  changed_when: false
+  failed_when: false
+  when:
+    - is_ha_master | bool
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
+    - master2_cert_stat.stat.exists
+    - master2_api_stat.stat.exists
+
+- name: (master2) Chặn nếu không thực thi được phép kiểm tra cert
+  ansible.builtin.assert:
+    that: (master2_cert_verify.rc | int) in [0, 1]
+    fail_msg: >-
+      Không thể chạy icinga2 pki verify (rc={{ master2_cert_verify.rc }}).
+      Dừng an toàn và giữ nguyên PKI; kiểm tra image/Docker/registry trước khi retry.
+  when:
+    - is_ha_master | bool
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
+    - master2_cert_stat.stat.exists
+    - master2_api_stat.stat.exists
+
+- name: (master2) Đọc api.conf để xác minh cờ nhận config/command
+  ansible.builtin.slurp:
+    src: "{{ ic_etc }}/features-available/api.conf"
+  register: master2_api_conf
+  when:
+    - is_ha_master | bool
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
+    - master2_api_stat.stat.exists
+
+- name: (master2) Chốt trạng thái enrollment hoàn chỉnh
+  ansible.builtin.set_fact:
+    _master2_enrollment_complete: >-
+      {{ master2_cert_stat.stat.exists and master2_api_stat.stat.exists and
+         (master2_cert_verify.rc | default(1)) == 0 and
+         'accept_config = true' in (master2_api_conf.content | default('') | b64decode) and
+         'accept_commands = true' in (master2_api_conf.content | default('') | b64decode) }}
+  when:
+    - is_ha_master | bool
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
+
+- name: (master2) Dọn artifact enrollment dở dang để retry sạch
+  ansible.builtin.file:
+    path: "{{ ic_data }}/var/lib/icinga2/certs/{{ item }}"
+    state: absent
+  loop:
+    - "{{ inventory_hostname }}.crt"
+    - "{{ inventory_hostname }}.key"
+    - ca.crt
+    - trusted-parent.crt
+  when:
+    - is_ha_master | bool
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
+    - not _master2_enrollment_complete
+
 - name: (master2) Sinh ticket ký cert — chạy TRÊN ca_host (chỉ ca_host có CA private key)
   ansible.builtin.command: "{{ ic_run }} icinga2 pki ticket --cn {{ inventory_hostname }}"
   delegate_to: "{{ ca_host }}"
   register: master2_ticket
   changed_when: false
+  no_log: true
   when:
     - is_ha_master | bool
     - inventory_hostname in groups['master']
     - inventory_hostname != ca_host
-    - not master2_cert_stat.stat.exists
+    - not _master2_enrollment_complete
 
 - name: (master2) Tạo thư mục certs cục bộ
   ansible.builtin.file:
@@ -369,7 +503,7 @@
     - is_ha_master | bool
     - inventory_hostname in groups['master']
     - inventory_hostname != ca_host
-    - not master2_cert_stat.stat.exists
+    - not _master2_enrollment_complete
 
 - name: (master2) Sinh private key + cert tự ký cục bộ
   # pki new-cert: --cert (KHÔNG phải --csr) để sinh self-signed cert — cert này dùng làm định danh
@@ -382,7 +516,7 @@
     - is_ha_master | bool
     - inventory_hostname in groups['master']
     - inventory_hostname != ca_host
-    - not master2_cert_stat.stat.exists
+    - not _master2_enrollment_complete
 
 - name: (master2) Lấy & tin cậy cert của CA host (parent) qua mạng
   # pki save-cert KHÔNG nhận --key/--cert (chỉ trustedcert/host/port) — xem icinga2 pki save-cert --help.
@@ -395,7 +529,7 @@
     - is_ha_master | bool
     - inventory_hostname in groups['master']
     - inventory_hostname != ca_host
-    - not master2_cert_stat.stat.exists
+    - not _master2_enrollment_complete
 
 - name: (master2) Request cert đã ký từ CA host (xác thực bằng ticket)
   ansible.builtin.command: >
@@ -412,7 +546,7 @@
     - is_ha_master | bool
     - inventory_hostname in groups['master']
     - inventory_hostname != ca_host
-    - not master2_cert_stat.stat.exists
+    - not _master2_enrollment_complete
 
 - name: (master2) node setup hoàn tất (ApiListener + trust chain cục bộ)
   ansible.builtin.command: >
@@ -426,12 +560,13 @@
     --ticket {{ master2_ticket.stdout | trim }}
     --accept-config
     --accept-commands
+  register: _master2_node_setup
   no_log: true
   when:
     - is_ha_master | bool
     - inventory_hostname in groups['master']
     - inventory_hostname != ca_host
-    - not master2_cert_stat.stat.exists
+    - not _master2_enrollment_complete
 
 - name: "(master2) Đồng bộ lại api.conf sau node setup (ic_data mới đúng — ghi đè seed cũ nếu có)"
   ansible.builtin.copy:
@@ -445,7 +580,7 @@
     - is_ha_master | bool
     - inventory_hostname in groups['master']
     - inventory_hostname != ca_host
-    - not master2_cert_stat.stat.exists
+    - not _master2_enrollment_complete
   notify: Reload icinga2
 
 # ---------- CA nhân bản sang master2 (bỏ SPOF ký cert — design 9.2) ----------
@@ -523,14 +658,75 @@
   register: sat_cert_stat
   when: inventory_hostname in groups['satellite']
 
+- name: (satellite) Kiểm tra api.conf đã được node setup hoàn tất chưa
+  ansible.builtin.stat:
+    path: "{{ ic_etc }}/features-available/api.conf"
+  register: sat_api_stat
+  when: inventory_hostname in groups['satellite']
+
+- name: (satellite) Xác minh cert hiện tại thực sự do CA ký
+  ansible.builtin.command: >-
+    {{ ic_run }} icinga2 pki verify
+    --cert /var/lib/icinga2/certs/{{ inventory_hostname }}.crt
+    --cacert /var/lib/icinga2/certs/ca.crt
+  register: sat_cert_verify
+  changed_when: false
+  failed_when: false
+  when:
+    - inventory_hostname in groups['satellite']
+    - sat_cert_stat.stat.exists
+    - sat_api_stat.stat.exists
+
+- name: (satellite) Chặn nếu không thực thi được phép kiểm tra cert
+  ansible.builtin.assert:
+    that: (sat_cert_verify.rc | int) in [0, 1]
+    fail_msg: >-
+      Không thể chạy icinga2 pki verify (rc={{ sat_cert_verify.rc }}).
+      Dừng an toàn và giữ nguyên PKI; kiểm tra image/Docker/registry trước khi retry.
+  when:
+    - inventory_hostname in groups['satellite']
+    - sat_cert_stat.stat.exists
+    - sat_api_stat.stat.exists
+
+- name: (satellite) Đọc api.conf để xác minh cờ nhận config/command
+  ansible.builtin.slurp:
+    src: "{{ ic_etc }}/features-available/api.conf"
+  register: sat_api_conf
+  when:
+    - inventory_hostname in groups['satellite']
+    - sat_api_stat.stat.exists
+
+- name: (satellite) Chốt trạng thái enrollment hoàn chỉnh
+  ansible.builtin.set_fact:
+    _sat_enrollment_complete: >-
+      {{ sat_cert_stat.stat.exists and sat_api_stat.stat.exists and
+         (sat_cert_verify.rc | default(1)) == 0 and
+         'accept_config = true' in (sat_api_conf.content | default('') | b64decode) and
+         'accept_commands = true' in (sat_api_conf.content | default('') | b64decode) }}
+  when: inventory_hostname in groups['satellite']
+
+- name: (satellite) Dọn artifact enrollment dở dang để retry sạch
+  ansible.builtin.file:
+    path: "{{ ic_data }}/var/lib/icinga2/certs/{{ item }}"
+    state: absent
+  loop:
+    - "{{ inventory_hostname }}.crt"
+    - "{{ inventory_hostname }}.key"
+    - ca.crt
+    - trusted-parent.crt
+  when:
+    - inventory_hostname in groups['satellite']
+    - not _sat_enrollment_complete
+
 - name: (satellite) Sinh ticket ký cert — chạy TRÊN ca_host (chỉ ca_host/master có CA private key)
   ansible.builtin.command: "{{ ic_run }} icinga2 pki ticket --cn {{ inventory_hostname }}"
   delegate_to: "{{ ca_host }}"
   register: sat_ticket
   changed_when: false
+  no_log: true
   when:
     - inventory_hostname in groups['satellite']
-    - not sat_cert_stat.stat.exists
+    - not _sat_enrollment_complete
 
 - name: (satellite) Tạo thư mục certs cục bộ
   ansible.builtin.file:
@@ -541,7 +737,7 @@
     mode: "0750"
   when:
     - inventory_hostname in groups['satellite']
-    - not sat_cert_stat.stat.exists
+    - not _sat_enrollment_complete
 
 - name: (satellite) Sinh private key + cert tự ký cục bộ
   ansible.builtin.command: >
@@ -550,7 +746,7 @@
     --cert /var/lib/icinga2/certs/{{ inventory_hostname }}.crt
   when:
     - inventory_hostname in groups['satellite']
-    - not sat_cert_stat.stat.exists
+    - not _sat_enrollment_complete
 
 - name: (satellite) Lấy & tin cậy cert của CA host (parent) qua mạng
   ansible.builtin.command: >
@@ -560,7 +756,7 @@
     --port {{ icinga2_api_port }}
   when:
     - inventory_hostname in groups['satellite']
-    - not sat_cert_stat.stat.exists
+    - not _sat_enrollment_complete
 
 - name: (satellite) Request cert đã ký từ CA host (xác thực bằng ticket)
   ansible.builtin.command: >
@@ -575,7 +771,7 @@
   no_log: true
   when:
     - inventory_hostname in groups['satellite']
-    - not sat_cert_stat.stat.exists
+    - not _sat_enrollment_complete
 
 - name: (satellite) node setup hoàn tất (zone con, chỉ trust ca_host làm parent)
   # KHÔNG --accept-config/--accept-commands ở đây theo kiểu master2: satellite CẦN accept-config
@@ -592,10 +788,11 @@
     --ticket {{ sat_ticket.stdout | trim }}
     --accept-config
     --accept-commands
+  register: _satellite_node_setup
   no_log: true
   when:
     - inventory_hostname in groups['satellite']
-    - not sat_cert_stat.stat.exists
+    - not _sat_enrollment_complete
 
 - name: "(satellite) Đồng bộ lại api.conf sau node setup (ic_data mới đúng — ghi đè seed cũ nếu có)"
   ansible.builtin.copy:
@@ -607,7 +804,7 @@
     mode: preserve
   when:
     - inventory_hostname in groups['satellite']
-    - not sat_cert_stat.stat.exists
+    - not _sat_enrollment_complete
   notify: Reload icinga2
 
 # ---------- Client (command endpoint, zone riêng 1 node — Icinga2 "Client" chuẩn) ----------
@@ -632,6 +829,7 @@
   delegate_to: "{{ ca_host }}"
   register: client_ticket
   changed_when: false
+  no_log: true
   when:
     - inventory_hostname in groups['client'] | default([])
     - not client_cert_stat.stat.exists
@@ -693,6 +891,7 @@
     --ticket {{ client_ticket.stdout | trim }}
     --accept-config
     --accept-commands
+  register: _client_node_setup
   no_log: true
   when:
     - inventory_hostname in groups['client'] | default([])
@@ -757,7 +956,7 @@
     group: "{{ ic_uid }}"
     mode: "0700"
 
-- name: "Kiểm tra deploy node có {{ item }} không"
+- name: Kiểm tra từng file SSH monitor trên deploy node
   ansible.builtin.stat:
     path: "{{ deploy_config_dir }}/icinga2/ssh/{{ item }}"
   delegate_to: localhost
@@ -765,7 +964,7 @@
   loop: [id_monitor, known_hosts]
   register: _ic_ssh_stat
 
-- name: "Đồng bộ {{ item.item }} từ deploy node ra target node (nếu có)"
+- name: Đồng bộ từng file SSH monitor từ deploy node ra target node (nếu có)
   ansible.builtin.copy:
     src: "{{ deploy_config_dir }}/icinga2/ssh/{{ item.item }}"
     dest: "{{ icinga_etc_dir }}/icinga2/ssh/{{ item.item }}"
@@ -784,7 +983,7 @@
 # Xoá file mồ côi trên target nếu đã bị xoá khỏi deploy node — QUAN TRỌNG với private key: nếu
 # không dọn, key đã "xoá" ở nguồn (vd rotate/revoke) vẫn nằm lại + được mount trong container mọi
 # node icinga2 vĩnh viễn (copy chỉ CỘNG THÊM, không tự xoá phần thiếu).
-- name: "Xoá {{ item }} trên target nếu không còn ở deploy node (mồ côi)"
+- name: Xoá từng file SSH monitor mồ côi trên target
   ansible.builtin.file:
     path: "{{ icinga_etc_dir }}/icinga2/ssh/{{ item }}"
     state: absent
@@ -957,6 +1156,17 @@
     - (groups['client'] | default([])) | length > 0
   notify: Reload icinga2
 
+# Xoá file mồ côi nếu [client] rỗng đi (host cuối cùng đã bị gỡ khỏi inventory) — task render ở trên
+# chỉ SKIP khi rỗng, không tự xoá file cũ đã render từ lần trước.
+- name: "Xoá zones.d/master/clients.conf mồ côi nếu [client] rỗng"
+  ansible.builtin.file:
+    path: "{{ icinga_etc_dir }}/icinga2/zones.d/master/clients.conf"
+    state: absent
+  when:
+    - inventory_hostname == ca_host
+    - (groups['client'] | default([])) | length == 0
+  notify: Reload icinga2
+
 # Host/Service THẬT chạy trực tiếp từ zone "master" (vd SSH ra host ngoài, KHÔNG cần agent Icinga2 —
 # giống hệt cơ chế zones.d/<satellite_zone>/hosts.conf, mục 9.4, chỉ khác zone chạy check). Khác
 # clients.conf ở trên (command-endpoint, cần agent) — file RIÊNG, luôn tồn tại (không phụ thuộc
@@ -1005,6 +1215,27 @@
     loop_var: sat_zone
     label: "{{ sat_zone.name }}"
   when: inventory_hostname == ca_host
+
+# Xoá thư mục zones.d/<zone> mồ côi khi 1 zone bị xoá khỏi satellite_zones trong globals.yml —
+# render_satellite_zone.yml chỉ TẠO thư mục cho zone hiện khai, không tự dọn zone đã gỡ.
+- name: "Dò danh sách thư mục zones.d/<zone> hiện có trên ca_host (để dọn zone mồ côi)"
+  ansible.builtin.find:
+    paths: "{{ icinga_etc_dir }}/icinga2/zones.d"
+    file_type: directory
+  register: _ic_zonesd_find
+  when: inventory_hostname == ca_host
+
+- name: "Xoá thư mục zones.d/<zone> mồ côi (zone đã bị xoá khỏi satellite_zones)"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (_ic_zonesd_find.files | default([])) | map(attribute='path') | list }}"
+  loop_control: { label: "{{ item | basename }}" }
+  when:
+    - inventory_hostname == ca_host
+    - (item | basename) not in (satellite_zones | map(attribute='name') | list)
+    - (item | basename) not in ['master', 'global-templates']
+  notify: Reload icinga2
 
 # ---------- Xây danh sách mount per-file ĐỘNG cho docker_container ----------
 # script tuỳ biến / SSH key / zones.d có SỐ LƯỢNG file thay đổi theo cấu hình (globals.yml,
@@ -1097,24 +1328,80 @@
          if inventory_hostname in groups['master']
          else (enable_icinga2_features + enable_icinga2_integration_features) | reject('equalto', 'icingadb') | list }}
   register: feat_enable
-  changed_when: "'already enabled' not in feat_enable.stdout"
+  # "Enabling feature 'X'." chỉ xuất hiện cho feature THẬT SỰ mới bật; "Feature 'X' already enabled."
+  # cho feature cũ. Check theo dòng (không phải substring "already enabled" toàn bộ stdout) để không
+  # bị che khi 1 batch có cả feature mới lẫn feature cũ.
+  changed_when: "'Enabling feature' in feat_enable.stdout"
+  notify: Reload icinga2
 
 - name: Chặn cứng — tắt ido-mysql/ido-pgsql
   ansible.builtin.command: "{{ ic_run }} icinga2 feature disable ido-mysql ido-pgsql"
   register: feat_disable
   changed_when: "'Disabling' in feat_disable.stdout"
   failed_when: false
+  notify: Reload icinga2
 
 # ---------- Chạy daemon ----------
 # icinga-ansible KHÔNG tự build image — "images.icinga2" đã tự chọn bản gốc (images_upstream) hay bản
 # custom (custom_image_registry + custom_image_overrides.icinga2, xem group_vars/all.yml + design.md
 # mục 9.6) tuỳ globals.yml, docker_container tự pull về nếu node chưa có, mọi role/task khác trong
 # file này chỉ cần tham chiếu "images.icinga2" mà không cần biết đang dùng bản nào.
+- name: Lập lệnh validate config bằng đúng image và toàn bộ mount sắp deploy
+  ansible.builtin.set_fact:
+    _ic_validate_argv: [docker, run, --rm, --network, host]
+
+- name: Gắn toàn bộ volume vào container validate dùng một lần
+  ansible.builtin.set_fact:
+    _ic_validate_argv: "{{ _ic_validate_argv + ['-v', item] }}"
+  loop: "{{ _ic_dynamic_volumes }}"
+  loop_control: { label: "{{ item }}" }
+
+- name: Hoàn tất lệnh validate config
+  ansible.builtin.set_fact:
+    _ic_validate_argv: "{{ _ic_validate_argv + ['--entrypoint', 'icinga2', images.icinga2, 'daemon', '-C'] }}"
+
+- name: Validate config mới trước khi thay đổi container đang phục vụ
+  ansible.builtin.command:
+    argv: "{{ _ic_validate_argv }}"
+  changed_when: false
+
+- name: Tính fingerprint nội dung config để recreate container khi bind-mounted file đổi inode
+  ansible.builtin.find:
+    paths: "{{ icinga_etc_dir }}/icinga2"
+    recurse: true
+    file_type: file
+    get_checksum: true
+  register: _ic_config_files
+
+- name: Chốt fingerprint config
+  ansible.builtin.set_fact:
+    _ic_config_fingerprint: >-
+      {{ (_ic_config_files.files | sort(attribute='path') | map(attribute='checksum') | join(':'))
+         | hash('sha256') }}
+
+- name: Ghi nhận node setup đã thay đổi runtime/PKI trong lượt chạy này
+  ansible.builtin.set_fact:
+    _ic_node_setup_changed: >-
+      {{ ((_ca_host_node_setup | default({})).changed | default(false)) or
+         ((_master2_node_setup | default({})).changed | default(false)) or
+         ((_satellite_node_setup | default({})).changed | default(false)) or
+         ((_client_node_setup | default({})).changed | default(false)) }}
+
+# `node setup` có thể thay inode của constants.conf/api.conf bên trong /data.
+# Container cũ vẫn giữ bind mount tới inode cũ dù file Ansible vừa render lại có
+# đúng nội dung. Kiểm tra container hiện tại để retry sau sự cố luôn tự sửa được.
+- name: Kiểm tra config của container Icinga 2 hiện tại trước khi quyết định recreate
+  ansible.builtin.command: docker exec icinga2 icinga2 daemon -C
+  register: _ic_current_validate
+  changed_when: false
+  failed_when: false
+
 - name: Khởi động container icinga2 (host network, mount /data)
   community.docker.docker_container:
     name: icinga2
     image: "{{ images.icinga2 }}"
     state: started
+    recreate: "{{ _ic_node_setup_changed or _ic_current_validate.rc != 0 }}"
     restart_policy: unless-stopped
     network_mode: host
     # NET_RAW: container mặc định KHÔNG có quyền tạo raw ICMP socket -> check dùng ping (hostalive,
@@ -1145,7 +1432,7 @@
     # gắn thêm vào container icinga2 để mọi script gọi ra ngoài (Telegram, webhook tương lai...) tự
     # đi qua proxy mà không cần tự cấu hình trong từng script. Rỗng {} nếu không khai proxy_http —
     # an toàn, không đổi hành vi cho môi trường có Internet trực tiếp.
-    env: "{{ proxy_environment }}"
+    env: "{{ proxy_environment | combine({'ICINGA_ANSIBLE_CONFIG_FINGERPRINT': _ic_config_fingerprint}) }}"
     # BUG THẬT ĐÃ GẶP (đọc trước khi đổi lại volumes:): so sánh mặc định của docker_container cho
     # "volumes" chỉ phát hiện mount MỚI THÊM, KHÔNG phát hiện mount bị RÚT BỚT khỏi list -> xoá 1
     # script/zone khỏi nguồn rồi reconfigure lại KHÔNG tự gỡ mount cũ (container không được recreate,
@@ -1158,6 +1445,7 @@
       interval: 30s
       timeout: 10s
       retries: 3
+  register: _icinga2_container
 
 - name: Chờ container icinga2 chạy ổn
   ansible.builtin.command: docker exec icinga2 icinga2 daemon -C
@@ -1166,7 +1454,6 @@
   delay: 4
   until: ic_validate.rc == 0
   changed_when: false
-  failed_when: false
 
 # ---------- Log thật, dễ đọc (2026-07-23, theo yêu cầu người dùng) ----------
 # Log icinga2 (feature "mainlog") thật ra ĐÃ NẰM SẴN trên host — image symlink /var/log/icinga2 ->

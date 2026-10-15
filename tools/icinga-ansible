@@ -91,7 +91,8 @@ Backup/restore toàn hệ thống (dựng lại hạ tầng mới sau sự cố 
   # cũng được, rồi khai custom_image_registry + custom_image_overrides trong globals.yml.
   # Quy trình đầy đủ: restore-config --config-backup PATH -> bootstrap-servers -> [restore-pki
   # -e pki_backup=PATH -e confirm=yes] -> deploy -> mariadb-recovery -e recovery_mode=restore-backup
-  # -e confirm=yes (copy sẵn file db-full-*.xb.gz lên node DB chính trước bước cuối này)
+  # -e restore_backup_tag=full -e confirm=yes (role tự stage DB từ backup directory trên deployment
+  # node nếu artifact không còn trên galera[0])
 
 Options:
   -i, --inventory PATH   inventory (mặc định: all-in-one)
@@ -165,8 +166,39 @@ init_config() {
     echo "Không tìm thấy file: $CONFIG_BACKUP" >&2
     exit 1
   fi
-  if [[ -f "$GLOBALS" ]]; then
-    echo "!!! $CONFIG_DIR đã có globals.yml — restore-config sẽ GHI ĐÈ TOÀN BỘ" >&2
+
+  CONFIG_DIR_REAL="$(realpath -m -- "$CONFIG_DIR")"
+  case "$CONFIG_DIR_REAL" in
+    /|/etc|/var|/usr|/home|/root|/opt|/srv)
+      echo "Từ chối restore vào đường dẫn nguy hiểm: $CONFIG_DIR_REAL" >&2
+      exit 1
+      ;;
+  esac
+
+  # Validate and fully extract to staging before deleting any current config.
+  # This also rejects path traversal and archives with an unexpected layout.
+  RESTORE_MEMBERS="$(mktemp)"
+  RESTORE_STAGE="$(mktemp -d)"
+  trap 'rm -f "$RESTORE_MEMBERS"; sudo rm -rf "$RESTORE_STAGE"' EXIT
+  sudo tar -tzf "$CONFIG_BACKUP" > "$RESTORE_MEMBERS"
+  if grep -Eq '(^|/)\.\.(/|$)|^/' "$RESTORE_MEMBERS"; then
+    echo "Backup chứa đường dẫn không an toàn; từ chối restore." >&2
+    exit 1
+  fi
+  if [[ "$(awk -F/ 'NF && $1 != "." {print $1}' "$RESTORE_MEMBERS" | sort -u | wc -l)" -ne 1 ]] ||
+     ! grep -Eq '^[^/]+/globals\.yml$' "$RESTORE_MEMBERS"; then
+    echo "Backup không có đúng một thư mục gốc chứa globals.yml; từ chối restore." >&2
+    exit 1
+  fi
+  sudo tar -xzf "$CONFIG_BACKUP" -C "$RESTORE_STAGE" --strip-components=1
+  sudo test -s "$RESTORE_STAGE/globals.yml" || {
+    echo "globals.yml sau khi giải nén bị thiếu/rỗng; config hiện tại chưa bị thay đổi." >&2
+    exit 1
+  }
+
+  if [[ -d "$CONFIG_DIR_REAL" ]] &&
+     [[ -n "$(sudo find "$CONFIG_DIR_REAL" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "!!! $CONFIG_DIR_REAL đã có dữ liệu — restore-config sẽ GHI ĐÈ TOÀN BỘ" >&2
     echo "    (globals.yml, passwords.yml, mọi override) bằng nội dung trong backup." >&2
     if [[ "${CONFIRM:-}" != "yes-i-really-mean-it" ]]; then
       echo "    Chạy lại kèm CONFIRM=yes-i-really-mean-it để xác nhận, vd:" >&2
@@ -178,10 +210,14 @@ init_config() {
   # lớp thư mục top-level TRÙNG TÊN thư mục cuối cùng của icinga_etc_dir (vd "icinga-ansible/") bên
   # trong tar — không strip sẽ giải nén lệch thành $CONFIG_DIR/icinga-ansible/... thay vì thẳng
   # $CONFIG_DIR/... (bug thật đã gặp 2026-07-24 lúc test drill restore thật).
-  sudo mkdir -p "$CONFIG_DIR"
-  sudo tar -xzf "$CONFIG_BACKUP" -C "$CONFIG_DIR" --strip-components=1
-  sudo chown -R "$(id -un):$(id -gn)" "$CONFIG_DIR"
-  echo "Đã restore cấu hình vào $CONFIG_DIR."
+  sudo install -d -m 0750 "$CONFIG_DIR_REAL"
+  sudo find "$CONFIG_DIR_REAL" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+  sudo cp -a "$RESTORE_STAGE"/. "$CONFIG_DIR_REAL"/
+  sudo chown -R "$(id -un):$(id -gn)" "$CONFIG_DIR_REAL"
+  rm -f "$RESTORE_MEMBERS"
+  sudo rm -rf "$RESTORE_STAGE"
+  trap - EXIT
+  echo "Đã restore cấu hình vào $CONFIG_DIR_REAL."
   echo "Tiếp theo: kiểm tra lại $GLOBALS (đổi IP/hostname nếu hạ tầng mới khác hạ tầng cũ), rồi"
   echo "  bootstrap-servers -> (tuỳ chọn) restore-pki nếu muốn giữ PKI cũ -> deploy -> mariadb-recovery"
   echo "  -e recovery_mode=restore-backup để khôi phục dữ liệu DB. Xem QUICKSTART.md mục backup/restore."
@@ -197,13 +233,21 @@ init_config() {
 }
 
 # vault + secrets nếu có
+# BUG THẬT (đọc trước khi bỏ check GLOBALS): trước đây chỉ xét $PASSWORDS có vault hay không, dù
+# "-e @$GLOBALS" luôn được truyền VÔ ĐIỀU KIỆN cho mọi subcommand (xem hàm run() dưới). globals.yml
+# cũng được coi là "secrets/định danh cụm" (xem header destroy.yml) nên hợp lý nếu người dùng tự
+# vault-encrypt riêng globals.yml mà không đụng passwords.yml — trước đây mọi subcommand sẽ vỡ ngay
+# vì thiếu --ask-vault-pass, lỗi Ansible khó hiểu ("input is not vault encrypted data" hoặc parse lỗi).
 VAULT_ARGS=()
 PASSWORD_ARGS=()
+if [[ -f "$GLOBALS" ]] && head -1 "$GLOBALS" | grep -qF "\$ANSIBLE_VAULT"; then
+  VAULT_ARGS+=("--ask-vault-pass")
+fi
 if [[ -f "$PASSWORDS" ]]; then
   # Config secrets là baseline; -e người dùng truyền phải nằm SAU để có thể
   # rotate/override theo đúng precedence chuẩn của ansible-playbook.
   PASSWORD_ARGS+=("-e" "@$PASSWORDS")
-  if head -1 "$PASSWORDS" | grep -qF "\$ANSIBLE_VAULT"; then
+  if [[ ${#VAULT_ARGS[@]} -eq 0 ]] && head -1 "$PASSWORDS" | grep -qF "\$ANSIBLE_VAULT"; then
     VAULT_ARGS+=("--ask-vault-pass")
   fi
 fi
@@ -212,7 +256,8 @@ fi
 run() {   # run <ansible extra args...>
   cd "$ANSIBLE_DIR"
   ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
-    -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "$@" "${EXTRA_ARGS[@]}"
+    -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
+    "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "$@" "${EXTRA_ARGS[@]}"
 }
 
 case "$COMMAND" in
@@ -220,7 +265,7 @@ case "$COMMAND" in
   prepare-check-by-ssh)
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/prepare-check-by-ssh.yml" \
-      -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
       "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   prechecks)         run --tags prechecks ;;
@@ -229,43 +274,43 @@ case "$COMMAND" in
   pull)
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/pull.yml" \
-      -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   post-deploy)
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/post-deploy.yml" \
-      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   check)
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/check.yml" \
-      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   destroy)
     # KHÔNG dùng run() ở đây: run() luôn chèn $PLAYBOOK (icinga-ansible.yml) mặc định,
     # nếu gộp chung sẽ chạy CẢ deploy lẫn destroy trong 1 lệnh. destroy chạy playbook riêng.
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/destroy.yml" \
-      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 
   upgrade-plan)
     # Dry-run, read-only. Playbook riêng (không phải $PLAYBOOK site).
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/upgrade-plan.yml" \
-      -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   upgrade)
     # Nâng cấp rolling theo icinga_image_versions MỚI trong globals.yml (tự backup pre-upgrade).
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/upgrade.yml" \
-      -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   rollback)
     # Quay về version CŨ (sửa globals.yml về cũ trước) + restore DB pre-upgrade. Bắt buộc -e confirm=yes.
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/rollback.yml" \
-      -e "@$GLOBALS" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 
   add-master|add-node)
@@ -284,7 +329,7 @@ case "$COMMAND" in
     cd "$ANSIBLE_DIR"
     PB="remove-master.yml"; [[ "$COMMAND" == "remove-node" ]] && PB="remove-node.yml"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/$PB" \
-      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     echo ""
     echo "!!! Nhớ: xoá host khỏi inventory rồi chạy 'icinga-ansible reconfigure' để đồng bộ"
     echo "    zones.conf trên các host còn lại (xem thông báo cuối playbook ở trên)."
@@ -295,7 +340,7 @@ case "$COMMAND" in
     # -e recovery_mode=restore-backup|recover-cluster -e confirm=yes (xem design.md 10.4).
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/mariadb-recovery.yml" \
-      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   recover-db-only)
     # Chạy SAU mariadb-recovery restore-backup khi chỉ còn DB backup, không còn CA/PKI/runtime
@@ -303,7 +348,7 @@ case "$COMMAND" in
     # seed cùng ID lên mọi master, FLUSHALL Redis tạm rồi khởi động lại theo đúng thứ tự.
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/recover-db-only.yml" \
-      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 
   backup-full)
@@ -316,7 +361,7 @@ case "$COMMAND" in
     cd "$ANSIBLE_DIR"
     BACKUP_TS="$(date +%Y%m%d-%H%M%S)"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/backup-full.yml" \
-      -e "@$GLOBALS" -e "backup_ts=$BACKUP_TS" -e icinga_action=backup -e backup_tag=full \
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "backup_ts=$BACKUP_TS" -e icinga_action=backup -e backup_tag=full \
       "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   restore-pki)
@@ -326,7 +371,7 @@ case "$COMMAND" in
     # (mặc định, "deploy" tự tạo CA mới như bình thường).
     cd "$ANSIBLE_DIR"
     ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/restore-pki.yml" \
-      -e "@$GLOBALS" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 
   genpwd)

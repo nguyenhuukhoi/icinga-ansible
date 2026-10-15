@@ -11,7 +11,7 @@
 
 - name: Upgrade — chặn external DB vì tool không sở hữu backup/restore DB đó
   hosts: "{{ groups['master'][0] }}"
-  become: false
+  become: true
   gather_facts: false
   vars_files:
     - "{{ playbook_dir }}/../group_vars/all.yml"
@@ -23,9 +23,39 @@
           upgrade tự động hiện chỉ hỗ trợ managed_db. Với external DB, DBA phải backup và migrate
           schema theo change plan riêng; tool sẽ không dùng root hoặc giả vờ đã có backup.
 
+    # Phải chạy trước backup, rolling MariaDB và mọi schema migration. Nếu cặp
+    # Icinga 2/Icinga DB đích không tương thích thì dừng khi runtime còn nguyên.
+    - name: Kiểm tra topology và version đích trước khi chạm vào runtime
+      ansible.builtin.include_role:
+        name: prechecks
+
+    - name: Xác minh image Icinga DB đích và migration bundle trước khi nâng cấp
+      ansible.builtin.include_role:
+        name: upgrade
+        tasks_from: validate_icingadb_target
+
+    - name: Xác minh schema trong image Icinga Web 2 đích
+      ansible.builtin.include_role:
+        name: upgrade
+        tasks_from: validate_icingaweb_target
+
+- name: Upgrade — require every target image before backup or downtime
+  hosts: all_hosts
+  any_errors_fatal: true
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Validate target images on this host
+      ansible.builtin.include_role:
+        name: upgrade
+        tasks_from: validate_target_images
+
 # --- 1. Backup pre-upgrade (chạy trên galera, backup.yml tự lọc galera[0]) --------------------
 - name: Upgrade — backup pre-upgrade
   hosts: galera
+  any_errors_fatal: true
   become: true
   gather_facts: false
   vars_files:
@@ -38,14 +68,29 @@
       vars:
         backup_tag: pre-upgrade
 
+    # Keep the rollback point on the deployment node as well.  A database-node
+    # failure during the upgrade must not remove the backup needed by rollback.
+    - name: Đưa DB + PKI pre-upgrade về deployment node
+      ansible.builtin.include_role:
+        name: mariadb
+        tasks_from: stage_backup_to_controller
+
 # --- 2. MariaDB/Galera rolling upgrade -------------------------------------------------------
 # Non-endpoint nodes are processed first (reverse inventory); galera[0], which
 # is the default db_host, is replaced last. serial:1 is a hard safety boundary
 # and is asserted again inside mariadb_rolling.yml.
+#
+# BUG THẬT (đọc trước khi xoá any_errors_fatal): "serial: 1" một mình KHÔNG dừng play nếu 1 node
+# fail health-gate (assert "Require a fully healthy cluster before this node" trong
+# mariadb_rolling.yml) — Ansible mặc định chỉ loại host đó khỏi các batch SAU, các node còn lại vẫn
+# được xử lý tiếp tuần tự, có thể tiếp tục thay node kế trong khi node trước đang hỏng/mất quorum.
+# any_errors_fatal: true bắt TOÀN BỘ play dừng ngay khi 1 node fail — đúng đảm bảo mà comment phía
+# trên (và design.md 13.3) mô tả nhưng code cũ chưa thực sự có.
 - name: Upgrade — MariaDB/Galera one node at a time
   hosts: galera
   order: reverse_inventory
   serial: 1
+  any_errors_fatal: true
   become: true
   gather_facts: false
   vars_files:
@@ -60,6 +105,7 @@
 # --- 3. Dừng icingadb daemon + migrate schema (trước khi daemon bản mới khởi động) ------------
 - name: Upgrade — dừng icingadb + migrate schema
   hosts: master
+  any_errors_fatal: true
   become: true
   gather_facts: true
   vars_files:
@@ -69,7 +115,6 @@
       community.docker.docker_container:
         name: icingadb
         state: stopped
-      ignore_errors: true
 
     - name: Migrate schema (chỉ DB nào cần) — chạy 1 lần trên ca_host
       ansible.builtin.include_role:

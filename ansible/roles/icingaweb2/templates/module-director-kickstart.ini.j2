@@ -5,4 +5,4 @@ endpoint = "{{ ca_host }}"
 host = "{{ hostvars[ca_host].ansible_host | default(ca_host) }}"
 port = "{{ icinga2_api_port }}"
 username = "director"
-password = "{{ icinga2_director_api_user_password }}"
+password = {{ icinga2_director_api_user_password | to_json }}
