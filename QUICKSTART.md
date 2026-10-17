@@ -346,12 +346,6 @@ proxy_no_proxy: "localhost,127.0.0.1,::1,10.0.0.0/24"   # thêm subnet nội b�
 Proxy này chỉ áp dụng cho traffic RA NGOÀI (cài gói, pull image) — traffic nội bộ giữa các node
 trong cụm (`no_proxy`) không đi qua proxy.
 
-Nếu dùng registry nội bộ, phải thêm hostname/IP của registry vào cả `no_proxy` và `NO_PROXY`. Ví dụ
-Harbor `172.28.81.109` thì giá trị cần chứa `172.28.81.109`; nếu thiếu, Docker daemon có thể gửi yêu
-cầu pull qua forward proxy và nhận `503 ERR_CONNECT_FAIL` dù registry vẫn hoạt động bình thường.
-Registry dùng CA nội bộ còn cần khai `docker_registry_ca_file` và chạy lại `bootstrap-servers` như
-mục 5.5.
-
 `bootstrap-servers` tạo systemd drop-in `EnvironmentFile=-/etc/environment` cho Docker và
 `esm-cache.service`. Đây là phần nối systemd vào cùng một nguồn cấu hình; operator vẫn chỉ cần duy
 trì `/etc/environment`. Sau khi sửa file, chạy lại `bootstrap-servers` để Docker nạp giá trị mới.
