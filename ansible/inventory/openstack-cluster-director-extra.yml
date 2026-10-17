@@ -16,19 +16,37 @@ director_managed_hosts:
 
 # Director creates one Service Apply Rule per check. Every host carrying
 # vars.monitor_linuxfabrik=true receives CPU, RAM and Disk automatically.
+director_managed_custom_variables:
+  - { name: "lfmp_cpu_warn", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5501", type: "number", label: "CPU warning (%)", description: "Linuxfabrik CPU warning threshold in percent" }
+  - { name: "lfmp_cpu_crit", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5502", type: "number", label: "CPU critical (%)", description: "Linuxfabrik CPU critical threshold in percent" }
+  - { name: "lfmp_memory_warn", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5503", type: "number", label: "RAM warning (%)", description: "Linuxfabrik memory warning threshold in percent" }
+  - { name: "lfmp_memory_crit", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5504", type: "number", label: "RAM critical (%)", description: "Linuxfabrik memory critical threshold in percent" }
+  - { name: "lfmp_disk_warn", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5505", type: "number", label: "Disk warning (%)", description: "Linuxfabrik disk warning threshold in percent" }
+  - { name: "lfmp_disk_crit", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5506", type: "number", label: "Disk critical (%)", description: "Linuxfabrik disk critical threshold in percent" }
+
+# Defaults live on typed Service Templates. Director displays these six values
+# as numeric fields; each Apply Rule can override them in its Custom Variables tab.
+director_managed_service_templates:
+  - { name: "Linuxfabrik CPU defaults", check_command: "by_ssh_lfmp_cpu", vars: { lfmp_cpu_warn: 80, lfmp_cpu_crit: 90 } }
+  - { name: "Linuxfabrik RAM defaults", check_command: "by_ssh_lfmp_memory", vars: { lfmp_memory_warn: 90, lfmp_memory_crit: 95 } }
+  - { name: "Linuxfabrik Disk defaults", check_command: "by_ssh_lfmp_disk", vars: { lfmp_disk_warn: 90, lfmp_disk_crit: 95 } }
+
 director_managed_service_apply_rules:
   - name: "CPU"
     check_command: "by_ssh_lfmp_cpu"
     assign_filter: "host.vars.monitor_linuxfabrik=true"
-    vars: { ssh_user: "icinga-monitor", lfmp_cpu_warn: 80, lfmp_cpu_crit: 90 }
+    imports: ["Linuxfabrik CPU defaults"]
+    vars: { ssh_user: "icinga-monitor" }
   - name: "RAM"
     check_command: "by_ssh_lfmp_memory"
     assign_filter: "host.vars.monitor_linuxfabrik=true"
-    vars: { ssh_user: "icinga-monitor", lfmp_memory_warn: 90, lfmp_memory_crit: 95 }
+    imports: ["Linuxfabrik RAM defaults"]
+    vars: { ssh_user: "icinga-monitor" }
   - name: "Disk"
     check_command: "by_ssh_lfmp_disk"
     assign_filter: "host.vars.monitor_linuxfabrik=true"
-    vars: { ssh_user: "icinga-monitor", lfmp_disk_warn: 90, lfmp_disk_crit: 95 }
+    imports: ["Linuxfabrik Disk defaults"]
+    vars: { ssh_user: "icinga-monitor" }
 
 # One-time/idempotent migration: remove the old per-host Service objects after
 # the Apply Rules have been stored. Keeping this list is safe on later runs.

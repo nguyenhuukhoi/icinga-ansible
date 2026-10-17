@@ -198,8 +198,11 @@ host key vào một `known_hosts` riêng. Nó không tái sử dụng SSH key qu
 
 Ba CheckCommand dùng plugin chuẩn từ Linuxfabrik ở `/usr/lib64/nagios/plugins`: `cpu-usage`,
 `memory-usage`, `disk-usage`. Mỗi host cần monitor mang `vars.monitor_linuxfabrik: true`; ba Apply Rule dùng
-`assign_filter: "host.vars.monitor_linuxfabrik=true"` nên host mới tự nhận đủ CPU/RAM/Disk. Muốn đổi ngưỡng
-mặc định, đặt custom vars tương ứng trên Apply Rule: `lfmp_cpu_warn/crit`, `lfmp_memory_warn/crit`,
+`assign_filter: "host.vars.monitor_linuxfabrik=true"` nên host mới tự nhận đủ CPU/RAM/Disk. Sáu ngưỡng được
+khai báo trong `director_managed_custom_variables` với kiểu `number`, rồi gắn vào ba Service Template trong
+`director_managed_service_templates`. Apply Rule import template tương ứng nên Director hiển thị ô số có
+nhãn rõ ràng trong tab **Custom Variables**. Giá trị mặc định nằm ở template; có thể sửa trong YAML hoặc
+nhập giá trị override trên từng Apply Rule. Các tên biến là `lfmp_cpu_warn/crit`, `lfmp_memory_warn/crit`,
 `lfmp_disk_warn/crit`.
 
 Ví dụ tối thiểu trong extra-vars hoặc `globals.yml`:
@@ -210,12 +213,32 @@ director_managed_hosts:
     address: "172.28.81.101"
     vars: { monitor_linuxfabrik: true }
 
+director_managed_custom_variables:
+  - name: "lfmp_cpu_warn"
+    uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5501"
+    type: "number"
+    label: "CPU warning (%)"
+  - name: "lfmp_cpu_crit"
+    uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5502"
+    type: "number"
+    label: "CPU critical (%)"
+
+director_managed_service_templates:
+  - name: "Linuxfabrik CPU defaults"
+    check_command: "by_ssh_lfmp_cpu"
+    vars: { lfmp_cpu_warn: 80, lfmp_cpu_crit: 90 }
+
 director_managed_service_apply_rules:
   - name: "CPU"
     check_command: "by_ssh_lfmp_cpu"
     assign_filter: "host.vars.monitor_linuxfabrik=true"
-    vars: { ssh_user: "icinga-monitor", lfmp_cpu_warn: 80, lfmp_cpu_crit: 90 }
+    imports: ["Linuxfabrik CPU defaults"]
+    vars: { ssh_user: "icinga-monitor" }
 ```
+
+Giữ nguyên UUID của mỗi custom variable khi chuyển cấu hình giữa các hệ thống; Director dùng UUID để giữ
+liên kết giữa schema, template và giá trị. File `ansible/inventory/openstack-cluster-director-extra.yml`
+có ví dụ hoàn chỉnh cho cả CPU, RAM và Disk.
 
 `director_managed_services` vẫn dành cho Service object phải gắn trực tiếp vào từng host. Khi chuyển một
 deployment cũ sang Apply Rule, khai `director_managed_direct_services_absent: [CPU, RAM, Disk]`; role lưu
@@ -244,8 +267,8 @@ ansible_ssh_common_args='-o StrictHostKeyChecking=accept-new'
 ```
 
 Copy nội dung `ansible/inventory/openstack-cluster-director-extra.yml` vào `globals.yml`, hoặc truyền file
-đó bằng `-e @...`. Các `vars` trên từng Service Apply Rule được Director lưu cùng rule, gồm user SSH và
-ngưỡng cảnh báo. Host check dùng TCP/22; service check dùng Linuxfabrik qua SSH.
+đó bằng `-e @...`. Ngưỡng mặc định nằm trên Service Template; `ssh_user` nằm trên từng Apply Rule. Host
+check dùng TCP/22; service check dùng Linuxfabrik qua SSH.
 
 ```bash
 source /path/to/venv/bin/activate

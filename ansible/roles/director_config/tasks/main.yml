@@ -4,6 +4,138 @@
 # object identifiers; Director exposes the rule UUIDs through a dedicated
 # serviceapplyrules endpoint.
 
+- name: Validate Director custom variable definitions
+  ansible.builtin.assert:
+    that:
+      - item.name | default('') is regex('^[A-Za-z_][A-Za-z0-9_]*$')
+      - item.uuid | default('') is regex('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$')
+      - item.type | default('') in ['string', 'number', 'bool', 'sensitive']
+    fail_msg: >-
+      Each director_managed_custom_variables entry requires a valid variable
+      name, stable UUID and supported scalar type. Invalid entry: {{ item }}
+  loop: "{{ director_managed_custom_variables | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default('<unnamed>') }}"
+
+- name: Director custom variable names and UUIDs must be unique
+  ansible.builtin.assert:
+    that:
+      - >-
+        (director_managed_custom_variables | default([]) | map(attribute='name') | unique | length)
+        == (director_managed_custom_variables | default([]) | length)
+      - >-
+        (director_managed_custom_variables | default([]) | map(attribute='uuid') | unique | length)
+        == (director_managed_custom_variables | default([]) | length)
+    fail_msg: Director custom variable names and UUIDs must be unique.
+
+- name: Read configured Director custom variables
+  ansible.builtin.command:
+    argv: [docker, exec, icingaweb2, icingacli, director, export, customproperties]
+  register: _director_custom_variables_before
+  changed_when: false
+  when: (director_managed_custom_variables | default([]) | length) > 0
+
+- name: Restore missing or changed Director custom variable definitions
+  ansible.builtin.command:
+    argv: [docker, exec, -i, icingaweb2, icingacli, director, basket, restore]
+    stdin: >-
+      {{ {'CustomVariable': {
+           (((_director_custom_variables_before.stdout | from_json)
+             | selectattr('key_name', 'equalto', item.name) | list | first | default({})).uuid
+            | default(item.uuid, true)):
+           {'uuid': (((_director_custom_variables_before.stdout | from_json)
+                      | selectattr('key_name', 'equalto', item.name) | list | first | default({})).uuid
+                     | default(item.uuid, true)),
+            'key_name': item.name,
+            'parent_uuid': none,
+            'value_type': item.type,
+            'label': item.label | default(item.name),
+            'description': item.description | default(''),
+            'items': []}
+         }} | to_json }}
+  loop: "{{ director_managed_custom_variables | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    _existing_custom_variable: >-
+      {{ (_director_custom_variables_before.stdout | from_json)
+         | selectattr('key_name', 'equalto', item.name) | list | first | default({}) }}
+  when: >-
+    (_existing_custom_variable | length == 0) or
+    (_existing_custom_variable.value_type | default('') != item.type) or
+    (_existing_custom_variable.label | default('') != (item.label | default(item.name))) or
+    (_existing_custom_variable.description | default('') != (item.description | default('')))
+  changed_when: true
+
+- name: Validate Director service templates
+  ansible.builtin.assert:
+    that:
+      - item.name | default('') | length > 0
+      - item.name is regex('^[A-Za-z0-9_. -]+$')
+      - item.check_command | default('') | length > 0
+      - >-
+        (item.vars | default({}) | dict2items | map(attribute='key') | list
+         | difference(director_managed_custom_variables | default([])
+                      | map(attribute='name') | list) | length) == 0
+    fail_msg: >-
+      Each Director service template requires a safe name/check_command and
+      may only set variables declared in director_managed_custom_variables.
+      Invalid entry: {{ item }}
+  loop: "{{ director_managed_service_templates | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default('<unnamed>') }}"
+
+- name: Upsert Director-managed service templates
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -i
+      - icingaweb2
+      - icingacli
+      - director
+      - service
+      - set
+      - "{{ item.name }}"
+      - --auto-create
+      - --json
+    stdin: >-
+      {{ {'object_type': 'template',
+          'check_command': item.check_command,
+          'display_name': item.display_name | default(item.name),
+          'imports': item.imports | default([]),
+          'vars': item.vars | default({})} | to_json }}
+  loop: "{{ director_managed_service_templates | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _director_service_template_upsert
+  changed_when: >-
+    'has been created' in (_director_service_template_upsert.stdout | default('')) or
+    'has been modified' in (_director_service_template_upsert.stdout | default(''))
+
+# PUT on a template both attaches the typed custom-variable definitions and
+# stores their defaults. Apply Rules importing this template then show proper
+# editable fields in Director instead of an unstructured vars dictionary.
+- name: Attach typed custom variables to Director service templates
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ icingaweb2_http_port }}/director/service/variables?name={{
+      item.name | urlencode }}
+    method: PUT
+    url_username: "{{ icingaweb2_admin_user }}"
+    url_password: "{{ icingaweb2_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Accept: application/json
+    body_format: json
+    body: "{{ item.vars | default({}) }}"
+    status_code: 200
+  loop: "{{ director_managed_service_templates | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+  no_log: true
+
 - name: Validate Director Service Apply Rule definitions
   ansible.builtin.assert:
     that:
@@ -32,6 +164,9 @@
         (director_managed_services | default([]) | map(attribute='name') | list)
         | intersect(director_managed_direct_services_absent | default([]))
         | length == 0
+      - >-
+        (director_managed_service_templates | default([]) | map(attribute='name') | unique | length)
+        == (director_managed_service_templates | default([]) | length)
     fail_msg: >-
       Director service names are duplicated, or a direct service is also
       declared as an Apply Rule/absent. Keep the three lists disjoint; Director

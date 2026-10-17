@@ -201,6 +201,79 @@
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
 
+    - name: Đọc schema Custom Variables do Ansible quản lý
+      ansible.builtin.command:
+        argv: [docker, exec, icingaweb2, icingacli, director, export, customproperties]
+      register: _director_custom_variables_health
+      changed_when: false
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+        - (director_managed_custom_variables | default([]) | length) > 0
+
+    - name: Custom Variable phải tồn tại đúng một lần và đúng kiểu/nhãn
+      ansible.builtin.assert:
+        that:
+          - >-
+            (_director_custom_variables_health.stdout | from_json
+             | selectattr('key_name', 'equalto', item.name) | list | length) == 1
+          - >-
+            (_director_custom_variables_health.stdout | from_json
+             | selectattr('key_name', 'equalto', item.name) | first).value_type == item.type
+          - >-
+            (_director_custom_variables_health.stdout | from_json
+             | selectattr('key_name', 'equalto', item.name) | first).label
+            == (item.label | default(item.name))
+        fail_msg: >-
+          Director Custom Variable '{{ item.name }}' bị thiếu, trùng hoặc sai kiểu/nhãn.
+      loop: "{{ director_managed_custom_variables | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
+    - name: Đọc Service Template chứa ngưỡng từ Director REST API
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ icingaweb2_http_port }}/director/service?name={{
+          item.name | urlencode }}
+        method: GET
+        url_username: "{{ icingaweb2_admin_user }}"
+        url_password: "{{ icingaweb2_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Accept: application/json
+        return_content: true
+        status_code: 200
+      loop: "{{ director_managed_service_templates | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _director_service_templates_health
+      no_log: true
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
+    - name: Service Template phải giữ đúng default và liên kết Custom Variables
+      ansible.builtin.assert:
+        that:
+          - item.json.object_type == 'template'
+          - item.json.check_command == item.item.check_command
+          - item.json.vars == (item.item.vars | default({}))
+          - >-
+            (item.json.customVariables | default([]) | length)
+            == (item.item.vars | default({}) | length)
+        fail_msg: >-
+          Service Template '{{ item.item.name }}' sai check command/default hoặc
+          chưa gắn đủ typed Custom Variables nên Director sẽ không hiện ô nhập.
+      loop: "{{ _director_service_templates_health.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
     - name: Đọc Service Apply Rule từ Director REST API
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ icingaweb2_http_port }}/director/serviceapplyrules"
@@ -235,10 +308,15 @@
             (_director_apply_rules_health.json.objects | default([])
              | selectattr('object_name', 'equalto', item.name) | first).check_command == item.check_command
           - >-
+            ((_director_apply_rules_health.json.objects | default([])
+              | selectattr('object_name', 'equalto', item.name) | first).imports | default([]))
+            == (item.imports | default([]))
+          - >-
             (_director_apply_rules_health.json.objects | default([])
              | selectattr('object_name', 'equalto', item.name) | first).vars == (item.vars | default({}))
         fail_msg: >-
-          Service Apply Rule '{{ item.name }}' bị thiếu, bị trùng hoặc lệch assign_filter/check command/vars.
+          Service Apply Rule '{{ item.name }}' bị thiếu, bị trùng hoặc lệch
+          assign_filter/check command/imports/vars.
       loop: "{{ director_managed_service_apply_rules | default([]) }}"
       loop_control:
         label: "{{ item.name }}"

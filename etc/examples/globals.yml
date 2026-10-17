@@ -164,6 +164,8 @@ enable_check_by_ssh_target_plugins: false
 # ansible/inventory/openstack-cluster-director-extra.yml
 director_managed_hosts: []
 director_managed_services: []                    # service gắn trực tiếp từng host (chỉ dùng khi thật sự cần)
+director_managed_custom_variables: []             # schema biến có kiểu/label; UUID phải ổn định qua backup/restore
+director_managed_service_templates: []            # default và ô nhập Custom Variables cho Apply Rule
 director_managed_service_apply_rules: []         # khuyến nghị cho check dùng chung nhiều host
 director_managed_direct_services_absent: []      # tên service trực tiếp cũ cần xoá khi chuyển sang Apply Rule
 
