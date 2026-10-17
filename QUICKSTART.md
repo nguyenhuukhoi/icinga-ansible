@@ -213,6 +213,11 @@ proxy_no_proxy: "localhost,127.0.0.1,::1,10.0.0.0/24"   # thêm subnet nội b�
 Proxy này chỉ áp dụng cho traffic RA NGOÀI (cài gói, pull image) — traffic nội bộ giữa các node
 trong cụm (`no_proxy`) không đi qua proxy.
 
+Khi có proxy, `bootstrap-servers` cũng tạo systemd drop-in cho `esm-cache.service` của Ubuntu Pro.
+Việc này cần thiết vì system service không tự đọc `/etc/environment`; nếu thiếu drop-in, Ubuntu có
+thể ghi lỗi `ubuntupro.lib.esm_cache ... contracts.canonical.com ... Network is unreachable` dù
+các task `apt` của Ansible vẫn đang dùng proxy đúng cách.
+
 ### 4.1. Proxy khác nhau cho từng nhóm node (master/satellite/galera/client)
 
 Nếu master/satellite/galera nằm ở mạng khác nhau và mỗi mạng ra Internet qua 1 proxy riêng (hoặc 1
@@ -765,6 +770,7 @@ $EDITOR ansible/inventory/my-cluster    # xoá host đó khỏi inventory
 | `unreachable` khi chạy trên nhiều host | Bạn chạy `icinga-ansible` qua `sudo`/`sudo su` — SSH ra host khác dùng nhầm key của root | Chạy lại bằng user thường (có sudo passwordless), không bọc `sudo` trước cả câu lệnh |
 | `deploy` báo thiếu thư mục (`directory ... does not exist`) trên host mới/vừa `destroy` | Host đó chưa từng chạy `bootstrap-servers` | Chạy `bootstrap-servers` trước, rồi `deploy` lại |
 | `apt update`/`docker pull` treo mãi không xong | Thiếu cấu hình proxy dù host sau proxy công ty | Khai `proxy_http`/`proxy_https`/`proxy_no_proxy` trong `globals.yml` (mục 4), chạy lại |
+| Journal có `ubuntupro.lib.esm_cache` / `contracts.canonical.com` / `Network is unreachable` | `esm-cache.service` không có Internet trực tiếp hoặc chưa nhận proxy | Khai đủ `proxy_http` và `proxy_https`, chạy lại `bootstrap-servers`; kiểm tra `systemctl show esm-cache.service -p Environment` |
 | `permission denied` khi gọi `docker ...` tay trên host | User chưa vào group `docker`/chưa `sudo` | Ansible tự `become` đúng lúc cần — nếu bạn tự gõ lệnh `docker` tay thì phải tự thêm `sudo` |
 | Web login báo lỗi, hoặc không load được trang | Nhầm cổng — web chạy ở **8080**, không phải 80/443 mặc định | Kiểm tra lại URL `http://<ip>:8080/authentication/login` |
 | Container `icingadb` cứ `Restarting`, log `FATAL ... unexpected database schema version: vX (expected vY)` (hoặc `unexpected Redis schema version`) | Đổi `icinga_image_versions.icingadb` sang bản mới hơn (khác thế hệ schema) qua `deploy`/`reconfigure` thẳng, chưa migrate DB | Xem mục 9.1 ngay dưới — migrate tay hoặc chạy `icinga-ansible upgrade` |

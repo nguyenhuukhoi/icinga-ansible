@@ -46,6 +46,50 @@
   when: (proxy_http_effective | default('')) | length == 0
   tags: [bootstrap]
 
+# /etc/environment chỉ được PAM nạp cho login session; systemd system service không tự đọc file
+# này. Ubuntu 24.04 chạy esm-cache.service sau một số thao tác apt, vì vậy service từng bỏ qua proxy
+# của project rồi cố kết nối thẳng contracts.canonical.com và ghi Errno 101 vào journal. Drop-in
+# được tạo trước task apt đầu tiên để cả lần bootstrap hiện tại cũng dùng đúng proxy.
+- name: (bootstrap) Tạo thư mục systemd drop-in cho Ubuntu Pro ESM cache
+  ansible.builtin.file:
+    path: /etc/systemd/system/esm-cache.service.d
+    state: directory
+    mode: "0755"
+  when: (proxy_http_effective | default('')) | length > 0
+  tags: [bootstrap]
+
+- name: (bootstrap) Cấu hình proxy cho Ubuntu Pro ESM cache
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/esm-cache.service.d/http-proxy.conf
+    mode: "0600"
+    content: |
+      [Service]
+      Environment="http_proxy={{ proxy_http_effective }}"
+      Environment="https_proxy={{ proxy_https_effective }}"
+      Environment="HTTP_PROXY={{ proxy_http_effective }}"
+      Environment="HTTPS_PROXY={{ proxy_https_effective }}"
+      Environment="no_proxy={{ proxy_no_proxy_effective }}"
+      Environment="NO_PROXY={{ proxy_no_proxy_effective }}"
+  register: _ubuntu_pro_proxy_dropin
+  when: (proxy_http_effective | default('')) | length > 0
+  tags: [bootstrap]
+
+- name: (bootstrap) Xoá proxy Ubuntu Pro ESM cache khi đã tắt proxy
+  ansible.builtin.file:
+    path: /etc/systemd/system/esm-cache.service.d/http-proxy.conf
+    state: absent
+  register: _ubuntu_pro_proxy_removed
+  when: (proxy_http_effective | default('')) | length == 0
+  tags: [bootstrap]
+
+- name: (bootstrap) Nạp lại systemd sau khi đổi proxy Ubuntu Pro ESM cache
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: >-
+    (_ubuntu_pro_proxy_dropin is defined and _ubuntu_pro_proxy_dropin.changed) or
+    (_ubuntu_pro_proxy_removed is defined and _ubuntu_pro_proxy_removed.changed)
+  tags: [bootstrap]
+
 - name: (bootstrap) Cài chrony + phụ thuộc Docker
   ansible.builtin.apt:
     name: [chrony, ca-certificates, curl, gnupg, python3-docker]

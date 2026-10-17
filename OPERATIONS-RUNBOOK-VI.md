@@ -220,6 +220,9 @@ proxy_group_overrides: {}
 vào môi trường hệ thống và Docker daemon. Việc truyền trực tiếp là bắt buộc trong lần chạy đầu vì
 SSH/Ansible process hiện tại chưa tự đọc lại `/etc/environment`. Sau khi đổi proxy, chạy lại
 `bootstrap-servers`, rồi xác nhận `systemctl show docker --property=Environment` trên từng node.
+Playbook còn tạo `/etc/systemd/system/esm-cache.service.d/http-proxy.conf` để Ubuntu Pro ESM cache
+dùng cùng proxy. System service này không tự đọc `/etc/environment`; thiếu drop-in có thể tạo log
+`contracts.canonical.com ... Network is unreachable` trong lúc hoặc sau khi chạy `apt`.
 Lệnh `pull` luôn kiểm tra lại digest và retry tối đa 8 lần, cách nhau 10 giây, cho từng image. Retry này
 xử lý lỗi tạm thời 429/5xx từ registry/CDN; nếu hết retry vẫn lỗi thì không có runtime nào bị thay đổi.
 Trong lab, truy cập Docker Hub trực tiếp bị timeout, đi qua proxy nhận phản hồi registry hợp lệ; pull đủ
