@@ -214,13 +214,13 @@
     - name: Ghi known_hosts riêng cho check_by_ssh
       ansible.builtin.copy:
         dest: "{{ monitor_key_dir }}/known_hosts"
-        content: >-
-          {{ ansible_play_hosts_all
-             | map('extract', hostvars, 'monitor_host_key')
-             | map(attribute='stdout')
-             | reject('equalto', '')
-             | join('\n') }}
-          {{ '\n' }}
+        # Dùng YAML literal block để tạo newline thật. join('\n') trong biểu
+        # thức Jinja tạo hai ký tự backslash+n và làm OpenSSH coi cả file là
+        # một dòng không hợp lệ.
+        content: |
+          {% for target in ansible_play_hosts_all %}
+          {{ hostvars[target].monitor_host_key.stdout }}
+          {% endfor %}
         mode: "0600"
       delegate_to: localhost
       become: false
