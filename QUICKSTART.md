@@ -187,7 +187,8 @@ $EDITOR my-icinga5-extra.yml
 ./tools/icinga-ansible prechecks -i my-icinga5 -e @my-icinga5-extra.yml
 ./tools/icinga-ansible deploy -i my-icinga5 -e @my-icinga5-extra.yml
 ./tools/icinga-ansible check -i my-icinga5 -e @my-icinga5-extra.yml
-sudo ./scripts/verify-director-ssh-checks.sh
+ICINGA_API_URL=https://<IP-master1>:5665/v1 \
+  ./tools/verify-director-ssh-checks /etc/icinga-ansible/passwords.yml icinga5- 15
 ```
 
 `prepare-check-by-ssh` tạo một Ed25519 key riêng cho runtime monitoring, cấp public key lên target và pin
@@ -198,6 +199,64 @@ host key vào một `known_hosts` riêng. Nó không tái sử dụng SSH key qu
 Ba CheckCommand dùng plugin chuẩn từ Linuxfabrik ở `/usr/lib64/nagios/plugins`: `cpu-usage`,
 `memory-usage`, `disk-usage`. Muốn đổi ngưỡng mặc định, đặt custom vars tương ứng trong Director:
 `lfmp_cpu_warn/crit`, `lfmp_memory_warn/crit`, `lfmp_disk_warn/crit`.
+
+### 3.2. Monitor các node OpenStack bên ngoài cụm Icinga
+
+Các controller/compute OpenStack chỉ là **target được monitor**, vì vậy đặt chúng trong group
+`[linuxfabrik_targets]`, không đặt trong `[all_hosts]`. Nhờ đó `deploy`, `upgrade` và `destroy` chỉ tác động
+đến stack Icinga; lệnh `prepare-check-by-ssh` mới kết nối tới target để cài plugin và cấu hình SSH.
+
+Thêm vào inventory của deployment node (đổi đường dẫn key quản trị cho đúng môi trường):
+
+```ini
+[linuxfabrik_targets]
+openstack-controller01 ansible_host=172.28.81.101 ansible_user=root ansible_ssh_private_key_file=/home/ubuntu/.ssh/openstack-root
+openstack-controller02 ansible_host=172.28.81.102 ansible_user=root ansible_ssh_private_key_file=/home/ubuntu/.ssh/openstack-root
+openstack-controller03 ansible_host=172.28.81.103 ansible_user=root ansible_ssh_private_key_file=/home/ubuntu/.ssh/openstack-root
+openstack-compute01    ansible_host=172.28.81.104 ansible_user=root ansible_ssh_private_key_file=/home/ubuntu/.ssh/openstack-root
+openstack-compute02    ansible_host=172.28.81.105 ansible_user=root ansible_ssh_private_key_file=/home/ubuntu/.ssh/openstack-root
+openstack-compute03    ansible_host=172.28.81.106 ansible_user=root ansible_ssh_private_key_file=/home/ubuntu/.ssh/openstack-root
+```
+
+Copy nội dung `ansible/inventory/openstack-cluster-director-extra.yml` vào `globals.yml`, hoặc truyền file
+đó bằng `-e @...`. Các `vars` trên từng service được Director lưu cùng object, gồm user SSH và ngưỡng cảnh
+báo. Host check dùng TCP/22; service check dùng Linuxfabrik qua SSH.
+
+```bash
+source /path/to/venv/bin/activate
+cd /home/ubuntu/icinga-ansible
+
+# Chạy một lần và chạy lại khi rotate key/thêm node. Lệnh này:
+# - tạo key riêng tại /etc/icinga-ansible/config/icinga2/ssh/id_monitor;
+# - cài package linuxfabrik-monitoring-plugins trên target;
+# - tạo user hệ thống icinga-monitor không có quyền sudo;
+# - chỉ nhận ba plugin CPU/RAM/Disk qua forced-command;
+# - chỉ nhận key từ IP của các node trong group [master];
+# - pin host key vào known_hosts riêng.
+./tools/icinga-ansible prepare-check-by-ssh \
+  -i ansible/inventory/ha-lab-2master-galera3
+
+./tools/icinga-ansible deploy \
+  -i ansible/inventory/ha-lab-2master-galera3
+./tools/icinga-ansible check \
+  -i ansible/inventory/ha-lab-2master-galera3
+```
+
+Không dùng private key quản trị OpenStack làm runtime key của Icinga. `id_monitor` chỉ nằm trên deployment
+node và được Ansible copy read-only vào container Icinga 2. `authorized_keys` của `icinga-monitor` dùng cả
+`from=`, `restrict` và `command=`; dù key bị lộ, nó không mở shell và không chạy được lệnh ngoài ba plugin.
+
+Kiểm tra 18 service sau khi Director deploy (script chấp nhận prefix và số service để dùng lại cho cụm khác):
+
+```bash
+ICINGA_API_URL=https://172.28.83.95:5665/v1 \
+  ./tools/verify-director-ssh-checks \
+  /etc/icinga-ansible/passwords.yml openstack- 18
+```
+
+Kết quả đúng phải có 18 dòng `host | service | check_command | state | output` và exit code 0. State `0` là
+OK; CPU/RAM/Disk vượt ngưỡng có thể trả về WARNING/CRITICAL hợp lệ, cần xử lý tải hoặc dung lượng thay vì sửa
+SSH.
 
 ## 4. Nếu host đích ở sau proxy công ty
 

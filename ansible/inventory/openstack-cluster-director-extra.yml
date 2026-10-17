@@ -1,0 +1,26 @@
+---
+# Director objects for an OpenStack cluster monitored with Linuxfabrik plugins
+# through a restricted check_by_ssh account. Addresses are the current lab
+# example; adjust names and addresses for another environment.
+enable_icingaweb2_modules:
+  - icingadb
+  - director
+
+director_managed_hosts:
+  - { name: "openstack-controller01", address: "172.28.81.101", display_name: "OpenStack Controller 01", check_command: "tcp", vars: { tcp_port: 22 } }
+  - { name: "openstack-controller02", address: "172.28.81.102", display_name: "OpenStack Controller 02", check_command: "tcp", vars: { tcp_port: 22 } }
+  - { name: "openstack-controller03", address: "172.28.81.103", display_name: "OpenStack Controller 03", check_command: "tcp", vars: { tcp_port: 22 } }
+  - { name: "openstack-compute01", address: "172.28.81.104", display_name: "OpenStack Compute 01", check_command: "tcp", vars: { tcp_port: 22 } }
+  - { name: "openstack-compute02", address: "172.28.81.105", display_name: "OpenStack Compute 02", check_command: "tcp", vars: { tcp_port: 22 } }
+  - { name: "openstack-compute03", address: "172.28.81.106", display_name: "OpenStack Compute 03", check_command: "tcp", vars: { tcp_port: 22 } }
+
+director_managed_services:
+  - name: "CPU"
+    check_command: "by_ssh_lfmp_cpu"
+    vars: { ssh_user: "icinga-monitor", lfmp_cpu_warn: 80, lfmp_cpu_crit: 90 }
+  - name: "RAM"
+    check_command: "by_ssh_lfmp_memory"
+    vars: { ssh_user: "icinga-monitor", lfmp_memory_warn: 90, lfmp_memory_crit: 95 }
+  - name: "Disk"
+    check_command: "by_ssh_lfmp_disk"
+    vars: { ssh_user: "icinga-monitor", lfmp_disk_warn: 90, lfmp_disk_crit: 95 }

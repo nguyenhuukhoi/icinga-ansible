@@ -2,7 +2,9 @@
 # Tạo credential monitoring RIÊNG trên deployment node, cấp public key cho host đích và pin SSH
 # host keys. Không tái sử dụng key quản trị Ansible cho runtime checks.
 - name: Prepare check_by_ssh trust
-  hosts: all_hosts
+  # linuxfabrik_targets is intentionally outside all_hosts: deploy/upgrade must not
+  # install or manage the Icinga stack on the OpenStack nodes being monitored.
+  hosts: all_hosts:linuxfabrik_targets
   become: true
   gather_facts: false
   # Playbook nằm trong ansible/playbooks/ (không cùng cấp ansible/group_vars/) nên Ansible KHÔNG tự
@@ -14,6 +16,10 @@
   vars:
     monitor_key_dir: "{{ deploy_config_dir }}/icinga2/ssh"
     monitor_private_key: "{{ monitor_key_dir }}/id_monitor"
+    monitor_restricted_user: "icinga-monitor"
+    monitor_allowed_sources: >-
+      {{ groups['master'] | default([])
+         | map('extract', hostvars, 'ansible_host') | join(',') }}
   pre_tasks:
     - name: Tạo thư mục credential check_by_ssh trên deployment node
       ansible.builtin.file:
@@ -50,7 +56,86 @@
       become: false
 
   tasks:
-    - name: Cho phép key monitoring đăng nhập user ubuntu trên host đích
+    - name: Thu thập distribution facts tối thiểu trên Linuxfabrik target ngoài cụm
+      ansible.builtin.setup:
+        gather_subset: [distribution]
+      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+
+    - name: Tạo keyring directory trên Linuxfabrik target ngoài cụm
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+
+    - name: Tải signing key của Linuxfabrik
+      ansible.builtin.get_url:
+        url: https://repo.linuxfabrik.ch/linuxfabrik.key
+        dest: /etc/apt/keyrings/linuxfabrik.asc
+        mode: "0644"
+      environment: "{{ proxy_environment | default({}) }}"
+      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+
+    - name: Khai báo Linuxfabrik repository trên Ubuntu target
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/etc/apt/keyrings/linuxfabrik.asc]
+          https://repo.linuxfabrik.ch/monitoring-plugins/ubuntu/
+          {{ ansible_distribution_release }}-release main
+        filename: linuxfabrik-monitoring-plugins
+        state: present
+      environment: "{{ proxy_environment | default({}) }}"
+      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+
+    - name: Cài Linuxfabrik monitoring plugins trên target ngoài cụm
+      ansible.builtin.apt:
+        name: linuxfabrik-monitoring-plugins
+        update_cache: true
+        lock_timeout: 300
+        state: present
+      environment: "{{ proxy_environment | default({}) }}"
+      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+
+    - name: Tạo tài khoản runtime không đặc quyền trên Linuxfabrik target
+      ansible.builtin.user:
+        name: "{{ monitor_restricted_user }}"
+        home: "/var/lib/{{ monitor_restricted_user }}"
+        create_home: true
+        shell: /bin/bash
+        system: true
+      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+
+    - name: Cài forced-command chỉ cho phép ba Linuxfabrik check
+      ansible.builtin.copy:
+        src: files/icinga-linuxfabrik-check
+        dest: /usr/local/sbin/icinga-linuxfabrik-check
+        owner: root
+        group: root
+        mode: "0755"
+      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+
+    - name: Tạo SSH directory cho tài khoản runtime hạn chế
+      ansible.builtin.file:
+        path: "/var/lib/{{ monitor_restricted_user }}/.ssh"
+        state: directory
+        owner: "{{ monitor_restricted_user }}"
+        group: "{{ monitor_restricted_user }}"
+        mode: "0700"
+      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+
+    - name: Chỉ cho phép key monitoring từ các Icinga master và forced-command
+      ansible.builtin.copy:
+        dest: "/var/lib/{{ monitor_restricted_user }}/.ssh/authorized_keys"
+        content: >-
+          from="{{ monitor_allowed_sources }}",restrict,command="/usr/local/sbin/icinga-linuxfabrik-check"
+          {{ monitor_public_key_file.content | b64decode | trim }}
+          {{ '\n' }}
+        owner: "{{ monitor_restricted_user }}"
+        group: "{{ monitor_restricted_user }}"
+        mode: "0600"
+      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+
+    - name: Cho phép key monitoring đăng nhập user ubuntu trên host triển khai cũ
       ansible.builtin.lineinfile:
         path: /home/ubuntu/.ssh/authorized_keys
         line: "{{ monitor_public_key_file.content | b64decode | trim }}"
@@ -59,6 +144,7 @@
         owner: ubuntu
         group: ubuntu
         mode: "0600"
+      when: inventory_hostname not in (groups['linuxfabrik_targets'] | default([]))
 
     - name: Quét SSH host key từ deployment node
       ansible.builtin.command:

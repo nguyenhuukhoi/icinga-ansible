@@ -160,6 +160,8 @@ enable_icingaweb2_modules:
 enable_check_by_ssh_target_plugins: false
 
 # Object do Director quản lý. Để rỗng mặc định; inventory/extra-vars của từng môi trường mới khai.
+# Mẫu đầy đủ cho OpenStack + custom vars xem:
+# ansible/inventory/openstack-cluster-director-extra.yml
 director_managed_hosts: []
 director_managed_services: []
 
