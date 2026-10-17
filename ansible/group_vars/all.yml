@@ -2,6 +2,11 @@
 # Biến mặc định + suy diễn. KHÔNG sửa trực tiếp — chỉnh trong etc/.../globals.yml.
 # =============================================================================
 
+# Python dùng để chạy module trên managed node. Venv /path/to/venv chỉ chạy Ansible CLI trên
+# deployment node; không dùng Python trong venv đó cho master/satellite/Galera. Project chỉ hỗ trợ
+# Ubuntu 24.04/26.04 nên /usr/bin/python3 luôn là interpreter ổn định trên host đích.
+ansible_python_interpreter: "/usr/bin/python3"
+
 # --- Version image: khai THẲNG trong globals.yml (icinga_image_versions) ----------------
 # KHÔNG còn "bộ phiên bản" (version_sets/version-matrix.yml) — Icinga phát hành từng thành phần
 # ĐỘC LẬP, không có bundle có tên chính thức như OpenStack/kolla, nên gom set là quy ước nhân tạo,
