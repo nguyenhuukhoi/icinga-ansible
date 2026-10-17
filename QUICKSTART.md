@@ -216,6 +216,9 @@ openstack-controller03 ansible_host=172.28.81.103 ansible_user=root ansible_ssh_
 openstack-compute01    ansible_host=172.28.81.104 ansible_user=root ansible_ssh_private_key_file=/home/ubuntu/.ssh/openstack-root
 openstack-compute02    ansible_host=172.28.81.105 ansible_user=root ansible_ssh_private_key_file=/home/ubuntu/.ssh/openstack-root
 openstack-compute03    ansible_host=172.28.81.106 ansible_user=root ansible_ssh_private_key_file=/home/ubuntu/.ssh/openstack-root
+
+[linuxfabrik_targets:vars]
+ansible_ssh_common_args='-o StrictHostKeyChecking=accept-new'
 ```
 
 Copy nội dung `ansible/inventory/openstack-cluster-director-extra.yml` vào `globals.yml`, hoặc truyền file

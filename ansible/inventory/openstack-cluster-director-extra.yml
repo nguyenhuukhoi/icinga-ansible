@@ -24,3 +24,7 @@ director_managed_services:
   - name: "Disk"
     check_command: "by_ssh_lfmp_disk"
     vars: { ssh_user: "icinga-monitor", lfmp_disk_warn: 90, lfmp_disk_crit: 95 }
+
+# Inventory (không phải globals.yml) cần thêm:
+# [linuxfabrik_targets:vars]
+# ansible_ssh_common_args='-o StrictHostKeyChecking=accept-new'

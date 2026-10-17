@@ -87,6 +87,16 @@
       become: false
       run_once: true
 
+    # Quét trước khi Ansible mở kết nối quản trị tới target. Nhờ vậy known_hosts
+    # runtime vẫn đầy đủ và không bị ghi thiếu nếu một target lỗi ở task sau.
+    - name: Quét SSH host key từ deployment node
+      ansible.builtin.command:
+        argv: [ssh-keyscan, -T, "10", -H, "{{ ansible_host }}"]
+      register: monitor_host_key
+      changed_when: false
+      delegate_to: localhost
+      become: false
+
   tasks:
     - name: Thu thập distribution facts tối thiểu trên Linuxfabrik target ngoài cụm
       ansible.builtin.setup:
@@ -178,20 +188,12 @@
         mode: "0600"
       when: inventory_hostname not in (groups['linuxfabrik_targets'] | default([]))
 
-    - name: Quét SSH host key từ deployment node
-      ansible.builtin.command:
-        argv: [ssh-keyscan, -T, "10", -H, "{{ ansible_host }}"]
-      register: monitor_host_key
-      changed_when: false
-      delegate_to: localhost
-      become: false
-
   post_tasks:
     - name: Ghi known_hosts riêng cho check_by_ssh
       ansible.builtin.copy:
         dest: "{{ monitor_key_dir }}/known_hosts"
         content: >-
-          {{ ansible_play_hosts
+          {{ ansible_play_hosts_all
              | map('extract', hostvars, 'monitor_host_key')
              | map(attribute='stdout')
              | reject('equalto', '')
