@@ -13,13 +13,15 @@ enable_check_by_ssh_target_plugins: true
 
 # Các object này được lưu trong Director DB, không render vào hosts.conf tĩnh.
 director_managed_hosts:
-  - { name: "icinga5-master1", address: "172.28.82.170", display_name: "Icinga master 1" }
-  - { name: "icinga5-master2", address: "172.28.82.171", display_name: "Icinga master 2" }
-  - { name: "icinga5-db1", address: "172.28.82.172", display_name: "Galera DB 1" }
-  - { name: "icinga5-db2", address: "172.28.82.173", display_name: "Galera DB 2" }
-  - { name: "icinga5-db3", address: "172.28.82.174", display_name: "Galera DB 3" }
+  - { name: "icinga5-master1", address: "172.28.82.170", display_name: "Icinga master 1", vars: { monitor_linuxfabrik: true } }
+  - { name: "icinga5-master2", address: "172.28.82.171", display_name: "Icinga master 2", vars: { monitor_linuxfabrik: true } }
+  - { name: "icinga5-db1", address: "172.28.82.172", display_name: "Galera DB 1", vars: { monitor_linuxfabrik: true } }
+  - { name: "icinga5-db2", address: "172.28.82.173", display_name: "Galera DB 2", vars: { monitor_linuxfabrik: true } }
+  - { name: "icinga5-db3", address: "172.28.82.174", display_name: "Galera DB 3", vars: { monitor_linuxfabrik: true } }
 
-director_managed_services:
-  - { name: "CPU", check_command: "by_ssh_lfmp_cpu" }
-  - { name: "RAM", check_command: "by_ssh_lfmp_memory" }
-  - { name: "Disk", check_command: "by_ssh_lfmp_disk" }
+director_managed_service_apply_rules:
+  - { name: "CPU", check_command: "by_ssh_lfmp_cpu", assign_filter: "host.vars.monitor_linuxfabrik=true" }
+  - { name: "RAM", check_command: "by_ssh_lfmp_memory", assign_filter: "host.vars.monitor_linuxfabrik=true" }
+  - { name: "Disk", check_command: "by_ssh_lfmp_disk", assign_filter: "host.vars.monitor_linuxfabrik=true" }
+
+director_managed_direct_services_absent: [CPU, RAM, Disk]

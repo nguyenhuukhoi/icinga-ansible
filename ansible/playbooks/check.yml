@@ -201,6 +201,89 @@
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
 
+    - name: Đọc Service Apply Rule từ Director REST API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ icingaweb2_http_port }}/director/serviceapplyrules"
+        method: GET
+        url_username: "{{ icingaweb2_admin_user }}"
+        url_password: "{{ icingaweb2_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Accept: application/json
+        return_content: true
+        status_code: 200
+      register: _director_apply_rules_health
+      no_log: true
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+        - (director_managed_service_apply_rules | default([]) | length) > 0
+
+    - name: Mỗi Service Apply Rule phải tồn tại đúng một lần và khớp cấu hình
+      ansible.builtin.assert:
+        that:
+          - >-
+            (_director_apply_rules_health.json.objects | default([])
+             | selectattr('object_name', 'equalto', item.name) | list | length) == 1
+          - >-
+            (_director_apply_rules_health.json.objects | default([])
+             | selectattr('object_name', 'equalto', item.name) | first).object_type == 'apply'
+          - >-
+            (_director_apply_rules_health.json.objects | default([])
+             | selectattr('object_name', 'equalto', item.name) | first).assign_filter == item.assign_filter
+          - >-
+            (_director_apply_rules_health.json.objects | default([])
+             | selectattr('object_name', 'equalto', item.name) | first).check_command == item.check_command
+          - >-
+            (_director_apply_rules_health.json.objects | default([])
+             | selectattr('object_name', 'equalto', item.name) | first).vars == (item.vars | default({}))
+        fail_msg: >-
+          Service Apply Rule '{{ item.name }}' bị thiếu, bị trùng hoặc lệch assign_filter/check command/vars.
+      loop: "{{ director_managed_service_apply_rules | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
+    - name: Kiểm tra Service object cũ đã được dọn khỏi từng host
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - icingaweb2
+          - icingacli
+          - director
+          - service
+          - exists
+          - "{{ item.1 }}"
+          - --host
+          - "{{ item.0.name }}"
+      loop: >-
+        {{ (director_managed_hosts | default([]))
+           | product(director_managed_direct_services_absent | default([])) | list }}
+      loop_control:
+        label: "{{ item.0.name }}/{{ item.1 }}"
+      register: _director_direct_services_absent_health
+      changed_when: false
+      failed_when: false
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
+    - name: Không được còn Service object cũ trùng với Apply Rule
+      ansible.builtin.assert:
+        that: item.rc == 1
+        fail_msg: >-
+          Service object trực tiếp '{{ item.item.1 }}' vẫn còn trên host
+          '{{ item.item.0.name }}'; nó sẽ chồng với Service Apply Rule.
+      loop: "{{ _director_direct_services_absent_health.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.0.name }}/{{ item.item.1 }}"
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
     - name: Tính chính xác endpoint và zone Director phải import từ topology hiện tại
       ansible.builtin.set_fact:
         _director_expected_endpoints: >-

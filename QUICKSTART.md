@@ -171,8 +171,8 @@ xem `design.md`).
 
 Inventory `ansible/inventory/ha-icinga5-director` là ví dụ đã chạy thực tế cho đúng mô hình này. File
 `ha-icinga5-director-extra.yml` bật Director, cài Linuxfabrik Monitoring Plugins trên các target và khai báo
-5 Host cùng 15 Service (CPU/RAM/Disk) trong database của Director, không sinh `Host`/`Service` tĩnh trong
-`zones.d`.
+5 Host cùng 3 **Service Apply Rule** (CPU/RAM/Disk) trong database của Director. Ba rule sinh ra tổng cộng
+15 service runtime, không tạo 15 Service object riêng và không sinh `Host`/`Service` tĩnh trong `zones.d`.
 
 Khi áp dụng cho môi trường khác, copy hai file mẫu, đổi IP và danh sách object rồi chạy theo thứ tự:
 
@@ -197,8 +197,30 @@ host key vào một `known_hosts` riêng. Nó không tái sử dụng SSH key qu
 được kickstart/migrate/deploy bằng CLI idempotent; chạy lại playbook không tạo object trùng.
 
 Ba CheckCommand dùng plugin chuẩn từ Linuxfabrik ở `/usr/lib64/nagios/plugins`: `cpu-usage`,
-`memory-usage`, `disk-usage`. Muốn đổi ngưỡng mặc định, đặt custom vars tương ứng trong Director:
-`lfmp_cpu_warn/crit`, `lfmp_memory_warn/crit`, `lfmp_disk_warn/crit`.
+`memory-usage`, `disk-usage`. Mỗi host cần monitor mang `vars.monitor_linuxfabrik: true`; ba Apply Rule dùng
+`assign_filter: "host.vars.monitor_linuxfabrik=true"` nên host mới tự nhận đủ CPU/RAM/Disk. Muốn đổi ngưỡng
+mặc định, đặt custom vars tương ứng trên Apply Rule: `lfmp_cpu_warn/crit`, `lfmp_memory_warn/crit`,
+`lfmp_disk_warn/crit`.
+
+Ví dụ tối thiểu trong extra-vars hoặc `globals.yml`:
+
+```yaml
+director_managed_hosts:
+  - name: "openstack-controller01"
+    address: "172.28.81.101"
+    vars: { monitor_linuxfabrik: true }
+
+director_managed_service_apply_rules:
+  - name: "CPU"
+    check_command: "by_ssh_lfmp_cpu"
+    assign_filter: "host.vars.monitor_linuxfabrik=true"
+    vars: { ssh_user: "icinga-monitor", lfmp_cpu_warn: 80, lfmp_cpu_crit: 90 }
+```
+
+`director_managed_services` vẫn dành cho Service object phải gắn trực tiếp vào từng host. Khi chuyển một
+deployment cũ sang Apply Rule, khai `director_managed_direct_services_absent: [CPU, RAM, Disk]`; role lưu
+Apply Rule, xoá các Service object cũ rồi deploy tất cả trong cùng một Director configuration. Danh sách này
+có thể giữ nguyên vì thao tác dọn là idempotent.
 
 ### 3.2. Monitor các node OpenStack bên ngoài cụm Icinga
 
@@ -222,8 +244,8 @@ ansible_ssh_common_args='-o StrictHostKeyChecking=accept-new'
 ```
 
 Copy nội dung `ansible/inventory/openstack-cluster-director-extra.yml` vào `globals.yml`, hoặc truyền file
-đó bằng `-e @...`. Các `vars` trên từng service được Director lưu cùng object, gồm user SSH và ngưỡng cảnh
-báo. Host check dùng TCP/22; service check dùng Linuxfabrik qua SSH.
+đó bằng `-e @...`. Các `vars` trên từng Service Apply Rule được Director lưu cùng rule, gồm user SSH và
+ngưỡng cảnh báo. Host check dùng TCP/22; service check dùng Linuxfabrik qua SSH.
 
 ```bash
 source /path/to/venv/bin/activate

@@ -1,7 +1,43 @@
 ---
-# Khai Host/Service bằng Director CLI sau khi Web + kickstart đã sẵn sàng. Director DB là source
-# of truth; role này không ghi object vào zones.d/hosts.conf tĩnh.
-- name: Upsert host do Director quản lý
+# Director DB is the source of truth. Hosts and legacy direct services use the
+# CLI. Service Apply Rules use the REST API because their names are not unique
+# object identifiers; Director exposes the rule UUIDs through a dedicated
+# serviceapplyrules endpoint.
+
+- name: Validate Director Service Apply Rule definitions
+  ansible.builtin.assert:
+    that:
+      - item.name | default('') | length > 0
+      - item.check_command | default('') | length > 0
+      - item.assign_filter | default('') | length > 0
+      - item.name is regex('^[A-Za-z0-9_. -]+$')
+    fail_msg: >-
+      Each director_managed_service_apply_rules entry requires a safe name,
+      check_command and Director assign_filter. Invalid entry: {{ item }}
+  loop: "{{ director_managed_service_apply_rules | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default('<unnamed>') }}"
+
+- name: Service Apply Rule names managed by Ansible must be unique
+  ansible.builtin.assert:
+    that:
+      - >-
+        (director_managed_service_apply_rules | default([]) | map(attribute='name') | unique | length)
+        == (director_managed_service_apply_rules | default([]) | length)
+      - >-
+        (director_managed_services | default([]) | map(attribute='name') | list)
+        | intersect(director_managed_service_apply_rules | default([]) | map(attribute='name') | list)
+        | length == 0
+      - >-
+        (director_managed_services | default([]) | map(attribute='name') | list)
+        | intersect(director_managed_direct_services_absent | default([]))
+        | length == 0
+    fail_msg: >-
+      Director service names are duplicated, or a direct service is also
+      declared as an Apply Rule/absent. Keep the three lists disjoint; Director
+      permits ambiguous combinations that cannot be reconciled safely.
+
+- name: Upsert Director-managed hosts
   ansible.builtin.command:
     argv:
       - docker
@@ -30,7 +66,9 @@
     'has been created' in (director_host_upsert.stdout | default('')) or
     'has been modified' in (director_host_upsert.stdout | default(''))
 
-- name: Upsert service CPU/RAM/disk do Director quản lý trên từng host
+# Kept for environments that intentionally need a service attached directly to
+# every managed host. New shared checks should use Service Apply Rules below.
+- name: Upsert Director-managed direct services on each host
   ansible.builtin.command:
     argv:
       - docker
@@ -61,7 +99,164 @@
     'has been created' in (director_service_upsert.stdout | default('')) or
     'has been modified' in (director_service_upsert.stdout | default(''))
 
-- name: Deploy Director configuration và chờ Icinga activate
+- name: Read existing Director Service Apply Rules
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ icingaweb2_http_port }}/director/serviceapplyrules"
+    method: GET
+    url_username: "{{ icingaweb2_admin_user }}"
+    url_password: "{{ icingaweb2_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Accept: application/json
+    return_content: true
+    status_code: 200
+  register: _director_apply_rules_before
+  no_log: true
+  when: (director_managed_service_apply_rules | default([]) | length) > 0
+
+- name: Refuse ambiguous duplicate Service Apply Rules
+  ansible.builtin.assert:
+    that:
+      - >-
+        (_director_apply_rules_before.json.objects | default([])
+         | selectattr('object_name', 'equalto', item.name) | list | length) <= 1
+    fail_msg: >-
+      Director already contains more than one Service Apply Rule named
+      '{{ item.name }}'. Remove the duplicate rules by UUID before deploying.
+  loop: "{{ director_managed_service_apply_rules | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create missing Director Service Apply Rules
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ icingaweb2_http_port }}/director/service"
+    method: POST
+    url_username: "{{ icingaweb2_admin_user }}"
+    url_password: "{{ icingaweb2_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Accept: application/json
+    body_format: json
+    body: >-
+      {{ {'object_name': item.name,
+          'object_type': 'apply',
+          'assign_filter': item.assign_filter,
+          'check_command': item.check_command,
+          'display_name': item.display_name | default(item.name),
+          'imports': item.imports | default([]),
+          'vars': item.vars | default({})} }}
+    status_code: 201
+  loop: "{{ director_managed_service_apply_rules | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: >-
+    (_director_apply_rules_before.json.objects | default([])
+     | selectattr('object_name', 'equalto', item.name) | list | length) == 0
+  changed_when: true
+  no_log: true
+
+- name: Refresh Director Service Apply Rule UUIDs
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ icingaweb2_http_port }}/director/serviceapplyrules"
+    method: GET
+    url_username: "{{ icingaweb2_admin_user }}"
+    url_password: "{{ icingaweb2_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Accept: application/json
+    return_content: true
+    status_code: 200
+  register: _director_apply_rules_after
+  no_log: true
+  when: (director_managed_service_apply_rules | default([]) | length) > 0
+
+- name: Each managed Service Apply Rule must resolve to exactly one UUID
+  ansible.builtin.assert:
+    that:
+      - >-
+        (_director_apply_rules_after.json.objects | default([])
+         | selectattr('object_name', 'equalto', item.name) | list | length) == 1
+    fail_msg: >-
+      Service Apply Rule '{{ item.name }}' did not resolve to exactly one UUID
+      after creation. Refusing an unsafe update.
+  loop: "{{ director_managed_service_apply_rules | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Reconcile Director Service Apply Rules by UUID
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ icingaweb2_http_port }}/director/service?uuid={{
+      (_director_apply_rules_after.json.objects | default([])
+       | selectattr('object_name', 'equalto', item.name) | first).uuid | urlencode }}
+    method: PUT
+    url_username: "{{ icingaweb2_admin_user }}"
+    url_password: "{{ icingaweb2_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Accept: application/json
+    body_format: json
+    body: >-
+      {{ {'object_name': item.name,
+          'object_type': 'apply',
+          'assign_filter': item.assign_filter,
+          'check_command': item.check_command,
+          'display_name': item.display_name | default(item.name),
+          'imports': item.imports | default([]),
+          'vars': item.vars | default({})} }}
+    status_code: [200, 304]
+  loop: "{{ director_managed_service_apply_rules | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _director_apply_rule_reconcile
+  # Director 1.11 returns HTTP 200 even when PUT is byte-for-byte identical.
+  # The subsequent config deploy reports whether rendered Icinga config changed.
+  changed_when: false
+  no_log: true
+
+- name: Check legacy direct services selected for migration
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - icingaweb2
+      - icingacli
+      - director
+      - service
+      - exists
+      - "{{ item.1 }}"
+      - --host
+      - "{{ item.0.name }}"
+  loop: >-
+    {{ (director_managed_hosts | default([]))
+       | product(director_managed_direct_services_absent | default([])) | list }}
+  loop_control:
+    label: "{{ item.0.name }}/{{ item.1 }}"
+  register: _director_legacy_service_exists
+  changed_when: false
+  failed_when: _director_legacy_service_exists.rc not in [0, 1]
+
+- name: Remove legacy direct services replaced by Apply Rules
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - icingaweb2
+      - icingacli
+      - director
+      - service
+      - delete
+      - "{{ item.item.1 }}"
+      - --host
+      - "{{ item.item.0.name }}"
+  loop: "{{ _director_legacy_service_exists.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.0.name }}/{{ item.item.1 }}"
+  when: item.rc == 0
+  register: _director_legacy_service_delete
+  changed_when: "'has been deleted' in (_director_legacy_service_delete.stdout | default(''))"
+
+- name: Deploy Director configuration and wait for Icinga activation
   ansible.builtin.command:
     argv:
       - docker
@@ -78,7 +273,7 @@
     'nothing to do' not in (director_config_deploy.stdout | lower) and
     'matches last deployed one' not in (director_config_deploy.stdout | lower)
 
-- name: Xác minh Director health sau deploy
+- name: Verify Director health after deployment
   ansible.builtin.command:
     argv: [docker, exec, icingaweb2, icingacli, director, health, check]
   register: director_health
