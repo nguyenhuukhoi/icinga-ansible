@@ -245,9 +245,20 @@ cd /home/ubuntu/icinga-ansible
   -i ansible/inventory/ha-lab-2master-galera3
 ```
 
-Không dùng private key quản trị OpenStack làm runtime key của Icinga. `id_monitor` chỉ nằm trên deployment
-node và được Ansible copy read-only vào container Icinga 2. `authorized_keys` của `icinga-monitor` dùng cả
-`from=`, `restrict` và `command=`; dù key bị lộ, nó không mở shell và không chạy được lệnh ngoài ba plugin.
+Không dùng private key quản trị OpenStack làm runtime key của Icinga. Có hai đường dẫn SSH cố ý khác nhau:
+
+- `/etc/icinga-ansible/config/icinga2/ssh/` trên deployment node là **nguồn cấu hình** do người vận hành
+  quản lý. `prepare-check-by-ssh` tạo `id_monitor`, `id_monitor.pub` và `known_hosts` tại đây; `backup-full`
+  sao lưu thư mục này.
+- `/etc/icinga-ansible/icinga2/ssh/` trên mỗi node chạy Icinga 2 là **bản runtime** do Ansible đồng bộ từ
+  nguồn trên. Bản này có thể tái tạo bằng `reconfigure` và được mount read-only vào container tại
+  `/etc/icinga2/ssh/`.
+
+Nếu deployment node là máy riêng, không thuộc group `[master]` hoặc `[satellite]`, nó chỉ cần thư mục nguồn
+dưới `config/`. Thư mục runtime không được tạo mới trên deployment node; nếu còn ở đó thì thường là dữ liệu
+sót lại từ lúc máy từng đồng thời làm master hoặc từng được đưa vào inventory dịch vụ. `authorized_keys` của
+`icinga-monitor` dùng cả `from=`, `restrict` và `command=`; dù runtime key bị lộ, nó không mở shell và không
+chạy được lệnh ngoài ba plugin.
 
 Kiểm tra 18 service sau khi Director deploy (script chấp nhận prefix và số service để dùng lại cho cụm khác):
 
