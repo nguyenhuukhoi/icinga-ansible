@@ -19,7 +19,8 @@
       {{ {'object_type': 'object',
           'address': item.address,
           'display_name': item.display_name | default(item.name),
-          'check_command': item.check_command | default('hostalive')}
+          'check_command': item.check_command | default('hostalive'),
+          'vars': item.vars | default({})}
          | to_json }}
   loop: "{{ director_managed_hosts | default([]) }}"
   loop_control:
@@ -48,7 +49,8 @@
     stdin: >-
       {{ {'object_type': 'object', 'host': item.0.name,
           'check_command': item.1.check_command,
-          'display_name': item.1.display_name | default(item.1.name)} | to_json }}
+          'display_name': item.1.display_name | default(item.1.name),
+          'vars': item.1.vars | default({})} | to_json }}
   loop: >-
     {{ (director_managed_hosts | default([]))
        | product(director_managed_services | default([])) | list }}
