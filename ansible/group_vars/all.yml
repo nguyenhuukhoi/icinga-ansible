@@ -97,7 +97,7 @@ satellite_zones: []
 # Default cho user Việt Nam — override trong globals.yml nếu cần múi giờ khác.
 icingaweb2_timezone: "Asia/Ho_Chi_Minh"
 
-# --- Proxy (rỗng nếu không khai proxy_http trong globals.yml) ------------------
+# --- Proxy (globals override; mặc định dùng /etc/environment của managed node) -
 # proxy_group_overrides (2026-09-13, tuỳ chọn — khai trong globals.yml): override proxy RIÊNG cho
 # từng nhóm vai trò (master/satellite/galera/client) — dùng khi các nhóm nằm ở mạng khác nhau, mỗi
 # mạng ra Internet qua 1 proxy riêng (hoặc 1 nhóm không cần proxy dù nhóm khác cần). Field nào không
@@ -128,13 +128,38 @@ proxy_no_proxy_effective: >-
   {{ (proxy_group_overrides[_proxy_group_match].no_proxy | default(proxy_no_proxy))
      if _proxy_group_match | length > 0 else proxy_no_proxy }}
 
-# Dùng làm "environment:" cho task apt/get_url lúc bootstrap + systemd drop-in Docker daemon
-# (roles/common) và env container icinga2 (traffic Telegram/webhook ra ngoài, xem roles/icinga2) —
-# TẤT CẢ đã đổi sang đọc *_effective ở trên thay vì proxy_http/https/no_proxy thẳng, để override
-# theo nhóm có tác dụng ở mọi nơi dùng proxy trong dự án, không chỉ 1 chỗ.
+# Một nguồn proxy đơn giản như host Kolla: nếu globals.yml không khai proxy_http thì dùng proxy đã
+# được PAM nạp từ /etc/environment vào facts.env trên managed node. Khi globals.yml có khai proxy,
+# giá trị explicit (kể cả proxy_group_overrides) vẫn ưu tiên và common role ghi nó vào
+# /etc/environment. Không lấy no_proxy mặc định của globals khi đang fallback, vì làm vậy sẽ trộn
+# hai nguồn và có thể làm mất NO_PROXY thực tế của host.
+_managed_host_environment: "{{ ansible_facts.env | default({}) }}"
+proxy_http_runtime: >-
+  {{ proxy_http_effective
+     if (proxy_http_effective | default('')) | length > 0
+     else (_managed_host_environment.get('http_proxy', '') or
+           _managed_host_environment.get('HTTP_PROXY', '')) }}
+proxy_https_runtime: >-
+  {{ proxy_https_effective
+     if (proxy_http_effective | default('')) | length > 0
+     else (_managed_host_environment.get('https_proxy', '') or
+           _managed_host_environment.get('HTTPS_PROXY', '')) }}
+proxy_no_proxy_runtime: >-
+  {{ proxy_no_proxy_effective
+     if (proxy_http_effective | default('')) | length > 0
+     else (_managed_host_environment.get('no_proxy', '') or
+           _managed_host_environment.get('NO_PROXY', '')) }}
+
+# Dùng cho task apt/get_url và env container icinga2 (Telegram/webhook). Biến được đánh giá lazy
+# sau gather_facts nên facts.env đã có proxy từ /etc/environment; lúc fact gathering chưa xong,
+# dictionary rỗng {} không ghi đè môi trường mà PAM của SSH/sudo đã nạp.
 proxy_environment: >-
-  {{ {'http_proxy': proxy_http_effective, 'https_proxy': proxy_https_effective, 'no_proxy': proxy_no_proxy_effective}
-     if (proxy_http_effective | default('')) | length > 0 else {} }}
+  {{ {'http_proxy': proxy_http_runtime,
+      'https_proxy': proxy_https_runtime,
+      'no_proxy': proxy_no_proxy_runtime}
+     if ((proxy_http_runtime | default('')) | length > 0 or
+         (proxy_https_runtime | default('')) | length > 0)
+     else {} }}
 
 # --- Image helper -------------------------------------------------------------
 # registry_prefix: mirror riêng nếu có (docker_registry), rỗng = public Docker Hub.

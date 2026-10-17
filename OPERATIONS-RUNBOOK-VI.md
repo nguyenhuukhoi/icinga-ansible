@@ -205,24 +205,27 @@ Tối thiểu cần xem xét:
 
 Không public MariaDB, Galera hoặc Redis ra Internet. Web production nên đi qua reverse proxy/LB có TLS thay vì public thẳng HTTP 8080.
 
-Nếu các host đi Internet qua proxy, khai `proxy_http`, `proxy_https`, `proxy_no_proxy`. Có thể dùng `proxy_group_overrides` cho từng group `master`, `satellite`, `galera`, `client`.
+Nếu các host đi Internet qua proxy, chỉ cần khai HTTP/HTTPS/NO_PROXY trong `/etc/environment` trên
+từng managed node. `globals.yml` có thể để trống proxy. Chỉ dùng `proxy_http`, `proxy_https`,
+`proxy_no_proxy` và `proxy_group_overrides` khi muốn playbook tự quản file này hoặc cần giá trị khác
+nhau cho từng group `master`, `satellite`, `galera`, `client`.
 
-Ví dụ cấu hình đã kiểm thử trên lab OpenStack:
+Ví dụ `/etc/environment` đã kiểm thử trên lab OpenStack:
 
-```yaml
-proxy_http: "http://proxy.example.vn:80"
-proxy_https: "http://proxy.example.vn:80"
-proxy_no_proxy: "localhost,127.0.0.1,::1,10.20.0.0/24"
-proxy_group_overrides: {}
+```ini
+http_proxy="http://proxy.example.vn:80"
+https_proxy="http://proxy.example.vn:80"
+HTTP_PROXY="http://proxy.example.vn:80"
+HTTPS_PROXY="http://proxy.example.vn:80"
+no_proxy="localhost,127.0.0.1,::1,10.20.0.0/24"
+NO_PROXY="localhost,127.0.0.1,::1,10.20.0.0/24"
 ```
 
-`bootstrap-servers` truyền proxy trực tiếp vào các task `apt`, tải key/repository, đồng thời ghi proxy
-vào môi trường hệ thống và Docker daemon. Việc truyền trực tiếp là bắt buộc trong lần chạy đầu vì
-SSH/Ansible process hiện tại chưa tự đọc lại `/etc/environment`. Sau khi đổi proxy, chạy lại
-`bootstrap-servers`, rồi xác nhận `systemctl show docker --property=Environment` trên từng node.
-Playbook còn tạo `/etc/systemd/system/esm-cache.service.d/http-proxy.conf` để Ubuntu Pro ESM cache
-dùng cùng proxy. System service này không tự đọc `/etc/environment`; thiếu drop-in có thể tạo log
-`contracts.canonical.com ... Network is unreachable` trong lúc hoặc sau khi chạy `apt`.
+`bootstrap-servers` dùng proxy mà PAM đã nạp từ `/etc/environment` cho các task `apt` và tải
+key/repository. Playbook tạo systemd drop-in `EnvironmentFile=-/etc/environment` cho cả Docker và
+Ubuntu Pro ESM cache, nên operator vẫn chỉ duy trì một file. Sau khi sửa file, chạy lại
+`bootstrap-servers`, rồi dùng `systemctl cat docker.service` và `systemctl cat esm-cache.service`
+xác nhận cả hai drop-in có `EnvironmentFile=-/etc/environment` trên từng node.
 Lệnh `pull` luôn kiểm tra lại digest và retry tối đa 8 lần, cách nhau 10 giây, cho từng image. Retry này
 xử lý lỗi tạm thời 429/5xx từ registry/CDN; nếu hết retry vẫn lỗi thì không có runtime nào bị thay đổi.
 Trong lab, truy cập Docker Hub trực tiếp bị timeout, đi qua proxy nhận phản hồi registry hợp lệ; pull đủ

@@ -14,7 +14,8 @@
   hosts: all_hosts
   become: true
   gather_facts: true
-  environment: "{{ proxy_environment }}"   # rỗng {} nếu không khai proxy_http — an toàn
+  # Ưu tiên globals; nếu để trống thì sau gather_facts dùng /etc/environment của managed node.
+  environment: "{{ proxy_environment }}"
   roles:
     - role: common
       tags: [bootstrap]

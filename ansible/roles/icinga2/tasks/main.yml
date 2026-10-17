@@ -1430,8 +1430,8 @@
     # biệt do rule mạng/host chỉ áp dụng transparent-proxy cho tiến trình host, không áp dụng cho
     # container). Trước đây `proxy_environment` chỉ dùng cho bootstrap (apt/Docker daemon) — giờ
     # gắn thêm vào container icinga2 để mọi script gọi ra ngoài (Telegram, webhook tương lai...) tự
-    # đi qua proxy mà không cần tự cấu hình trong từng script. Rỗng {} nếu không khai proxy_http —
-    # an toàn, không đổi hành vi cho môi trường có Internet trực tiếp.
+    # đi qua proxy mà không cần tự cấu hình trong từng script. Khi globals không khai proxy, biến
+    # này lấy từ /etc/environment qua facts.env; nếu host không có proxy thì vẫn là {}.
     env: "{{ proxy_environment | combine({'ICINGA_ANSIBLE_CONFIG_FINGERPRINT': _ic_config_fingerprint}) }}"
     # BUG THẬT ĐÃ GẶP (đọc trước khi đổi lại volumes:): so sánh mặc định của docker_container cho
     # "volumes" chỉ phát hiện mount MỚI THÊM, KHÔNG phát hiện mount bị RÚT BỚT khỏi list -> xoá 1

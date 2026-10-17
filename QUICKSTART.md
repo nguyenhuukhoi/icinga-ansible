@@ -201,8 +201,23 @@ Ba CheckCommand dùng plugin chuẩn từ Linuxfabrik ở `/usr/lib64/nagios/plu
 
 ## 4. Nếu host đích ở sau proxy công ty
 
-Nếu host đích không ra Internet trực tiếp mà phải qua proxy (để `apt`/Docker pull image), khai
-trong `/etc/icinga-ansible/globals.yml` **trước khi** chạy `bootstrap-servers`:
+Nếu host đích không ra Internet trực tiếp, cách đơn giản nhất là khai trên **từng managed node**
+trong `/etc/environment`:
+
+```ini
+http_proxy="http://proxy.example.internal:3128"
+https_proxy="http://proxy.example.internal:3128"
+HTTP_PROXY="http://proxy.example.internal:3128"
+HTTPS_PROXY="http://proxy.example.internal:3128"
+no_proxy="localhost,127.0.0.1,::1,10.0.0.0/24"
+NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/24"
+```
+
+Không cần khai lại proxy trong `globals.yml`. `bootstrap-servers` dùng môi trường của managed node
+cho `apt`/`get_url`, đồng thời cấu hình Docker và Ubuntu Pro ESM cache đọc chính file này.
+
+Nếu muốn Ansible tự ghi `/etc/environment`, hoặc mỗi nhóm node dùng proxy khác nhau, có thể khai
+tuỳ chọn trong `/etc/icinga-ansible/globals.yml` **trước khi** chạy `bootstrap-servers`:
 
 ```yaml
 proxy_http:  "http://proxy.example.internal:3128"
@@ -213,10 +228,9 @@ proxy_no_proxy: "localhost,127.0.0.1,::1,10.0.0.0/24"   # thêm subnet nội b�
 Proxy này chỉ áp dụng cho traffic RA NGOÀI (cài gói, pull image) — traffic nội bộ giữa các node
 trong cụm (`no_proxy`) không đi qua proxy.
 
-Khi có proxy, `bootstrap-servers` cũng tạo systemd drop-in cho `esm-cache.service` của Ubuntu Pro.
-Việc này cần thiết vì system service không tự đọc `/etc/environment`; nếu thiếu drop-in, Ubuntu có
-thể ghi lỗi `ubuntupro.lib.esm_cache ... contracts.canonical.com ... Network is unreachable` dù
-các task `apt` của Ansible vẫn đang dùng proxy đúng cách.
+`bootstrap-servers` tạo systemd drop-in `EnvironmentFile=-/etc/environment` cho Docker và
+`esm-cache.service`. Đây là phần nối systemd vào cùng một nguồn cấu hình; operator vẫn chỉ cần duy
+trì `/etc/environment`. Sau khi sửa file, chạy lại `bootstrap-servers` để Docker nạp giá trị mới.
 
 ### 4.1. Proxy khác nhau cho từng nhóm node (master/satellite/galera/client)
 
@@ -769,8 +783,8 @@ $EDITOR ansible/inventory/my-cluster    # xoá host đó khỏi inventory
 | `The module interpreter '/path/to/venv/bin/python...' was not found` trên `master1`/managed node | Đã gán nhầm venv của deployment node vào `ansible_python_interpreter` của managed node | Xoá biến đó khỏi inventory/group_vars hoặc đặt `/usr/bin/python3`. Chỉ deployment node dùng `source /path/to/venv/bin/activate` |
 | `unreachable` khi chạy trên nhiều host | Bạn chạy `icinga-ansible` qua `sudo`/`sudo su` — SSH ra host khác dùng nhầm key của root | Chạy lại bằng user thường (có sudo passwordless), không bọc `sudo` trước cả câu lệnh |
 | `deploy` báo thiếu thư mục (`directory ... does not exist`) trên host mới/vừa `destroy` | Host đó chưa từng chạy `bootstrap-servers` | Chạy `bootstrap-servers` trước, rồi `deploy` lại |
-| `apt update`/`docker pull` treo mãi không xong | Thiếu cấu hình proxy dù host sau proxy công ty | Khai `proxy_http`/`proxy_https`/`proxy_no_proxy` trong `globals.yml` (mục 4), chạy lại |
-| Journal có `ubuntupro.lib.esm_cache` / `contracts.canonical.com` / `Network is unreachable` | `esm-cache.service` không có Internet trực tiếp hoặc chưa nhận proxy | Khai đủ `proxy_http` và `proxy_https`, chạy lại `bootstrap-servers`; kiểm tra `systemctl show esm-cache.service -p Environment` |
+| `apt update`/`docker pull` treo mãi không xong | Thiếu proxy trong `/etc/environment` trên managed node | Khai đủ HTTP/HTTPS/NO_PROXY theo mục 4, chạy lại `bootstrap-servers` |
+| Journal có `ubuntupro.lib.esm_cache` / `contracts.canonical.com` / `Network is unreachable` | `esm-cache.service` chưa được nối với `/etc/environment`, hoặc proxy không truy cập được | Cập nhật code, chạy lại `bootstrap-servers`; dùng `systemctl cat esm-cache.service` kiểm tra dòng `EnvironmentFile=-/etc/environment`, rồi start service và đọc journal |
 | `permission denied` khi gọi `docker ...` tay trên host | User chưa vào group `docker`/chưa `sudo` | Ansible tự `become` đúng lúc cần — nếu bạn tự gõ lệnh `docker` tay thì phải tự thêm `sudo` |
 | Web login báo lỗi, hoặc không load được trang | Nhầm cổng — web chạy ở **8080**, không phải 80/443 mặc định | Kiểm tra lại URL `http://<ip>:8080/authentication/login` |
 | Container `icingadb` cứ `Restarting`, log `FATAL ... unexpected database schema version: vX (expected vY)` (hoặc `unexpected Redis schema version`) | Đổi `icinga_image_versions.icingadb` sang bản mới hơn (khác thế hệ schema) qua `deploy`/`reconfigure` thẳng, chưa migrate DB | Xem mục 9.1 ngay dưới — migrate tay hoặc chạy `icinga-ansible upgrade` |

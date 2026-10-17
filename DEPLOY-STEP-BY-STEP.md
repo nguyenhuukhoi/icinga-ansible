@@ -115,7 +115,7 @@ ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
 '
 ```
 
-## 5. Khởi tạo cấu hình + proxy cho Docker (nếu cần)
+## 5. Khởi tạo cấu hình
 
 ```bash
 ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
@@ -123,14 +123,13 @@ ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
   source /path/to/venv/bin/activate
   ./tools/icinga-ansible init-config
   ./tools/icinga-ansible genpwd
-
-  sudo sed -i \
-    -e "s|^proxy_http:.*|proxy_http:  \"http://<proxy>:80\"|" \
-    -e "s|^proxy_https:.*|proxy_https: \"http://<proxy>:80\"|" \
-    -e "s|^proxy_no_proxy:.*|proxy_no_proxy: \"localhost,127.0.0.1,::1,<subnet-lab>/24\"|" \
-    /etc/icinga-ansible/globals.yml
 '
 ```
+
+Nếu hạ tầng dùng proxy, khai HTTP/HTTPS/NO_PROXY trong `/etc/environment` trên từng managed node
+trước bước bootstrap. Không cần lặp lại trong `globals.yml`; `bootstrap-servers` nối Docker và
+Ubuntu Pro ESM cache vào chính file này. Chỉ dùng các biến proxy trong `globals.yml` khi muốn
+Ansible tự quản `/etc/environment` hoặc cần `proxy_group_overrides`.
 
 ## 6. bootstrap-servers → prechecks → deploy → post-deploy
 

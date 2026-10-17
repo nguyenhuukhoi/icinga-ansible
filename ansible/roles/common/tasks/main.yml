@@ -46,48 +46,39 @@
   when: (proxy_http_effective | default('')) | length == 0
   tags: [bootstrap]
 
-# /etc/environment chỉ được PAM nạp cho login session; systemd system service không tự đọc file
-# này. Ubuntu 24.04 chạy esm-cache.service sau một số thao tác apt, vì vậy service từng bỏ qua proxy
-# của project rồi cố kết nối thẳng contracts.canonical.com và ghi Errno 101 vào journal. Drop-in
-# được tạo trước task apt đầu tiên để cả lần bootstrap hiện tại cũng dùng đúng proxy.
+# PAM của Ubuntu nạp /etc/environment cho SSH và sudo, nhưng systemd system service không tự đọc
+# file đó. Dùng EnvironmentFile giữ /etc/environment là MỘT nguồn duy nhất cho operator, đồng thời
+# cho esm-cache.service và Docker daemon dùng đúng nguồn này. Checksum trong drop-in làm thay đổi
+# file khi operator sửa /etc/environment rồi chạy lại bootstrap, nhờ đó handler restart Docker.
+- name: (bootstrap) Đọc checksum /etc/environment
+  ansible.builtin.stat:
+    path: /etc/environment
+    checksum_algorithm: sha256
+  register: _system_environment_file
+  tags: [bootstrap]
+
 - name: (bootstrap) Tạo thư mục systemd drop-in cho Ubuntu Pro ESM cache
   ansible.builtin.file:
     path: /etc/systemd/system/esm-cache.service.d
     state: directory
     mode: "0755"
-  when: (proxy_http_effective | default('')) | length > 0
   tags: [bootstrap]
 
-- name: (bootstrap) Cấu hình proxy cho Ubuntu Pro ESM cache
+- name: (bootstrap) Cho Ubuntu Pro ESM cache đọc /etc/environment
   ansible.builtin.copy:
     dest: /etc/systemd/system/esm-cache.service.d/http-proxy.conf
     mode: "0600"
     content: |
       [Service]
-      Environment="http_proxy={{ proxy_http_effective }}"
-      Environment="https_proxy={{ proxy_https_effective }}"
-      Environment="HTTP_PROXY={{ proxy_http_effective }}"
-      Environment="HTTPS_PROXY={{ proxy_https_effective }}"
-      Environment="no_proxy={{ proxy_no_proxy_effective }}"
-      Environment="NO_PROXY={{ proxy_no_proxy_effective }}"
+      # /etc/environment sha256={{ _system_environment_file.stat.checksum | default('missing') }}
+      EnvironmentFile=-/etc/environment
   register: _ubuntu_pro_proxy_dropin
-  when: (proxy_http_effective | default('')) | length > 0
-  tags: [bootstrap]
-
-- name: (bootstrap) Xoá proxy Ubuntu Pro ESM cache khi đã tắt proxy
-  ansible.builtin.file:
-    path: /etc/systemd/system/esm-cache.service.d/http-proxy.conf
-    state: absent
-  register: _ubuntu_pro_proxy_removed
-  when: (proxy_http_effective | default('')) | length == 0
   tags: [bootstrap]
 
 - name: (bootstrap) Nạp lại systemd sau khi đổi proxy Ubuntu Pro ESM cache
   ansible.builtin.systemd_service:
     daemon_reload: true
-  when: >-
-    (_ubuntu_pro_proxy_dropin is defined and _ubuntu_pro_proxy_dropin.changed) or
-    (_ubuntu_pro_proxy_removed is defined and _ubuntu_pro_proxy_removed.changed)
+  when: _ubuntu_pro_proxy_dropin.changed
   tags: [bootstrap]
 
 - name: (bootstrap) Cài chrony + phụ thuộc Docker
@@ -96,10 +87,7 @@
     update_cache: true
     lock_timeout: 300
     state: present
-  environment:
-    http_proxy: "{{ proxy_http_effective }}"
-    https_proxy: "{{ proxy_https_effective }}"
-    no_proxy: "{{ proxy_no_proxy_effective }}"
+  environment: "{{ proxy_environment }}"
   register: _bootstrap_base_packages_result
   retries: 8
   delay: 10
@@ -121,10 +109,7 @@
     url: https://repo.linuxfabrik.ch/linuxfabrik.key
     dest: /etc/apt/keyrings/linuxfabrik.asc
     mode: "0644"
-  environment:
-    http_proxy: "{{ proxy_http_effective }}"
-    https_proxy: "{{ proxy_https_effective }}"
-    no_proxy: "{{ proxy_no_proxy_effective }}"
+  environment: "{{ proxy_environment }}"
   register: _bootstrap_linuxfabrik_key_result
   retries: 8
   delay: 10
@@ -140,10 +125,7 @@
       {{ ansible_distribution_release }}-release main
     filename: linuxfabrik-monitoring-plugins
     state: present
-  environment:
-    http_proxy: "{{ proxy_http_effective }}"
-    https_proxy: "{{ proxy_https_effective }}"
-    no_proxy: "{{ proxy_no_proxy_effective }}"
+  environment: "{{ proxy_environment }}"
   register: _bootstrap_linuxfabrik_repo_result
   retries: 8
   delay: 10
@@ -157,10 +139,7 @@
     update_cache: true
     lock_timeout: 300
     state: present
-  environment:
-    http_proxy: "{{ proxy_http_effective }}"
-    https_proxy: "{{ proxy_https_effective }}"
-    no_proxy: "{{ proxy_no_proxy_effective }}"
+  environment: "{{ proxy_environment }}"
   register: _bootstrap_linuxfabrik_packages_result
   retries: 8
   delay: 10
@@ -182,39 +161,21 @@
   failed_when: false
   tags: [bootstrap]
 
-- name: (bootstrap) Cấu hình proxy cho Docker daemon (systemd drop-in) — chỉ khi khai proxy_http hiệu lực
-  when: (proxy_http_effective | default('')) | length > 0
-  tags: [bootstrap]
-  block:
-    - name: Tạo thư mục drop-in docker.service.d
-      ansible.builtin.file:
-        path: /etc/systemd/system/docker.service.d
-        state: directory
-        mode: "0755"
-    - name: Ghi http-proxy.conf cho Docker daemon
-      # mode 0600 (không phải 0644 mặc định trước đây) — proxy_http/proxy_https có thể chứa
-      # Basic-Auth credential (dạng "http://user:pass@proxy:3128", format chuẩn của biến http_proxy,
-      # hợp lý với đúng use-case "mỗi nhóm 1 proxy riêng" mà proxy_group_overrides phục vụ). Khác
-      # /etc/environment ngay trên (BẮT BUỘC world-readable để pam_env đọc được cho MỌI user đăng
-      # nhập — hạn chế chung của Linux, không phải bug riêng ở đây), file drop-in systemd này CHỈ cần
-      # root đọc được (systemd đọc lúc start docker.service bằng quyền root) — siết mode không phá gì.
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/docker.service.d/http-proxy.conf
-        mode: "0600"
-        content: |
-          [Service]
-          Environment="HTTP_PROXY={{ proxy_http_effective }}"
-          Environment="HTTPS_PROXY={{ proxy_https_effective }}"
-          Environment="NO_PROXY={{ proxy_no_proxy_effective }}"
-      notify:
-        - Reload systemd daemon
-        - Restart docker
-
-- name: (bootstrap) Xoá Docker proxy drop-in khi đã tắt proxy
+- name: (bootstrap) Tạo thư mục drop-in docker.service.d
   ansible.builtin.file:
-    path: /etc/systemd/system/docker.service.d/http-proxy.conf
-    state: absent
-  when: (proxy_http_effective | default('')) | length == 0
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    mode: "0755"
+  tags: [bootstrap]
+
+- name: (bootstrap) Cho Docker daemon đọc /etc/environment
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker.service.d/http-proxy.conf
+    mode: "0600"
+    content: |
+      [Service]
+      # /etc/environment sha256={{ _system_environment_file.stat.checksum | default('missing') }}
+      EnvironmentFile=-/etc/environment
   notify:
     - Reload systemd daemon
     - Restart docker
@@ -233,10 +194,7 @@
         url: https://download.docker.com/linux/ubuntu/gpg
         dest: /etc/apt/keyrings/docker.asc
         mode: "0644"
-      environment:
-        http_proxy: "{{ proxy_http_effective }}"
-        https_proxy: "{{ proxy_https_effective }}"
-        no_proxy: "{{ proxy_no_proxy_effective }}"
+      environment: "{{ proxy_environment }}"
       register: _bootstrap_docker_key_result
       retries: 8
       delay: 10
@@ -246,10 +204,7 @@
         repo: "deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         filename: docker
         state: present
-      environment:
-        http_proxy: "{{ proxy_http_effective }}"
-        https_proxy: "{{ proxy_https_effective }}"
-        no_proxy: "{{ proxy_no_proxy_effective }}"
+      environment: "{{ proxy_environment }}"
       register: _bootstrap_docker_repo_result
       retries: 8
       delay: 10
@@ -260,10 +215,7 @@
         update_cache: true
         lock_timeout: 300
         state: present
-      environment:
-        http_proxy: "{{ proxy_http_effective }}"
-        https_proxy: "{{ proxy_https_effective }}"
-        no_proxy: "{{ proxy_no_proxy_effective }}"
+      environment: "{{ proxy_environment }}"
       register: _bootstrap_docker_packages_result
       retries: 8
       delay: 10

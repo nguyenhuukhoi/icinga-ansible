@@ -12,10 +12,11 @@ base_distro: "ubuntu"                          # ubuntu 24.04 / 26.04
 network_interface: "eth0"                       # interface mặc định để bind
 icinga_internal_vip_address: ""                 # VIP web (443) khi có loadbalancer; để trống nếu không
 
-# Proxy — để trống nếu host có internet trực tiếp. Khi khai proxy_http, áp dụng cho:
-#   (1) apt/get_url lúc bootstrap-servers (cài Docker Engine, gói OS)
-#   (2) Docker daemon (pull image icinga2/icingadb/icingaweb2/mariadb/redis...)
-# KHÔNG áp dụng lại proxy cho traffic nội bộ cluster (10.0.0.0/24, localhost...) — xem no_proxy.
+# Proxy tuỳ chọn. Có thể để trống proxy_http/proxy_https và chỉ khai proxy trong /etc/environment
+# trên từng managed node (cách vận hành đơn giản như host chạy Kolla); playbook tự dùng môi trường đó cho
+# apt/get_url, Docker daemon, Ubuntu Pro ESM cache và container Icinga 2. Chỉ khai ở đây khi muốn
+# Ansible tự ghi /etc/environment hoặc cần proxy_group_overrides theo nhóm.
+# KHÔNG cho traffic nội bộ cluster (10.0.0.0/24, localhost...) đi qua proxy — xem no_proxy.
 proxy_http:  ""       # vd "http://proxy.example.internal:3128"
 proxy_https: ""       # thường trùng proxy_http (proxy HTTP forward-proxy cho cả HTTPS)
 proxy_no_proxy: "localhost,127.0.0.1,::1"   # thêm subnet nội bộ nếu cần, vd ",10.0.0.0/24"
