@@ -100,7 +100,17 @@
   tasks:
     - name: Thu thập distribution facts tối thiểu trên Linuxfabrik target ngoài cụm
       ansible.builtin.setup:
-        gather_subset: [distribution]
+        # env cho phép proxy_environment dùng proxy đã khai trong /etc/environment,
+        # cùng hành vi với bootstrap-servers.
+        gather_subset: [distribution, env]
+      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+
+    - name: Kiểm tra Linuxfabrik package đã được cài chưa
+      ansible.builtin.command:
+        argv: [dpkg-query, -W, -f=${Status}, linuxfabrik-monitoring-plugins]
+      register: linuxfabrik_package_status
+      changed_when: false
+      failed_when: false
       when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
 
     - name: Tạo keyring directory trên Linuxfabrik target ngoài cụm
@@ -108,7 +118,9 @@
         path: /etc/apt/keyrings
         state: directory
         mode: "0755"
-      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+      when:
+        - inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+        - linuxfabrik_package_status.rc != 0
 
     - name: Tải signing key của Linuxfabrik
       ansible.builtin.get_url:
@@ -116,7 +128,9 @@
         dest: /etc/apt/keyrings/linuxfabrik.asc
         mode: "0644"
       environment: "{{ proxy_environment | default({}) }}"
-      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+      when:
+        - inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+        - linuxfabrik_package_status.rc != 0
 
     - name: Khai báo Linuxfabrik repository trên Ubuntu target
       ansible.builtin.apt_repository:
@@ -127,7 +141,9 @@
         filename: linuxfabrik-monitoring-plugins
         state: present
       environment: "{{ proxy_environment | default({}) }}"
-      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+      when:
+        - inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+        - linuxfabrik_package_status.rc != 0
 
     - name: Cài Linuxfabrik monitoring plugins trên target ngoài cụm
       ansible.builtin.apt:
@@ -136,7 +152,9 @@
         lock_timeout: 300
         state: present
       environment: "{{ proxy_environment | default({}) }}"
-      when: inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+      when:
+        - inventory_hostname in (groups['linuxfabrik_targets'] | default([]))
+        - linuxfabrik_package_status.rc != 0
 
     - name: Tạo tài khoản runtime không đặc quyền trên Linuxfabrik target
       ansible.builtin.user:
