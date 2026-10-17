@@ -317,6 +317,84 @@ Kết quả đúng phải có 18 dòng `host | service | check_command | state |
 OK; CPU/RAM/Disk vượt ngưỡng có thể trả về WARNING/CRITICAL hợp lệ, cần xử lý tải hoặc dung lượng thay vì sửa
 SSH.
 
+### 3.3. Monitor Nova/Neutron/Cinder service status không qua Director
+
+CPU/RAM/Disk của từng controller/compute có thể tiếp tục dùng Host và Apply Rule trong Director như mục trên.
+Trạng thái control plane của Nova, Neutron và Cinder được khai trực tiếp trong `globals.yml`; Ansible render
+thành Host/Service static trong `zones.d/master`. Director không tạo, sửa hoặc deploy các object này.
+
+Image Icinga 2 phải là image custom có `/opt/icinga-venv/bin/python3`, `openstacksdk` và `PyYAML`. Khai image
+đó bằng `custom_image_overrides.icinga2` như mục 5.5. Trên deployment node, tạo file credential:
+
+```bash
+install -d -m 0700 /etc/icinga-ansible/config/icinga2/openstack
+$EDITOR /etc/icinga-ansible/config/icinga2/openstack/clouds.yaml
+chmod 0600 /etc/icinga-ansible/config/icinga2/openstack/clouds.yaml
+```
+
+```yaml
+clouds:
+  production:
+    region_name: RegionOne
+    auth:
+      auth_url: "https://keystone.example.internal:5000/v3"
+      username: "icinga-monitoring"
+      password: "CHANGE_ME"
+      project_name: "service"
+      user_domain_name: "Default"
+      project_domain_name: "Default"
+```
+
+Nên dùng user monitoring riêng. Credential phải có quyền đọc Nova service list, Neutron agent list và Cinder
+service list; không cần quyền sửa trạng thái service. Mẫu policy cho tài khoản giới hạn quyền nằm trong
+`examples/openstack-rbac/`.
+
+Khai trong `/etc/icinga-ansible/globals.yml`:
+
+```yaml
+openstack_service_checks:
+  - name: "openstack-production"
+    display_name: "OpenStack Production"
+    cloud: "production"              # khớp clouds.production ở trên
+    services: [nova, neutron, cinder]
+    check_interval: 60               # giây
+    retry_interval: 30               # giây
+    max_check_attempts: 3
+```
+
+Cấu hình mẫu tương đương nằm tại `ansible/inventory/openstack-service-checks-extra.yml`. Có thể dùng
+cùng `openstack-cluster-director-extra.yml`: file thứ nhất tạo service status static; file thứ hai chỉ tạo
+host và CPU/RAM/Disk trong Director.
+
+Kết quả là một Host logic `openstack-production` và ba Service static:
+
+- `nova-service-status`: kiểm tra mọi Nova service có `status=enabled` và `state=up`.
+- `neutron-service-status`: kiểm tra mọi Neutron agent có `is_alive=true` và
+  `is_admin_state_up=true`.
+- `cinder-service-status`: kiểm tra mọi Cinder service có `status=enabled` và `state=up`.
+
+Host logic dùng `dummy` và không đại diện cho một controller cụ thể. Check gọi API OpenStack trực tiếp từ
+Icinga master; trong mô hình hai master, Icinga HA tự chọn master thực thi. File `clouds.yaml` được Ansible
+đồng bộ mode `0600` và mount read-only vào cả hai container, nên master còn lại có thể nhận duty khi failover.
+
+Áp dụng và kiểm tra:
+
+```bash
+source /path/to/venv/bin/activate
+cd /home/ubuntu/icinga-ansible
+
+./tools/icinga-ansible prechecks   -i <inventory>
+./tools/icinga-ansible reconfigure -i <inventory>
+./tools/icinga-ansible check       -i <inventory>
+
+# Ép chạy ngay và đọc kết quả ba service qua Icinga API:
+./tools/verify-openstack-ha.sh openstack-production
+```
+
+`prechecks` chặn sớm nếu tên host/cloud sai định dạng, service ngoài danh sách hỗ trợ, giá trị interval không
+hợp lệ, thiếu `clouds.yaml`, hoặc tên profile không tồn tại. Thêm một cloud khác chỉ cần thêm profile vào
+`clouds.yaml` và thêm một phần tử vào `openstack_service_checks`.
+
 ## 4. Nếu host đích ở sau proxy công ty
 
 Nếu host đích không ra Internet trực tiếp, cách đơn giản nhất là khai trên **từng managed node**

@@ -1,0 +1,41 @@
+/* {{ ansible_managed }}
+ * OpenStack control-plane service status objects managed directly by icinga-ansible.
+ * These objects live in zone master and are deliberately independent from Icinga Director.
+ */
+{% set openstack_service_type_map = {
+  'nova': 'compute',
+  'neutron': 'network',
+  'cinder': 'volume',
+  'masakari': 'masakari'
+} %}
+{% set openstack_service_display_map = {
+  'nova': 'Nova service status',
+  'neutron': 'Neutron agent status',
+  'cinder': 'Cinder service status',
+  'masakari': 'Masakari host status'
+} %}
+{% for cluster in openstack_service_checks | default([]) %}
+object Host {{ cluster.name | to_json }} {
+  display_name = {{ cluster.display_name | default(cluster.name) | to_json }}
+  check_command = "dummy"
+  zone = "master"
+  vars.dummy_state = 0
+  vars.dummy_text = "OpenStack API target"
+  vars.openstack_cloud = {{ cluster.cloud | to_json }}
+}
+
+{% for service in cluster.services %}
+object Service {{ (service ~ '-service-status') | to_json }} {
+  host_name = {{ cluster.name | to_json }}
+  display_name = {{ openstack_service_display_map[service] | to_json }}
+  check_command = "check_openstack_services"
+  zone = "master"
+  vars.openstack_cloud = {{ cluster.cloud | to_json }}
+  vars.openstack_service_type = {{ openstack_service_type_map[service] | to_json }}
+  check_interval = {{ cluster.check_interval | default(60) | int }}s
+  retry_interval = {{ cluster.retry_interval | default(30) | int }}s
+  max_check_attempts = {{ cluster.max_check_attempts | default(3) | int }}
+}
+
+{% endfor %}
+{% endfor %}

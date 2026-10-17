@@ -67,6 +67,73 @@
     fail_msg: >-
       Các nhóm [master], [satellite], [client] phải rời nhau vì một Icinga endpoint chỉ có một zone.
 
+- name: Kiểm tra cấu hình static OpenStack service status
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.name | default('') is regex('^[A-Za-z0-9_.-]+$')
+      - item.cloud | default('') is regex('^[A-Za-z0-9_.-]+$')
+      - item.services | default([]) | length > 0
+      - item.services | default([]) | difference(['nova', 'neutron', 'cinder', 'masakari']) | length == 0
+      - (item.services | default([]) | unique | length) == (item.services | default([]) | length)
+      - item.check_interval | default(60) | int > 0
+      - item.retry_interval | default(30) | int > 0
+      - item.max_check_attempts | default(3) | int > 0
+    fail_msg: >-
+      openstack_service_checks entry không hợp lệ. name/cloud chỉ dùng A-Z/a-z/0-9/_.-; services là
+      danh sách duy nhất gồm nova, neutron, cinder hoặc masakari; interval/attempt phải lớn hơn 0.
+      Entry hiện tại: {{ item | to_json }}
+  loop: "{{ openstack_service_checks | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default('<không tên>') }}"
+
+- name: Tên OpenStack logical host phải duy nhất
+  ansible.builtin.assert:
+    that:
+      - >-
+        (openstack_service_checks | default([]) | map(attribute='name') | unique | length) ==
+        (openstack_service_checks | default([]) | length)
+    fail_msg: "Mỗi openstack_service_checks.name phải duy nhất."
+  when: openstack_service_checks | default([]) | length > 0
+
+- name: Kiểm tra clouds.yaml trên deployment node khi bật OpenStack service status
+  ansible.builtin.stat:
+    path: "{{ deploy_config_dir }}/icinga2/openstack/clouds.yaml"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: _precheck_openstack_clouds_file
+  when: openstack_service_checks | default([]) | length > 0
+
+- name: Bắt buộc có clouds.yaml khi bật OpenStack service status
+  ansible.builtin.assert:
+    that:
+      - _precheck_openstack_clouds_file.stat.exists | default(false)
+      - _precheck_openstack_clouds_file.stat.isreg | default(false)
+    fail_msg: >-
+      Phải tạo {{ deploy_config_dir }}/icinga2/openstack/clouds.yaml trên deployment node trước khi
+      khai openstack_service_checks.
+  run_once: true
+  when: openstack_service_checks | default([]) | length > 0
+
+- name: Bắt buộc clouds.yaml có đúng cloud profile đã khai
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.cloud in
+        (((lookup('ansible.builtin.file', deploy_config_dir + '/icinga2/openstack/clouds.yaml')
+           | from_yaml).clouds) | default({}))
+    fail_msg: >-
+      Thiếu {{ deploy_config_dir }}/icinga2/openstack/clouds.yaml hoặc file không có profile
+      clouds.{{ item.cloud }} mà openstack_service_checks yêu cầu.
+  loop: "{{ openstack_service_checks | default([]) }}"
+  loop_control:
+    label: "{{ item.cloud | default('<không cloud>') }}"
+  run_once: true
+  when:
+    - openstack_service_checks | default([]) | length > 0
+    - _precheck_openstack_clouds_file.stat.exists | default(false)
+
 - name: Tên tài khoản quản trị Icinga Web phải an toàn khi ghi vào SQL
   ansible.builtin.assert:
     that:

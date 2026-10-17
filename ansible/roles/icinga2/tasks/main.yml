@@ -929,14 +929,13 @@
     loop_var: cfg
 
 # ---------- Script role-owned TĨNH (Telegram + check OpenStack — không phải custom-plugins/ do user
-# tự thêm) ---- tên file CỐ ĐỊNH, ship kèm role (roles/icinga2/files/) — seed 1 lần ra node
-# (force:false, không đè nếu đã có, cùng tinh thần base-config-skeleton) rồi mount vào CustomPluginDir
+# tự thêm) ---- tên file CỐ ĐỊNH, ship kèm role (roles/icinga2/files/) rồi mount vào CustomPluginDir
 # cùng chỗ với custom-plugins/ (không cần cơ chế dò động vì đây không phải file người dùng tự thêm/xoá
 # tuỳ ý). check_openstack_service.py (design.md mục 9.7): dùng openstacksdk trong venv
 # /opt/icinga-venv (image custom) để check compute/volume/network/masakari, ĐA CLOUD — credential
 # đọc từ file "clouds.yaml" mount riêng (xem block "OpenStack multi-cloud credentials" phía dưới,
 # KHÔNG qua env CheckCommand nữa), CheckCommand chỉ truyền "-c <tên cloud> -s <loại service>".
-- name: "Seed script telegram-*-notification.sh + check_openstack_service.py ra node (1 lần, force:false)"
+- name: "Seed script telegram-*-notification.sh ra node (1 lần, giữ tương thích cấu hình cũ)"
   ansible.builtin.copy:
     src: "{{ item }}"
     dest: "{{ icinga_etc_dir }}/icinga2/{{ item }}"
@@ -947,7 +946,18 @@
   loop:
     - telegram-host-notification.sh
     - telegram-service-notification.sh
-    - check_openstack_service.py
+
+# Đây là check implementation của role, không phải user override. Luôn đồng bộ để bug fix trong script
+# được áp dụng bằng reconfigure; force:false trước đây khiến node chạy mã cũ vô thời hạn.
+- name: Đồng bộ check_openstack_service.py do role quản lý
+  ansible.builtin.copy:
+    src: check_openstack_service.py
+    dest: "{{ icinga_etc_dir }}/icinga2/check_openstack_service.py"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0750"
+    force: true
+  notify: Reload icinga2
 
 # ---------- SSH key cho check ra host ngoài cluster (per-file, design.md 9.4) ----------
 # 2 tên file CỐ ĐỊNH (không phải tập tuỳ ý như scripts/ dưới) -> sync + mount per-file được, không
@@ -1171,6 +1181,19 @@
     - (groups['client'] | default([])) | length == 0
   notify: Reload icinga2
 
+# OpenStack service status là cấu hình role-owned riêng, không dùng Director và không nằm trong
+# hosts.conf override của operator. Tách file để một override SSH/custom host không vô tình làm mất
+# Nova/Neutron/Cinder objects đã khai bằng openstack_service_checks.
+- name: Render zones.d/master/openstack-services.conf (không qua Director)
+  ansible.builtin.template:
+    src: openstack-services.conf.j2
+    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/openstack-services.conf"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0640"
+  when: inventory_hostname == ca_host
+  notify: Reload icinga2
+
 # Host/Service THẬT chạy trực tiếp từ zone "master" (vd SSH ra host ngoài, KHÔNG cần agent Icinga2 —
 # giống hệt cơ chế zones.d/<satellite_zone>/hosts.conf, mục 9.4, chỉ khác zone chạy check). Khác
 # clients.conf ở trên (command-endpoint, cần agent) — file RIÊNG, luôn tồn tại (không phụ thuộc
@@ -1310,6 +1333,11 @@
 - name: "Xây list mount per-file: zones.d/master/hosts.conf (chỉ ca_host)"
   ansible.builtin.set_fact:
     _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/hosts.conf:/data/etc/icinga2/zones.d/master/hosts.conf:ro'] }}"
+  when: inventory_hostname == ca_host
+
+- name: "Xây list mount per-file: zones.d/master/openstack-services.conf (chỉ ca_host)"
+  ansible.builtin.set_fact:
+    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/openstack-services.conf:/data/etc/icinga2/zones.d/master/openstack-services.conf:ro'] }}"
   when: inventory_hostname == ca_host
 
 # zones.d/master/telegram-notifications.conf — LUÔN tồn tại trên ca_host (role-owned, không phụ

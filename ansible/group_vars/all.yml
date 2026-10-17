@@ -93,6 +93,11 @@ ca_host:         "{{ (groups['master'] | default([]))[0] | default('') }}"   # m
 # --- Zone satellite (khai trong globals; rỗng ở P1) ---------------------------
 satellite_zones: []
 
+# OpenStack control-plane service checks are static Icinga objects in zones.d/master; Director is
+# deliberately not involved. Each entry represents one clouds.yaml profile and creates one logical
+# Host plus the selected Nova/Neutron/Cinder/Masakari Service objects.
+openstack_service_checks: []
+
 # --- Timezone hiển thị Icinga Web 2 (config.ini [global] timezone) ------------
 # Default cho user Việt Nam — override trong globals.yml nếu cần múi giờ khác.
 icingaweb2_timezone: "Asia/Ho_Chi_Minh"
