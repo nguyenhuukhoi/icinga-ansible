@@ -58,8 +58,13 @@ Clone/copy repo lên node cần deploy (đường dẫn tuỳ ý, ví dụ `/opt
 ```bash
 cd /opt/icinga-ansible
 
-# 1. Cài Ansible + collection cần thiết (community.docker cho docker_container/docker_network)
-sudo apt install -y ansible python3-docker
+# 1. Tạo và activate venv do operator quản lý, rồi cài Ansible bằng pip
+sudo apt update
+sudo apt install -y python3-venv
+python3 -m venv "$HOME/venvs/icinga-ansible"
+source "$HOME/venvs/icinga-ansible/bin/activate"
+python -m pip install -U pip
+python -m pip install ansible
 ansible-galaxy collection install -r ansible/requirements.yml
 
 # 2. Khởi tạo /etc/icinga-ansible từ template + sinh secrets ngẫu nhiên
@@ -82,6 +87,11 @@ $EDITOR /etc/icinga-ansible/globals.yml       # icinga_image_versions (tag image
 # 6. Thông tin truy cập
 ./tools/icinga-ansible post-deploy -i ansible/inventory/all-in-one
 ```
+
+Mỗi phiên shell mới phải chạy lại `source "$HOME/venvs/icinga-ansible/bin/activate"` trước các lệnh
+vận hành. Venv này chỉ chạy Ansible trên deployment node. Không đặt
+`ansible_python_interpreter=/path/to/venv/bin/python...` trong inventory; managed node Ubuntu dùng
+Python của chính nó (thường là `/usr/bin/python3`).
 
 Web: `http://<host>:8080/authentication/login` (Apache lắng nghe port **8080** trên host,
 không phải 80 — xem `icingaweb2_http_port` trong `globals.yml`).

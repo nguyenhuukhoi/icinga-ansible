@@ -1,5 +1,6 @@
 ---
-# Cài: ansible-galaxy collection install -r requirements.yml -p ./.collections
+# Chạy từ thư mục gốc repo sau khi activate venv:
+#   ansible-galaxy collection install -r ansible/requirements.yml
 collections:
   - name: community.docker
     version: ">=4.0.0,<5.0.0"

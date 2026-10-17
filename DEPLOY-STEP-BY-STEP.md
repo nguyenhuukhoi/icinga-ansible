@@ -102,9 +102,13 @@ ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
   echo "Acquire::https::Proxy \"http://<proxy>:80\";" | sudo tee -a /etc/apt/apt.conf.d/95proxy
   export http_proxy=http://<proxy>:80 https_proxy=http://<proxy>:80
   sudo -E apt update -qq
-  sudo -E apt install -y -qq ansible python3-docker
+  sudo -E apt install -y -qq python3-venv
 
   cd /opt/icinga-ansible
+  python3 -m venv "$HOME/venvs/icinga-ansible"
+  source "$HOME/venvs/icinga-ansible/bin/activate"
+  python -m pip install -U pip
+  python -m pip install ansible
   ansible-galaxy collection install -r ansible/requirements.yml
 '
 ```
@@ -114,6 +118,7 @@ ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
 ```bash
 ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
   cd /opt/icinga-ansible
+  source "$HOME/venvs/icinga-ansible/bin/activate"
   ./tools/icinga-ansible init-config
   ./tools/icinga-ansible genpwd
 
@@ -130,26 +135,17 @@ ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
 ```bash
 ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
   cd /opt/icinga-ansible
+  source "$HOME/venvs/icinga-ansible/bin/activate"
   ./tools/icinga-ansible bootstrap-servers -i multinode
+  ./tools/icinga-ansible prechecks -i multinode
+  ./tools/icinga-ansible deploy -i multinode
+  ./tools/icinga-ansible post-deploy -i multinode
 '
 ```
-Kỳ vọng: `failed=0` cả 5 host (`master1/2`, `galera1/2/3`).
 
-```bash
-  ./tools/icinga-ansible prechecks -i multinode
-```
-Kỳ vọng: topology tự suy ra đúng `Master: 2 (HA)`, `Database: managed_db (galera nodes: 3)`.
-
-```bash
-  ./tools/icinga-ansible deploy -i multinode
-```
-Lệnh này chạy **lâu** (vài phút, bootstrap Galera cluster thật) — kỳ vọng `failed=0` cả 5 host. Nếu
-KHÔNG `failed=0`, đọc mục Troubleshooting bên dưới trước khi thử sửa tay.
-
-```bash
-  ./tools/icinga-ansible post-deploy -i multinode
-```
-In ra URL + user đăng nhập Icinga Web2.
+Kỳ vọng: `failed=0` cả 5 host (`master1/2`, `galera1/2/3`), precheck suy ra đúng `Master: 2 (HA)`
+và `Database: managed_db (galera nodes: 3)`. `deploy` chạy lâu vài phút vì bootstrap Galera thật.
+`post-deploy` in URL cùng user đăng nhập Icinga Web 2.
 
 ## 7. Verify sau deploy
 

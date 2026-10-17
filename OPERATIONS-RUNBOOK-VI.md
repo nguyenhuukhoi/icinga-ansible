@@ -136,19 +136,26 @@ Director sau deploy hoặc restore phải có đúng:
 Khuyến nghị Ubuntu 24.04 hoặc 26.04, có:
 
 - Git;
-- Ansible;
-- Python Docker SDK;
+- Python 3 và `python3-venv`;
+- Ansible trong venv do operator quản lý;
 - SSH key đến tất cả service node;
 - user vận hành có passwordless sudo cục bộ;
 - đủ dung lượng để giữ ít nhất một full backup DB.
 
 ```bash
 sudo apt update
-sudo apt install -y git ansible python3-docker
+sudo apt install -y git python3-venv
 
 cd /opt/icinga-ansible
+python3 -m venv "$HOME/venvs/icinga-ansible"
+source "$HOME/venvs/icinga-ansible/bin/activate"
+python -m pip install -U pip
+python -m pip install ansible
 ansible-galaxy collection install -r ansible/requirements.yml
 ```
+
+Phải activate lại venv trong mỗi phiên shell mới. Venv này chỉ thuộc deployment node; không khai
+đường dẫn của nó vào `ansible_python_interpreter` cho service node.
 
 Không chạy lệnh project bằng `sudo`:
 
@@ -697,6 +704,7 @@ Trên deployment node mới:
 
 ```bash
 cd /opt/icinga-ansible
+source "$HOME/venvs/icinga-ansible/bin/activate"
 ansible-galaxy collection install -r ansible/requirements.yml
 
 CONFIRM=yes-i-really-mean-it ./tools/icinga-ansible restore-config \
@@ -1234,6 +1242,7 @@ Các timestamp trên chỉ là artifact lab và không được giả định c�
 
 | Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
 |---|---|---|
+| `The module interpreter '/path/to/venv/bin/python...' was not found` | Đường dẫn venv trên deployment node bị gán nhầm cho `ansible_python_interpreter` của managed node | Xoá biến đó khỏi inventory/group_vars, hoặc đặt `/usr/bin/python3`; activate venv bằng `source` trên deployment node |
 | `UNREACHABLE` hàng loạt | Chạy CLI bằng root nên dùng sai SSH key | Chạy lại bằng user thường có passwordless sudo |
 | `deploy` thiếu directory/network | Host mới chưa bootstrap | Chạy `bootstrap-servers --limit <host>` |
 | Docker pull lỗi 429/5xx/timeout | Docker Hub/CDN, proxy hoặc rate limit | Chạy `pull`; code mới tự retry 8 lần. Nếu vẫn lỗi, kiểm tra Docker daemon proxy và mirror image vào registry nội bộ |

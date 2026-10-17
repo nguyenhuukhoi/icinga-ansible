@@ -25,7 +25,8 @@ Bạn không cần cài từng cái tay — chỉ cần khai vài biến trong 1
 
 - **Hệ điều hành host đích**: Ubuntu 24.04 hoặc 26.04 (đã verify — bản khác chưa test).
 - **Máy điều khiển** (nơi bạn chạy lệnh `icinga-ansible`, có thể là 1 trong các host đích hoặc máy
-  riêng): cần cài `ansible` + Python + SSH tới được các host đích.
+  riêng): cần Python 3, `python3-venv` và SSH tới được các host đích. Ansible được cài bằng pip trong
+  venv do operator quản lý.
 - **User chạy lệnh**: cần **sudo không cần nhập mật khẩu** (`passwordless sudo`) trên mọi host đích —
   Ansible tự nâng quyền (`become`) khi cần (cài Docker, tạo container...).
 - **Nếu host đích sau proxy công ty** (không ra Internet trực tiếp): chuẩn bị sẵn URL proxy, sẽ khai
@@ -45,9 +46,13 @@ Cách nhanh nhất để "sờ" được sản phẩm: deploy mọi thứ trên 
 # 0. Lấy code (đường dẫn tuỳ ý, ví dụ /opt/icinga-ansible)
 cd /opt/icinga-ansible
 
-# 1. Cài Ansible + collection cần thiết
+# 1. Tạo venv, activate và cài Ansible + collection cần thiết
 sudo apt update
-sudo apt install -y ansible python3-docker
+sudo apt install -y python3-venv
+python3 -m venv "$HOME/venvs/icinga-ansible"
+source "$HOME/venvs/icinga-ansible/bin/activate"
+python -m pip install -U pip
+python -m pip install ansible
 ansible-galaxy collection install -r ansible/requirements.yml
 
 # 2. Khởi tạo cấu hình thật (tách biệt hoàn toàn khỏi code, xem mục 5 bên dưới)
@@ -71,6 +76,9 @@ cp ansible/inventory/all-in-one .
 # 7. In thông tin đăng nhập
 ./tools/icinga-ansible post-deploy -i all-in-one
 ```
+
+Trong phiên shell mới, chạy lại `source "$HOME/venvs/icinga-ansible/bin/activate"` trước khi gọi
+`icinga-ansible`. Lệnh `deactivate` thoát khỏi venv khi không còn vận hành hệ thống.
 
 Mỗi lệnh chạy xong sẽ in ra **recap** dạng:
 
@@ -98,10 +106,14 @@ SSH ra 7 host quản lý (2 master HA + 2 satellite 1 zone con + 3 node Galera c
 inventory mẫu `ansible/inventory/ha-2master-2satellite-galera3` — chỉ cần đổi IP.
 
 ```bash
-# 0. Trên DEPLOYMENT NODE (máy riêng, KHÔNG phải master1/master2/...) — lấy code, cài Ansible
+# 0. Trên DEPLOYMENT NODE (máy riêng, KHÔNG phải master1/master2/...) — lấy code, tạo venv
 cd /opt/icinga-ansible
 sudo apt update
-sudo apt install -y ansible python3-docker
+sudo apt install -y python3-venv
+python3 -m venv "$HOME/venvs/icinga-ansible"
+source "$HOME/venvs/icinga-ansible/bin/activate"
+python -m pip install -U pip
+python -m pip install ansible
 ansible-galaxy collection install -r ansible/requirements.yml
 
 # 1. SSH key của deployment node phải có mặt trong authorized_keys của CẢ 7 host quản lý
@@ -750,6 +762,7 @@ $EDITOR ansible/inventory/my-cluster    # xoá host đó khỏi inventory
 
 | Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
 |---|---|---|
+| `The module interpreter '/path/to/venv/bin/python...' was not found` | Đã gán nhầm venv của deployment node vào `ansible_python_interpreter` của managed node | Xoá biến đó khỏi inventory/group_vars hoặc đặt `/usr/bin/python3`. Trên deployment node, dùng `source <venv>/bin/activate` |
 | `unreachable` khi chạy trên nhiều host | Bạn chạy `icinga-ansible` qua `sudo`/`sudo su` — SSH ra host khác dùng nhầm key của root | Chạy lại bằng user thường (có sudo passwordless), không bọc `sudo` trước cả câu lệnh |
 | `deploy` báo thiếu thư mục (`directory ... does not exist`) trên host mới/vừa `destroy` | Host đó chưa từng chạy `bootstrap-servers` | Chạy `bootstrap-servers` trước, rồi `deploy` lại |
 | `apt update`/`docker pull` treo mãi không xong | Thiếu cấu hình proxy dù host sau proxy công ty | Khai `proxy_http`/`proxy_https`/`proxy_no_proxy` trong `globals.yml` (mục 4), chạy lại |
