@@ -105,8 +105,10 @@ ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
   sudo -E apt install -y -qq python3-venv
 
   cd /opt/icinga-ansible
-  python3 -m venv "$HOME/venvs/icinga-ansible"
-  source "$HOME/venvs/icinga-ansible/bin/activate"
+  sudo install -d -o "$(id -un)" -g "$(id -gn)" /path/to/venv
+  sudo chown -R "$(id -un):$(id -gn)" /path/to/venv
+  python3 -m venv /path/to/venv
+  source /path/to/venv/bin/activate
   python -m pip install -U pip
   python -m pip install ansible
   ansible-galaxy collection install -r ansible/requirements.yml
@@ -118,7 +120,7 @@ ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
 ```bash
 ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
   cd /opt/icinga-ansible
-  source "$HOME/venvs/icinga-ansible/bin/activate"
+  source /path/to/venv/bin/activate
   ./tools/icinga-ansible init-config
   ./tools/icinga-ansible genpwd
 
@@ -135,7 +137,7 @@ ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
 ```bash
 ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
   cd /opt/icinga-ansible
-  source "$HOME/venvs/icinga-ansible/bin/activate"
+  source /path/to/venv/bin/activate
   ./tools/icinga-ansible bootstrap-servers -i multinode
   ./tools/icinga-ansible prechecks -i multinode
   ./tools/icinga-ansible deploy -i multinode

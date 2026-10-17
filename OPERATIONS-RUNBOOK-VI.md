@@ -147,8 +147,10 @@ sudo apt update
 sudo apt install -y git python3-venv
 
 cd /opt/icinga-ansible
-python3 -m venv "$HOME/venvs/icinga-ansible"
-source "$HOME/venvs/icinga-ansible/bin/activate"
+sudo install -d -o "$(id -un)" -g "$(id -gn)" /path/to/venv
+sudo chown -R "$(id -un):$(id -gn)" /path/to/venv
+python3 -m venv /path/to/venv
+source /path/to/venv/bin/activate
 python -m pip install -U pip
 python -m pip install ansible
 ansible-galaxy collection install -r ansible/requirements.yml
@@ -704,7 +706,7 @@ Trên deployment node mới:
 
 ```bash
 cd /opt/icinga-ansible
-source "$HOME/venvs/icinga-ansible/bin/activate"
+source /path/to/venv/bin/activate
 ansible-galaxy collection install -r ansible/requirements.yml
 
 CONFIRM=yes-i-really-mean-it ./tools/icinga-ansible restore-config \

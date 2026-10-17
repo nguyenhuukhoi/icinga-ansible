@@ -61,8 +61,10 @@ cd /opt/icinga-ansible
 # 1. Tạo và activate venv do operator quản lý, rồi cài Ansible bằng pip
 sudo apt update
 sudo apt install -y python3-venv
-python3 -m venv "$HOME/venvs/icinga-ansible"
-source "$HOME/venvs/icinga-ansible/bin/activate"
+sudo install -d -o "$(id -un)" -g "$(id -gn)" /path/to/venv
+sudo chown -R "$(id -un):$(id -gn)" /path/to/venv
+python3 -m venv /path/to/venv
+source /path/to/venv/bin/activate
 python -m pip install -U pip
 python -m pip install ansible
 ansible-galaxy collection install -r ansible/requirements.yml
@@ -88,7 +90,7 @@ $EDITOR /etc/icinga-ansible/globals.yml       # icinga_image_versions (tag image
 ./tools/icinga-ansible post-deploy -i ansible/inventory/all-in-one
 ```
 
-Mỗi phiên shell mới phải chạy lại `source "$HOME/venvs/icinga-ansible/bin/activate"` trước các lệnh
+Mỗi phiên shell mới phải chạy lại `source /path/to/venv/bin/activate` trước các lệnh
 vận hành. Venv này chỉ chạy Ansible trên deployment node. Không đặt
 `ansible_python_interpreter=/path/to/venv/bin/python...` trong inventory; managed node Ubuntu dùng
 Python của chính nó (thường là `/usr/bin/python3`).

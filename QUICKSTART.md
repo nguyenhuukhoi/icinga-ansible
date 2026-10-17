@@ -49,8 +49,10 @@ cd /opt/icinga-ansible
 # 1. Tạo venv, activate và cài Ansible + collection cần thiết
 sudo apt update
 sudo apt install -y python3-venv
-python3 -m venv "$HOME/venvs/icinga-ansible"
-source "$HOME/venvs/icinga-ansible/bin/activate"
+sudo install -d -o "$(id -un)" -g "$(id -gn)" /path/to/venv
+sudo chown -R "$(id -un):$(id -gn)" /path/to/venv
+python3 -m venv /path/to/venv
+source /path/to/venv/bin/activate
 python -m pip install -U pip
 python -m pip install ansible
 ansible-galaxy collection install -r ansible/requirements.yml
@@ -77,7 +79,7 @@ cp ansible/inventory/all-in-one .
 ./tools/icinga-ansible post-deploy -i all-in-one
 ```
 
-Trong phiên shell mới, chạy lại `source "$HOME/venvs/icinga-ansible/bin/activate"` trước khi gọi
+Trong phiên shell mới, chạy lại `source /path/to/venv/bin/activate` trước khi gọi
 `icinga-ansible`. Lệnh `deactivate` thoát khỏi venv khi không còn vận hành hệ thống.
 
 Mỗi lệnh chạy xong sẽ in ra **recap** dạng:
@@ -110,8 +112,10 @@ inventory mẫu `ansible/inventory/ha-2master-2satellite-galera3` — chỉ cầ
 cd /opt/icinga-ansible
 sudo apt update
 sudo apt install -y python3-venv
-python3 -m venv "$HOME/venvs/icinga-ansible"
-source "$HOME/venvs/icinga-ansible/bin/activate"
+sudo install -d -o "$(id -un)" -g "$(id -gn)" /path/to/venv
+sudo chown -R "$(id -un):$(id -gn)" /path/to/venv
+python3 -m venv /path/to/venv
+source /path/to/venv/bin/activate
 python -m pip install -U pip
 python -m pip install ansible
 ansible-galaxy collection install -r ansible/requirements.yml
@@ -762,7 +766,7 @@ $EDITOR ansible/inventory/my-cluster    # xoá host đó khỏi inventory
 
 | Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
 |---|---|---|
-| `The module interpreter '/path/to/venv/bin/python...' was not found` | Đã gán nhầm venv của deployment node vào `ansible_python_interpreter` của managed node | Xoá biến đó khỏi inventory/group_vars hoặc đặt `/usr/bin/python3`. Trên deployment node, dùng `source <venv>/bin/activate` |
+| `The module interpreter '/path/to/venv/bin/python...' was not found` trên `master1`/managed node | Đã gán nhầm venv của deployment node vào `ansible_python_interpreter` của managed node | Xoá biến đó khỏi inventory/group_vars hoặc đặt `/usr/bin/python3`. Chỉ deployment node dùng `source /path/to/venv/bin/activate` |
 | `unreachable` khi chạy trên nhiều host | Bạn chạy `icinga-ansible` qua `sudo`/`sudo su` — SSH ra host khác dùng nhầm key của root | Chạy lại bằng user thường (có sudo passwordless), không bọc `sudo` trước cả câu lệnh |
 | `deploy` báo thiếu thư mục (`directory ... does not exist`) trên host mới/vừa `destroy` | Host đó chưa từng chạy `bootstrap-servers` | Chạy `bootstrap-servers` trước, rồi `deploy` lại |
 | `apt update`/`docker pull` treo mãi không xong | Thiếu cấu hình proxy dù host sau proxy công ty | Khai `proxy_http`/`proxy_https`/`proxy_no_proxy` trong `globals.yml` (mục 4), chạy lại |

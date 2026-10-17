@@ -133,7 +133,7 @@ done
 require_active_ansible_venv() {
   if [[ -z "${VIRTUAL_ENV:-}" ]]; then
     echo "Chưa activate Python virtual environment cho Ansible." >&2
-    echo "Chạy: source /duong-dan-venv/bin/activate" >&2
+    echo "Chạy: source /path/to/venv/bin/activate" >&2
     exit 1
   fi
 
