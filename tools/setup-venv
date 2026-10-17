@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_DIR="${ICINGA_ANSIBLE_VENV:-$ROOT/.venv}"
+PYTHON_BIN="${PYTHON:-python3}"
+COLLECTIONS_DIR="$ROOT/ansible/.collections"
+
+[[ "$VENV_DIR" == /* ]] || VENV_DIR="$ROOT/$VENV_DIR"
+export ANSIBLE_CONFIG="$ROOT/ansible/ansible.cfg"
+export ANSIBLE_COLLECTIONS_PATH="$COLLECTIONS_DIR:$HOME/.ansible/collections:/usr/share/ansible/collections"
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "Không tìm thấy $PYTHON_BIN. Cài Python 3.11-3.13 và gói python3-venv trước." >&2
+  exit 1
+fi
+
+if ! "$PYTHON_BIN" -c '
+import sys
+if not ((3, 11) <= sys.version_info[:2] < (3, 14)):
+    raise SystemExit(
+        f"Cần Python 3.11-3.13 cho ansible-core 2.19; hiện tại là "
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}."
+    )
+'; then
+  exit 1
+fi
+
+if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+  echo "Tạo virtual environment: $VENV_DIR"
+else
+  echo "Cập nhật virtual environment hiện có: $VENV_DIR"
+fi
+
+# python -m venv is safe to rerun on an existing environment and repairs an environment left
+# incomplete when ensurepip/python3-venv was missing during the first attempt.
+if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
+  echo "Không tạo được venv. Trên Ubuntu, chạy: sudo apt install python3-venv" >&2
+  exit 1
+fi
+
+if ! "$VENV_DIR/bin/python" -c '
+import sys
+if not ((3, 11) <= sys.version_info[:2] < (3, 14)):
+    raise SystemExit(
+        f"Venv phải dùng Python 3.11-3.13; hiện tại là "
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}. "
+        "Hãy xóa venv này và tạo lại bằng PYTHON=<python phù hợp> tools/setup-venv."
+    )
+'; then
+  exit 1
+fi
+
+echo "Cài Python dependencies..."
+"$VENV_DIR/bin/python" -m pip install --disable-pip-version-check -r "$ROOT/requirements.txt"
+
+echo "Cài Ansible collections riêng cho project..."
+mkdir -p "$COLLECTIONS_DIR"
+"$VENV_DIR/bin/ansible-galaxy" collection install \
+  -r "$ROOT/ansible/requirements.yml" \
+  -p "$COLLECTIONS_DIR"
+
+echo
+"$VENV_DIR/bin/ansible" --version | sed -n '1,2p'
+echo "Collections: $COLLECTIONS_DIR"
+for collection in community.docker community.general community.mysql; do
+  "$VENV_DIR/bin/ansible-galaxy" collection list -p "$COLLECTIONS_DIR" "$collection"
+done
+echo
+echo "Venv sẵn sàng. Kích hoạt bằng:"
+echo "  source '$VENV_DIR/bin/activate'"
+echo "Wrapper cũng tự dùng venv này khi chạy:"
+echo "  ./tools/icinga-ansible help"

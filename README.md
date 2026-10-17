@@ -58,9 +58,11 @@ Clone/copy repo lên node cần deploy (đường dẫn tuỳ ý, ví dụ `/opt
 ```bash
 cd /opt/icinga-ansible
 
-# 1. Cài Ansible + collection cần thiết (community.docker cho docker_container/docker_network)
-sudo apt install -y ansible python3-docker
-ansible-galaxy collection install -r ansible/requirements.yml
+# 1. Tạo môi trường Ansible riêng cho project
+sudo apt update
+sudo apt install -y git python3 python3-venv
+./tools/setup-venv                 # cài ansible-core + collection vào repo
+source .venv/bin/activate          # khuyến nghị; wrapper vẫn tự tìm .venv nếu không activate
 
 # 2. Khởi tạo /etc/icinga-ansible từ template + sinh secrets ngẫu nhiên
 ./tools/icinga-ansible init-config      # tạo /etc/icinga-ansible (cần sudo, chỉ 1 lần)
@@ -82,6 +84,11 @@ $EDITOR /etc/icinga-ansible/globals.yml       # icinga_image_versions (tag image
 # 6. Thông tin truy cập
 ./tools/icinga-ansible post-deploy -i ansible/inventory/all-in-one
 ```
+
+Không cài `ansible` bằng `apt` cho control node. Project khóa phiên bản trong `requirements.txt`,
+collection nằm ở `ansible/.collections`, và wrapper từ chối fallback sang Ansible hệ thống để tránh
+hai deployment node chạy hai phiên bản khác nhau. Xoá `.venv` rồi chạy lại `./tools/setup-venv` nếu
+cần dựng sạch môi trường công cụ; việc này không đụng tới `/etc/icinga-ansible` hay cluster.
 
 Web: `http://<host>:8080/authentication/login` (Apache lắng nghe port **8080** trên host,
 không phải 80 — xem `icingaweb2_http_port` trong `globals.yml`).

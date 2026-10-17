@@ -102,10 +102,11 @@ ssh -i /tmp/icinga-key ubuntu@<deploy_ip> '
   echo "Acquire::https::Proxy \"http://<proxy>:80\";" | sudo tee -a /etc/apt/apt.conf.d/95proxy
   export http_proxy=http://<proxy>:80 https_proxy=http://<proxy>:80
   sudo -E apt update -qq
-  sudo -E apt install -y -qq ansible python3-docker
+  sudo -E apt install -y -qq git python3 python3-venv
 
   cd /opt/icinga-ansible
-  ansible-galaxy collection install -r ansible/requirements.yml
+  ./tools/setup-venv
+  source .venv/bin/activate
 '
 ```
 

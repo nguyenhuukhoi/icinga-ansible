@@ -5,6 +5,7 @@ etc/icinga-ansible/
 passwords.yml
 
 # Ansible artefacts
+.venv/
 ansible/.collections/
 ansible/*.retry
 /tmp/icinga-ansible-facts/

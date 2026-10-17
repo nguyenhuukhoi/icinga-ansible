@@ -1,0 +1,6 @@
+# Python dependencies for the Ansible control node.
+#
+# Keep ansible-core pinned to the exact release used by this project. Updating
+# it is an operational change: run tools/validate and the OpenStack regression
+# suite before changing this version.
+ansible-core==2.19.14
