@@ -91,7 +91,9 @@
     # runtime vẫn đầy đủ và không bị ghi thiếu nếu một target lỗi ở task sau.
     - name: Quét SSH host key từ deployment node
       ansible.builtin.command:
-        argv: [ssh-keyscan, -T, "10", -H, "{{ ansible_host }}"]
+        # Không dùng -H: hash known_hosts có salt ngẫu nhiên, làm file đổi ở mọi
+        # lần chạy dù host key không đổi và kéo theo recreate container vô ích.
+        argv: [ssh-keyscan, -T, "10", "{{ ansible_host }}"]
       register: monitor_host_key
       changed_when: false
       delegate_to: localhost
