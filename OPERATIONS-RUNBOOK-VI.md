@@ -133,28 +133,22 @@ Director sau deploy hoặc restore phải có đúng:
 
 ### 5.1. Deployment node
 
-Khuyến nghị Ubuntu 24.04 cho deployment node. Nếu dùng hệ điều hành khác, Python của control node
-phải nằm trong dải được khóa bên dưới:
+Khuyến nghị Ubuntu 24.04 hoặc 26.04, có:
 
 - Git;
-- Python 3.11–3.13 và `python3-venv`;
-- Ansible venv của project;
+- Ansible;
+- Python Docker SDK;
 - SSH key đến tất cả service node;
 - user vận hành có passwordless sudo cục bộ;
 - đủ dung lượng để giữ ít nhất một full backup DB.
 
 ```bash
 sudo apt update
-sudo apt install -y git python3 python3-venv
+sudo apt install -y git ansible python3-docker
 
 cd /opt/icinga-ansible
-./tools/setup-venv
-source .venv/bin/activate
+ansible-galaxy collection install -r ansible/requirements.yml
 ```
-
-`tools/setup-venv` cài phiên bản `ansible-core` đã khóa trong `requirements.txt` và cài collection
-vào `ansible/.collections`. Wrapper tự dùng `/opt/icinga-ansible/.venv` kể cả khi shell mới chưa
-activate; lệnh `source` vẫn nên dùng để `ansible`, `ansible-vault` và `ansible-galaxy` trỏ cùng venv.
 
 Không chạy lệnh project bằng `sudo`:
 
@@ -703,8 +697,7 @@ Trên deployment node mới:
 
 ```bash
 cd /opt/icinga-ansible
-./tools/setup-venv
-source .venv/bin/activate
+ansible-galaxy collection install -r ansible/requirements.yml
 
 CONFIRM=yes-i-really-mean-it ./tools/icinga-ansible restore-config \
   --config-backup /safe-backup/config-<timestamp>.tar.gz

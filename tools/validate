@@ -5,29 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANSIBLE_DIR="$ROOT/ansible"
 GLOBALS="$ROOT/etc/examples/globals.yml"
 PASSWORDS="$ROOT/etc/examples/passwords.yml.example"
-VENV_DIR="${ICINGA_ANSIBLE_VENV:-$ROOT/.venv}"
-
-[[ "$VENV_DIR" == /* ]] || VENV_DIR="$ROOT/$VENV_DIR"
-
-if [[ -n "${VIRTUAL_ENV:-}" ]] && [[ -x "$VIRTUAL_ENV/bin/ansible-playbook" ]]; then
-  ANSIBLE_PLAYBOOK="$VIRTUAL_ENV/bin/ansible-playbook"
-elif [[ -x "$VENV_DIR/bin/ansible-playbook" ]]; then
-  ANSIBLE_PLAYBOOK="$VENV_DIR/bin/ansible-playbook"
-else
-  echo "Chưa có Ansible venv. Chạy: $ROOT/tools/setup-venv" >&2
-  exit 1
-fi
-
-EXPECTED_VERSION="$(sed -n 's/^ansible-core==//p' "$ROOT/requirements.txt" | tr -d '[:space:]')"
-ACTUAL_VERSION="$("$ANSIBLE_PLAYBOOK" --version | sed -n '1s/.*\[core \([^]]*\)\].*/\1/p')"
-if [[ -z "$EXPECTED_VERSION" || "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]]; then
-  echo "Sai ansible-core: ${ACTUAL_VERSION:-không xác định}; cần ${EXPECTED_VERSION:-không xác định}." >&2
-  echo "Chạy lại: $ROOT/tools/setup-venv" >&2
-  exit 1
-fi
 
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck "$ROOT/tools/icinga-ansible" "$ROOT/tools/setup-venv" "$ROOT/tools/validate"
+  shellcheck "$ROOT/tools/icinga-ansible" "$ROOT/tools/validate"
 else
   echo "SKIP shellcheck (chưa cài)." >&2
 fi
@@ -35,7 +15,7 @@ fi
 cd "$ANSIBLE_DIR"
 for playbook in icinga-ansible.yml playbooks/*.yml; do
   echo "syntax-check: $playbook"
-  "$ANSIBLE_PLAYBOOK" -i inventory/all-in-one "$playbook" --syntax-check \
+  ansible-playbook -i inventory/all-in-one "$playbook" --syntax-check \
     -e "@$GLOBALS" -e "@$PASSWORDS" -e target_host=localhost
 done
 

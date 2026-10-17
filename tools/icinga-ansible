@@ -31,39 +31,8 @@ fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"     # thư mục repo (code, di chuyển tự do)
 ANSIBLE_DIR="$HERE/ansible"
 EXAMPLES_DIR="$HERE/etc/examples"                            # template mặc định, đi kèm repo
-VENV_DIR="${ICINGA_ANSIBLE_VENV:-$HERE/.venv}"
-ANSIBLE_PLAYBOOK=""
-
-[[ "$VENV_DIR" == /* ]] || VENV_DIR="$HERE/$VENV_DIR"
-
-# Mọi lệnh vận hành phải dùng Ansible trong virtual environment. Nếu operator đã activate một
-# venv khác thì tôn trọng venv đó; nếu không, tự dùng .venv của project. Không fallback về Ansible
-# hệ thống vì việc đó làm version thay đổi âm thầm giữa các deployment node.
-resolve_ansible_playbook() {
-  if [[ -n "${VIRTUAL_ENV:-}" ]] && [[ -x "$VIRTUAL_ENV/bin/ansible-playbook" ]]; then
-    ANSIBLE_PLAYBOOK="$VIRTUAL_ENV/bin/ansible-playbook"
-  elif [[ -x "$VENV_DIR/bin/ansible-playbook" ]]; then
-    ANSIBLE_PLAYBOOK="$VENV_DIR/bin/ansible-playbook"
-  else
-    echo "Chưa có Ansible virtual environment." >&2
-    echo "Chạy: $HERE/tools/setup-venv" >&2
-    echo "Sau đó có thể activate bằng: source '$VENV_DIR/bin/activate'" >&2
-    exit 1
-  fi
-
-  local expected_version actual_version
-  expected_version="$(sed -n 's/^ansible-core==//p' "$HERE/requirements.txt" | tr -d '[:space:]')"
-  actual_version="$("$ANSIBLE_PLAYBOOK" --version | sed -n '1s/.*\[core \([^]]*\)\].*/\1/p')"
-  if [[ -z "$expected_version" || "$actual_version" != "$expected_version" ]]; then
-    echo "Sai phiên bản ansible-core trong venv: '${actual_version:-không xác định}'." >&2
-    echo "Project yêu cầu: ${expected_version:-không đọc được từ requirements.txt}." >&2
-    echo "Chạy lại: $HERE/tools/setup-venv" >&2
-    exit 1
-  fi
-}
 
 CONFIG_DIR="${ICINGA_ANSIBLE_CONFIG_DIR:-/etc/icinga-ansible}"   # config THẬT — cố định, ngoài repo
-[[ "$CONFIG_DIR" == /* ]] || CONFIG_DIR="$(pwd)/$CONFIG_DIR"
 PLAYBOOK="$ANSIBLE_DIR/icinga-ansible.yml"
 GLOBALS="$CONFIG_DIR/globals.yml"
 PASSWORDS="$CONFIG_DIR/passwords.yml"
@@ -155,16 +124,7 @@ done
 
 # Help phải hoạt động ngay cả trên máy chưa init-config. Trước đây "icinga-ansible help" đi qua
 # guard globals.yml bên dưới và fail, trong khi "-h/--help" chỉ tình cờ thoát sớm lúc parse args.
-case "$COMMAND" in
-  help|-h|--help) usage; exit 0 ;;
-esac
-
-# init-config, restore-config và genpwd là Bash thuần. Các lệnh còn lại phải resolve Ansible từ
-# venv trước khi đụng tới config/cluster, để không bao giờ vô tình dùng package apt của hệ thống.
-case "$COMMAND" in
-  init-config|restore-config|genpwd) ;;
-  *) resolve_ansible_playbook ;;
-esac
+[[ "$COMMAND" == "help" ]] && { usage; exit 0; }
 
 # inventory tương đối -> tuyệt đối theo THƯ MỤC ĐANG ĐỨNG lúc gọi lệnh (CWD), giống hệt
 # kolla-ansible (quickstart chính thức: "cp .../all-in-one ." rồi "kolla-ansible deploy -i
@@ -220,7 +180,6 @@ init_config() {
   RESTORE_MEMBERS="$(mktemp)"
   RESTORE_STAGE="$(mktemp -d)"
   trap 'rm -f "$RESTORE_MEMBERS"; sudo rm -rf "$RESTORE_STAGE"' EXIT
-  # shellcheck disable=SC2024  # RESTORE_MEMBERS is intentionally written by the invoking user.
   sudo tar -tzf "$CONFIG_BACKUP" > "$RESTORE_MEMBERS"
   if grep -Eq '(^|/)\.\.(/|$)|^/' "$RESTORE_MEMBERS"; then
     echo "Backup chứa đường dẫn không an toàn; từ chối restore." >&2
@@ -296,7 +255,7 @@ fi
 
 run() {   # run <ansible extra args...>
   cd "$ANSIBLE_DIR"
-  "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$PLAYBOOK" \
+  ansible-playbook -i "$INVENTORY" "$PLAYBOOK" \
     -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
     "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "$@" "${EXTRA_ARGS[@]}"
 }
@@ -305,7 +264,7 @@ case "$COMMAND" in
   bootstrap-servers) run --tags bootstrap ;;
   prepare-check-by-ssh)
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/prepare-check-by-ssh.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/prepare-check-by-ssh.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
       "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
@@ -314,43 +273,43 @@ case "$COMMAND" in
   reconfigure)       run --tags deploy -e icinga_action=reconfigure ;;
   pull)
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/pull.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/pull.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   post-deploy)
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/post-deploy.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/post-deploy.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   check)
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/check.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/check.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   destroy)
     # KHÔNG dùng run() ở đây: run() luôn chèn $PLAYBOOK (icinga-ansible.yml) mặc định,
     # nếu gộp chung sẽ chạy CẢ deploy lẫn destroy trong 1 lệnh. destroy chạy playbook riêng.
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/destroy.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/destroy.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 
   upgrade-plan)
     # Dry-run, read-only. Playbook riêng (không phải $PLAYBOOK site).
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/upgrade-plan.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/upgrade-plan.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   upgrade)
     # Nâng cấp rolling theo icinga_image_versions MỚI trong globals.yml (tự backup pre-upgrade).
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/upgrade.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/upgrade.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   rollback)
     # Quay về version CŨ (sửa globals.yml về cũ trước) + restore DB pre-upgrade. Bắt buộc -e confirm=yes.
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/rollback.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/rollback.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 
@@ -369,7 +328,7 @@ case "$COMMAND" in
     # Bắt buộc: -e target_host=<tên trong inventory> -e confirm=yes
     cd "$ANSIBLE_DIR"
     PB="remove-master.yml"; [[ "$COMMAND" == "remove-node" ]] && PB="remove-node.yml"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/$PB" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/$PB" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     echo ""
     echo "!!! Nhớ: xoá host khỏi inventory rồi chạy 'icinga-ansible reconfigure' để đồng bộ"
@@ -380,7 +339,7 @@ case "$COMMAND" in
     # KHÔNG dùng run(): playbook riêng, không phải $PLAYBOOK mặc định. Bắt buộc:
     # -e recovery_mode=restore-backup|recover-cluster -e confirm=yes (xem design.md 10.4).
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/mariadb-recovery.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/mariadb-recovery.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   recover-db-only)
@@ -388,7 +347,7 @@ case "$COMMAND" in
     # của master cũ. Playbook dừng publisher/consumer, lấy environment ID từ DB đã restore,
     # seed cùng ID lên mọi master, FLUSHALL Redis tạm rồi khởi động lại theo đúng thứ tự.
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/recover-db-only.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/recover-db-only.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 
@@ -401,7 +360,7 @@ case "$COMMAND" in
     # icinga_action + backup_tag truyền tường minh để role chỉ chạy nhánh backup.
     cd "$ANSIBLE_DIR"
     BACKUP_TS="$(date +%Y%m%d-%H%M%S)"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/backup-full.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/backup-full.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "backup_ts=$BACKUP_TS" -e icinga_action=backup -e backup_tag=full \
       "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
@@ -411,7 +370,7 @@ case "$COMMAND" in
     # MỚI — xem design.md mục 10.6, playbooks/restore-pki.yml. Bỏ qua bước này = PKI mới hoàn toàn
     # (mặc định, "deploy" tự tạo CA mới như bình thường).
     cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/restore-pki.yml" \
+    ansible-playbook -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/restore-pki.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 

@@ -1,9 +1,0 @@
-# The project is executed on Linux. Keep shebang scripts in LF even when the
-# repository is edited/staged from a Windows workstation with core.autocrlf.
-*.sh                  text eol=lf
-*.sh.j2               text eol=lf
-*.py                  text eol=lf
-tools/icinga-ansible  text eol=lf
-tools/setup-venv      text eol=lf
-tools/validate        text eol=lf
-requirements.txt      text eol=lf

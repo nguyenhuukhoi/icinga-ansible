@@ -25,8 +25,7 @@ Bạn không cần cài từng cái tay — chỉ cần khai vài biến trong 1
 
 - **Hệ điều hành host đích**: Ubuntu 24.04 hoặc 26.04 (đã verify — bản khác chưa test).
 - **Máy điều khiển** (nơi bạn chạy lệnh `icinga-ansible`, có thể là 1 trong các host đích hoặc máy
-  riêng): cần Python 3.11–3.13, gói `python3-venv`, Git và SSH tới được các host đích. Ansible được
-  cài trong `.venv` của project, không cài bằng `apt`.
+  riêng): cần cài `ansible` + Python + SSH tới được các host đích.
 - **User chạy lệnh**: cần **sudo không cần nhập mật khẩu** (`passwordless sudo`) trên mọi host đích —
   Ansible tự nâng quyền (`become`) khi cần (cài Docker, tạo container...).
 - **Nếu host đích sau proxy công ty** (không ra Internet trực tiếp): chuẩn bị sẵn URL proxy, sẽ khai
@@ -46,11 +45,10 @@ Cách nhanh nhất để "sờ" được sản phẩm: deploy mọi thứ trên 
 # 0. Lấy code (đường dẫn tuỳ ý, ví dụ /opt/icinga-ansible)
 cd /opt/icinga-ansible
 
-# 1. Tạo venv và cài đúng phiên bản Ansible + collection của project
+# 1. Cài Ansible + collection cần thiết
 sudo apt update
-sudo apt install -y git python3 python3-venv
-./tools/setup-venv
-source .venv/bin/activate
+sudo apt install -y ansible python3-docker
+ansible-galaxy collection install -r ansible/requirements.yml
 
 # 2. Khởi tạo cấu hình thật (tách biệt hoàn toàn khỏi code, xem mục 5 bên dưới)
 ./tools/icinga-ansible init-config      # tạo /etc/icinga-ansible (cần sudo, chỉ chạy 1 lần)
@@ -100,12 +98,11 @@ SSH ra 7 host quản lý (2 master HA + 2 satellite 1 zone con + 3 node Galera c
 inventory mẫu `ansible/inventory/ha-2master-2satellite-galera3` — chỉ cần đổi IP.
 
 ```bash
-# 0. Trên DEPLOYMENT NODE (máy riêng, KHÔNG phải master1/master2/...) — tạo Ansible venv
+# 0. Trên DEPLOYMENT NODE (máy riêng, KHÔNG phải master1/master2/...) — lấy code, cài Ansible
 cd /opt/icinga-ansible
 sudo apt update
-sudo apt install -y git python3 python3-venv
-./tools/setup-venv
-source .venv/bin/activate
+sudo apt install -y ansible python3-docker
+ansible-galaxy collection install -r ansible/requirements.yml
 
 # 1. SSH key của deployment node phải có mặt trong authorized_keys của CẢ 7 host quản lý
 for h in <ip-master1> <ip-master2> <ip-sat01> <ip-sat02> <ip-galera1> <ip-galera2> <ip-galera3>; do
