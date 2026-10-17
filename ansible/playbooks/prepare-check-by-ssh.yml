@@ -48,12 +48,44 @@
       become: false
       run_once: true
 
+    # Private key có thể được restore/copy từ backup mà không kèm file .pub. `ssh-keygen`
+    # phía trên dùng creates nên sẽ không chạy trong trường hợp đó; tự dẫn xuất public key
+    # để prepare-check-by-ssh vẫn idempotent sau restore.
+    - name: Kiểm tra public key monitoring đã tồn tại
+      ansible.builtin.stat:
+        path: "{{ monitor_private_key }}.pub"
+      register: monitor_public_key_stat
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Dẫn xuất public key từ private key đã restore
+      ansible.builtin.command:
+        argv: [ssh-keygen, -y, -f, "{{ monitor_private_key }}"]
+      register: monitor_public_key_derived
+      changed_when: true
+      when: not monitor_public_key_stat.stat.exists
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Ghi public key được dẫn xuất
+      ansible.builtin.copy:
+        dest: "{{ monitor_private_key }}.pub"
+        content: "{{ monitor_public_key_derived.stdout }} icinga-check-by-ssh{{ '\n' }}"
+        mode: "0644"
+      when: not monitor_public_key_stat.stat.exists
+      delegate_to: localhost
+      become: false
+      run_once: true
+
     - name: Đọc public key monitoring từ deployment node
       ansible.builtin.slurp:
         src: "{{ monitor_private_key }}.pub"
       register: monitor_public_key_file
       delegate_to: localhost
       become: false
+      run_once: true
 
   tasks:
     - name: Thu thập distribution facts tối thiểu trên Linuxfabrik target ngoài cụm
