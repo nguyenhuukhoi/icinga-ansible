@@ -93,7 +93,9 @@
       ansible.builtin.command:
         # Không dùng -H: hash known_hosts có salt ngẫu nhiên, làm file đổi ở mọi
         # lần chạy dù host key không đổi và kéo theo recreate container vô ích.
-        argv: [ssh-keyscan, -T, "10", "{{ ansible_host }}"]
+        # Chỉ pin Ed25519 để mỗi host có đúng một dòng ổn định; thứ tự nhiều
+        # thuật toán do ssh-keyscan trả về có thể thay đổi giữa các lần chạy.
+        argv: [ssh-keyscan, -T, "10", -t, ed25519, "{{ ansible_host }}"]
       register: monitor_host_key
       changed_when: false
       delegate_to: localhost
