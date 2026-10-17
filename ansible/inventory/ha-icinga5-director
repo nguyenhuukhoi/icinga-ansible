@@ -1,7 +1,6 @@
-# Lab 2026-08-30: 2 Icinga master riêng + 3 Galera DB riêng.
-# Chạy Ansible từ master1, nên chỉ master1 dùng local connection.
+# Lab 2026-08-30: deployment node riêng + 2 Icinga master + 3 Galera DB.
 [all_hosts]
-master1 ansible_host=172.28.82.170 ansible_connection=local
+master1 ansible_host=172.28.82.170 ansible_user=ubuntu ansible_ssh_private_key_file=/home/ubuntu/.ssh/codex-admin
 master2 ansible_host=172.28.82.171 ansible_user=ubuntu ansible_ssh_private_key_file=/home/ubuntu/.ssh/codex-admin
 db1     ansible_host=172.28.82.172 ansible_user=ubuntu ansible_ssh_private_key_file=/home/ubuntu/.ssh/codex-admin
 db2     ansible_host=172.28.82.173 ansible_user=ubuntu ansible_ssh_private_key_file=/home/ubuntu/.ssh/codex-admin

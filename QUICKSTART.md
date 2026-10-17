@@ -135,8 +135,7 @@ done
 cp ansible/inventory/ha-2master-2satellite-galera3 my-ha-cluster
 $EDITOR my-ha-cluster
 # -> đổi 7 dòng ansible_host thành IP thật.
-# -> XOÁ hẳn "ansible_connection=local" ở dòng master1 — deployment node giờ KHÔNG trùng với
-#    master1 nữa, master1 phải là 1 SSH target bình thường như 6 host còn lại.
+# -> không thêm "ansible_connection=local": master1 là SSH target như 6 host còn lại.
 
 # 4. (tuỳ chọn) Sửa cấu hình — vd khai satellite_zones cho zone con "dc-hcm" gồm sat01+sat02
 $EDITOR /etc/icinga-ansible/globals.yml
@@ -289,25 +288,21 @@ Có 5 inventory mẫu sẵn trong `ansible/inventory/`:
 
 #### `ansible_connection=local` là gì?
 
-Một số file mẫu (`ha-2master-galera3`, `ha-2master-2satellite-galera3`...) có dòng kiểu:
+Inventory all-in-one có dòng kiểu:
 ```ini
-master1 ansible_host=10.0.0.11 ansible_connection=local
+localhost ansible_host=127.0.0.1 ansible_connection=local
 ```
 `ansible_connection` báo Ansible **cách kết nối tới host đó** để chạy task — mặc định (không khai
 gì) là `ssh`, tức luôn mở SSH ra host, kể cả khi host đó chính là máy đang gõ lệnh. Khai
 `ansible_connection=local` nghĩa là **bỏ qua SSH, chạy task thẳng trên chính máy đang chạy
-`ansible-playbook`** — dùng khi 1 host trong inventory chính là máy điều khiển (control node) tự
-quản, ví dụ `master1` vừa là 1 master thật trong cluster vừa là nơi bạn cài `icinga-ansible` và gõ
-lệnh `./tools/icinga-ansible ...`.
+`ansible-playbook`**.
 
 **Khi nào cần, khi nào không:**
-- **Deployment node kiêm luôn 1 host trong inventory** (setup lab, `master1` vừa chạy Ansible vừa
-  chạy `icinga2`/`icingadb`): khai `ansible_connection=local` cho ĐÚNG host đó thôi, các host còn
-  lại vẫn SSH bình thường.
-- **Deployment node tách riêng hoàn toàn** (như mục 3 phía trên — không phải master/satellite/galera
-  nào cả, chỉ dùng để chạy Ansible SSH ra các host khác): **không cần khai `ansible_connection=local`
-  ở đâu cả** — deployment node không nằm trong inventory (không cần group riêng cho nó, khác
-  kolla-ansible có group `[deployment]`), mọi host trong `[all_hosts]` đều SSH bình thường như nhau.
+- **All-in-one một host**: deployment node cũng là host duy nhất chạy Icinga, nên `localhost` dùng
+  local connection.
+- **Mọi mô hình multi-master**: deployment node tách riêng hoàn toàn, không phải
+  master/satellite/Galera và không nằm trong inventory. Không khai `ansible_connection=local` ở
+  đâu; mọi host trong `[all_hosts]` đều được quản lý qua SSH.
   `$CONFIG_DIR` (`/etc/icinga-ansible`: `globals.yml`, `passwords.yml`, override) đặt trên chính
   deployment node này (chạy `init-config`/`genpwd` ở đó), và SSH key của nó phải được
   `authorized_keys` trên toàn bộ host trong inventory.

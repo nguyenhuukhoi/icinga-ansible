@@ -2,13 +2,13 @@
 # THẬT (10.0.0.11-17). Đổi IP theo hạ tầng thật của bạn. Đổi tên từ "ha-2master-standalone-db"
 # (2026-07-23, theo yêu cầu người dùng — tên cũ sai/gây nhầm: DB ở đây là Galera cluster THẬT,
 # không phải standalone).
-# Ansible chạy TỪ master1 (control node tự quản) -> master1 dùng ansible_connection=local,
-# các host còn lại SSH qua key mặc định (~/.ssh/id_ed25519) của master1.
+# Mô hình multi-master luôn dùng deployment node TÁCH RIÊNG, không nằm trong inventory này.
+# Deployment node SSH tới toàn bộ master/satellite/Galera; không host nào dùng connection=local.
 # satellite_zones (zone gồm sat01+sat02) khai trong /etc/icinga-ansible/globals.yml.
 # Xem thêm "ha-2master-galera3" (cùng 3 node Galera, KHÔNG có satellite) nếu không cần zone con.
 
 [all_hosts]
-master1 ansible_host=10.0.0.11 ansible_connection=local
+master1 ansible_host=10.0.0.11
 master2 ansible_host=10.0.0.12
 sat01   ansible_host=10.0.0.13
 sat02   ansible_host=10.0.0.14

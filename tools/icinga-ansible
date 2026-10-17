@@ -32,6 +32,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"     # thư mục repo (c
 ANSIBLE_DIR="$HERE/ansible"
 EXAMPLES_DIR="$HERE/etc/examples"                            # template mặc định, đi kèm repo
 ANSIBLE_PLAYBOOK=""
+ANSIBLE_INVENTORY=""
+VENV_PYTHON=""
 
 CONFIG_DIR="${ICINGA_ANSIBLE_CONFIG_DIR:-/etc/icinga-ansible}"   # config THẬT — cố định, ngoài repo
 PLAYBOOK="$ANSIBLE_DIR/icinga-ansible.yml"
@@ -143,6 +145,14 @@ require_active_ansible_venv() {
     echo "Chạy trong venv: python -m pip install -U pip && python -m pip install ansible" >&2
     exit 1
   fi
+
+  ANSIBLE_INVENTORY="$VIRTUAL_ENV/bin/ansible-inventory"
+  VENV_PYTHON="$VIRTUAL_ENV/bin/python"
+  if [[ ! -x "$ANSIBLE_INVENTORY" || ! -x "$VENV_PYTHON" ]]; then
+    echo "Venv '$VIRTUAL_ENV' thiếu ansible-inventory hoặc python." >&2
+    echo "Chạy lại trong venv: python -m pip install ansible" >&2
+    exit 1
+  fi
 }
 
 case "$COMMAND" in
@@ -159,6 +169,24 @@ esac
 # TƯƠNG ĐỐI người dùng tự truyền qua -i — path tuyệt đối giữ nguyên, INVENTORY mặc định
 # ($ANSIBLE_DIR/inventory/all-in-one) đã tuyệt đối sẵn nên không đổi hành vi khi không truyền -i.
 [[ "$INVENTORY" != /* ]] && INVENTORY="$(pwd)/$INVENTORY"
+
+# Kiểm tra hoàn toàn trên deployment node, trước khi Ansible kết nối hay thay đổi host nào. Điều này
+# chặn hai lỗi cấu hình nguy hiểm: multi-master dùng nhầm local connection và managed node dùng
+# nhầm Python trong venv của deployment node.
+validate_inventory_model() {
+  local inventory_json
+  if ! inventory_json="$(cd "$ANSIBLE_DIR" && "$ANSIBLE_INVENTORY" \
+      -i "$INVENTORY" --playbook-dir "$ANSIBLE_DIR" --list)"; then
+    echo "Không phân tích được inventory: $INVENTORY" >&2
+    exit 1
+  fi
+  printf '%s' "$inventory_json" | "$VENV_PYTHON" "$HERE/tools/check-inventory-model"
+}
+
+case "$COMMAND" in
+  init-config|restore-config|genpwd) ;;
+  *) validate_inventory_model ;;
+esac
 
 # tạo $CONFIG_DIR từ template nếu chưa có (không ghi đè file đã tồn tại)
 init_config() {

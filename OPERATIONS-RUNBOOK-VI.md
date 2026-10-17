@@ -261,7 +261,9 @@ master
 satellite
 ```
 
-Nếu deployment node là máy riêng, không thêm nó vào `[all_hosts]`. Nếu deployment node chính là một service node, chỉ host đó mới dùng `ansible_connection=local`.
+Với mọi mô hình multi-master, deployment node là máy riêng và không nằm trong `[all_hosts]`; không
+host nào trong inventory được dùng `ansible_connection=local`. Local connection chỉ dành cho
+inventory all-in-one một host.
 
 Tên trong inventory là identity Icinga. `satellite_zones[].members` dùng tên này, không dùng IP.
 

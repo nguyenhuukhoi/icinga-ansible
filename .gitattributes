@@ -3,4 +3,5 @@
 *.sh.j2               text eol=lf
 *.py                  text eol=lf
 tools/icinga-ansible  text eol=lf
+tools/check-inventory-model text eol=lf
 tools/validate        text eol=lf
