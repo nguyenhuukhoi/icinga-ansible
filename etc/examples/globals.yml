@@ -64,9 +64,18 @@ mariadb_allow_rolling_series_upgrade: false
 custom_image_registry: ""            # vd "10.10.10.151:8081/icinga" (host:port + namespace/project)
 # custom_image_overrides: rỗng (mặc định) = mọi image dùng bản gốc. Ghi đè image nào tuỳ ý (đúng key
 # icinga2/icingadb/icingaweb2/icingadb_redis/mariadb), giá trị là "basename:tag" bạn tự đặt (ghép SAU
-# custom_image_registry) — không ép suffix/quy ước nào, vd:
+# custom_image_registry) — không ép suffix/quy ước nào. Ví dụ chỉ ghi đè Icinga 2:
 # custom_image_overrides:
 #   icinga2: "icinga2:2.16.5-custom"
+#
+# Ví dụ dùng đủ năm image do icinga-image-builder push lên Harbor:
+# custom_image_registry: "172.28.81.109/openstack.kolla/icinga"
+# custom_image_overrides:
+#   icinga2: "icinga2:2.16.5"
+#   icingadb: "icingadb:1.5.1"
+#   icingadb_redis: "icingadb-redis:7.4.11"
+#   icingaweb2: "icingaweb2:2.14.0"
+#   mariadb: "mariadb:12.3.3"
 custom_image_overrides: {}
 
 # Registry & tag image

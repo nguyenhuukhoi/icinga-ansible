@@ -352,6 +352,49 @@ cd ~
 ~/icinga-ansible/tools/icinga-ansible deploy -i my-cluster
 ```
 
+### 5.5. Dùng image custom từ Harbor
+
+`icinga-ansible` không build image. Sau khi build và push bằng `icinga-image-builder`, khai registry và
+tag trong `/etc/icinga-ansible/globals.yml`. Ví dụ dùng đủ năm image đã pin:
+
+```yaml
+custom_image_registry: "172.28.81.109/openstack.kolla/icinga"
+custom_image_overrides:
+  icinga2: "icinga2:2.16.5"
+  icingadb: "icingadb:1.5.1"
+  icingadb_redis: "icingadb-redis:7.4.11"
+  icingaweb2: "icingaweb2:2.14.0"
+  mariadb: "mariadb:12.3.3"
+```
+
+Giá trị thực tế được ghép theo dạng
+`<custom_image_registry>/<custom_image_overrides.<tên>>`; ví dụ Icinga Web trở thành
+`172.28.81.109/openstack.kolla/icinga/icingaweb2:2.14.0`. Không thêm `http://` hoặc `https://` vào
+`custom_image_registry`.
+
+Không bắt buộc ghi đè đủ năm image. Ví dụ chỉ dùng image Icinga 2 có thêm Python/OpenStack SDK, còn
+bốn image khác tiếp tục lấy từ nguồn upstream:
+
+```yaml
+custom_image_registry: "172.28.81.109/openstack.kolla/icinga"
+custom_image_overrides:
+  icinga2: "icinga2:2.16.5-custom"
+```
+
+Sau khi sửa cấu hình, pull và kiểm tra trước khi triển khai:
+
+```bash
+source /path/to/venv/bin/activate
+./tools/icinga-ansible prechecks -i my-cluster
+./tools/icinga-ansible pull      -i my-cluster
+./tools/icinga-ansible deploy    -i my-cluster
+./tools/icinga-ansible check     -i my-cluster
+```
+
+Nếu bật Director, không thêm key `director` vào `custom_image_overrides`: Director là module nằm trong
+image `icingaweb2`, vì vậy chỉ cần override `icingaweb2` và bật `director` trong
+`enable_icingaweb2_modules`.
+
 ## 6. Ghi đè cấu hình (override) — tuỳ biến sâu mà không sửa code
 
 Đây là cơ chế mạnh nhất của `icinga-ansible`: bạn có thể chỉnh **bất kỳ file config nào** (thêm
