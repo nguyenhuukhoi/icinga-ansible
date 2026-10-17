@@ -151,6 +151,10 @@
       - conf.d/telegram-notifications.conf
       - telegram-host-notification.sh
       - telegram-service-notification.sh
+      # Script này được mount riêng vào /usr/lib/nagios/custom-plugins. Nếu không loại trừ, lượt
+      # deploy thứ hai quét nhầm file đã seed ở top-level thành base config, thêm một mount /data
+      # không cần thiết và làm fingerprint đổi khiến cả hai container Icinga 2 bị recreate một lần.
+      - check_openstack_service.py
 
 - name: Dò toàn bộ file trong skeleton /data/etc/icinga2 (để seed ra node)
   ansible.builtin.find:

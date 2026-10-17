@@ -367,6 +367,21 @@ custom_image_overrides:
   mariadb: "mariadb:12.3.3"
 ```
 
+Nếu Harbor dùng CA nội bộ hoặc certificate tự ký, chép CA về deployment node rồi khai thêm trước
+khi chạy `bootstrap-servers`:
+
+```bash
+sudo install -o "$USER" -g "$USER" -m 0644 harbor-ca.crt /etc/icinga-ansible/harbor-ca.crt
+```
+
+```yaml
+docker_registry_ca_file: "/etc/icinga-ansible/harbor-ca.crt"
+```
+
+Role sẽ xác minh file nguồn rồi cài CA vào
+`/etc/docker/certs.d/<registry-host[:port]>/ca.crt` trên mọi managed node. Sau khi đổi CA, chạy lại
+`bootstrap-servers` để cập nhật Docker daemon. Không cần hạ bảo mật bằng `insecure-registries`.
+
 Giá trị thực tế được ghép theo dạng
 `<custom_image_registry>/<custom_image_overrides.<tên>>`; ví dụ Icinga Web trở thành
 `172.28.81.109/openstack.kolla/icinga/icingaweb2:2.14.0`. Không thêm `http://` hoặc `https://` vào
@@ -827,6 +842,7 @@ $EDITOR ansible/inventory/my-cluster    # xoá host đó khỏi inventory
 | `unreachable` khi chạy trên nhiều host | Bạn chạy `icinga-ansible` qua `sudo`/`sudo su` — SSH ra host khác dùng nhầm key của root | Chạy lại bằng user thường (có sudo passwordless), không bọc `sudo` trước cả câu lệnh |
 | `deploy` báo thiếu thư mục (`directory ... does not exist`) trên host mới/vừa `destroy` | Host đó chưa từng chạy `bootstrap-servers` | Chạy `bootstrap-servers` trước, rồi `deploy` lại |
 | `apt update`/`docker pull` treo mãi không xong | Thiếu proxy trong `/etc/environment` trên managed node | Khai đủ HTTP/HTTPS/NO_PROXY theo mục 4, chạy lại `bootstrap-servers` |
+| `docker pull` Harbor lỗi `x509: certificate signed by unknown authority` | Docker daemon chưa trust CA nội bộ của Harbor | Lưu CA trên deployment node, khai `docker_registry_ca_file`, chạy lại `bootstrap-servers`, rồi `pull` |
 | Journal có `ubuntupro.lib.esm_cache` / `contracts.canonical.com` / `Network is unreachable` | `esm-cache.service` chưa được nối với `/etc/environment`, hoặc proxy không truy cập được | Cập nhật code, chạy lại `bootstrap-servers`; dùng `systemctl cat esm-cache.service` kiểm tra dòng `EnvironmentFile=-/etc/environment`, rồi start service và đọc journal |
 | `permission denied` khi gọi `docker ...` tay trên host | User chưa vào group `docker`/chưa `sudo` | Ansible tự `become` đúng lúc cần — nếu bạn tự gõ lệnh `docker` tay thì phải tự thêm `sudo` |
 | Web login báo lỗi, hoặc không load được trang | Nhầm cổng — web chạy ở **8080**, không phải 80/443 mặc định | Kiểm tra lại URL `http://<ip>:8080/authentication/login` |

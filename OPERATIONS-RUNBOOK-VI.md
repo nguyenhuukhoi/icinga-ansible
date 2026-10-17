@@ -1256,6 +1256,7 @@ Các timestamp trên chỉ là artifact lab và không được giả định c�
 | `UNREACHABLE` hàng loạt | Chạy CLI bằng root nên dùng sai SSH key | Chạy lại bằng user thường có passwordless sudo |
 | `deploy` thiếu directory/network | Host mới chưa bootstrap | Chạy `bootstrap-servers --limit <host>` |
 | Docker pull lỗi 429/5xx/timeout | Docker Hub/CDN, proxy hoặc rate limit | Chạy `pull`; code mới tự retry 8 lần. Nếu vẫn lỗi, kiểm tra Docker daemon proxy và mirror image vào registry nội bộ |
+| Docker pull registry nội bộ lỗi `x509: certificate signed by unknown authority` | Docker daemon chưa có CA của registry | Đặt CA trên deployment node, khai `docker_registry_ca_file` trong `globals.yml`, chạy lại `bootstrap-servers`, rồi `pull` |
 | Icinga DB log `unexpected Redis schema version` | Trộn Icinga 2 `<2.15` với Icinga DB `>=1.4`, hoặc ngược lại | Trả về cặp cùng thế hệ; chạy `prechecks`; không ép bỏ compatibility guard |
 | Web không mở | Dùng nhầm 80/443 | Mặc định dùng `http://host:8080` |
 | Web login trả về lại trang login | Credential DB/admin không hội tụ | Chạy `reconfigure`, sau đó `check`; kiểm tra DB restore/passwords.yml |

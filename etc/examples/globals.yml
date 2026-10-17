@@ -78,6 +78,11 @@ custom_image_registry: ""            # vd "10.10.10.151:8081/icinga" (host:port 
 #   mariadb: "mariadb:12.3.3"
 custom_image_overrides: {}
 
+# CA của registry nội bộ dùng certificate riêng/tự ký. Đây là đường dẫn trên deployment node;
+# bootstrap-servers sẽ copy CA vào /etc/docker/certs.d/<registry>/ca.crt trên mọi managed node.
+# Để trống khi registry dùng CA công cộng. Không dùng insecure-registry nếu đã có CA.
+docker_registry_ca_file: ""          # vd "/etc/icinga-ansible/harbor-ca.crt"
+
 # Registry & tag image
 docker_registry: ""                             # "" = Docker Hub / icinga official
 docker_namespace: "icinga"

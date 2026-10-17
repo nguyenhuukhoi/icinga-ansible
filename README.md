@@ -79,6 +79,10 @@ ansible-galaxy collection install -r ansible/requirements.yml
 # 3. Chỉnh cấu hình (mặc định đã chạy được ngay, không bắt buộc sửa)
 $EDITOR /etc/icinga-ansible/globals.yml       # icinga_image_versions (tag image), module, DB...
 
+# Nếu Harbor/registry dùng CA riêng hoặc certificate tự ký, lưu CA trên deployment node rồi khai:
+# docker_registry_ca_file: "/etc/icinga-ansible/harbor-ca.crt"
+# bootstrap-servers sẽ cài CA này vào trust store Docker trên mọi managed node.
+
 # 4. Bootstrap host (Docker Engine, chrony) — bỏ qua nếu host đã có sẵn
 ./tools/icinga-ansible bootstrap-servers -i ansible/inventory/all-in-one
 

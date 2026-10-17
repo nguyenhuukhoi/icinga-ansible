@@ -189,6 +189,7 @@ custom_image_registry: ""              # vd "10.10.10.151:8081/icinga"
 # không đổi gì. Tự đặt tag/suffix tuỳ ý, không ép "-custom" hay bất kỳ quy ước nào.
 # vd: { icinga2: "icinga2:2.16.5-custom" } hoặc { icinga2: "icinga2:2.16.5-anything" }
 custom_image_overrides: {}
+docker_registry_ca_file: ""
 
 # images: giá trị THỰC TẾ dùng khi khởi động container — mọi role (icinga2/icingadb/icingaweb2/
 # mariadb/redis) CHỈ tham chiếu images.<tên>, KHÔNG cần biết có override hay không.

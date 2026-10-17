@@ -227,6 +227,48 @@
         enabled: true
   tags: [bootstrap]
 
+# Registry nội bộ thường dùng CA doanh nghiệp hoặc certificate tự ký. Docker không dùng trust store
+# của deployment node; CA phải có trên từng daemon ở đúng certs.d/<host[:port]>/ca.crt.
+- name: (bootstrap) Kiểm tra file CA registry trên deployment node
+  ansible.builtin.stat:
+    path: "{{ docker_registry_ca_file }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: _docker_registry_ca_source
+  when: (docker_registry_ca_file | default('') | length) > 0
+  tags: [bootstrap]
+
+- name: (bootstrap) Chặn sớm nếu CA hoặc registry chưa được khai đúng
+  ansible.builtin.assert:
+    that:
+      - _docker_registry_ca_source.stat.exists | default(false)
+      - _docker_registry_ca_source.stat.isreg | default(false)
+      - (custom_image_registry | default('') | length) > 0 or (docker_registry | default('') | length) > 0
+    fail_msg: >-
+      docker_registry_ca_file phải trỏ tới file CA có thật trên deployment node và cần khai
+      custom_image_registry hoặc docker_registry.
+  run_once: true
+  when: (docker_registry_ca_file | default('') | length) > 0
+  tags: [bootstrap]
+
+- name: (bootstrap) Tạo thư mục CA cho registry trên Docker daemon
+  ansible.builtin.file:
+    path: "/etc/docker/certs.d/{{ ((custom_image_registry | default('')) or (docker_registry | default(''))).split('/')[0] }}"
+    state: directory
+    mode: "0755"
+  when: (docker_registry_ca_file | default('') | length) > 0
+  tags: [bootstrap]
+
+- name: (bootstrap) Cài CA registry cho Docker daemon
+  ansible.builtin.copy:
+    src: "{{ docker_registry_ca_file }}"
+    dest: "/etc/docker/certs.d/{{ ((custom_image_registry | default('')) or (docker_registry | default(''))).split('/')[0] }}/ca.crt"
+    mode: "0644"
+  notify: Restart docker
+  when: (docker_registry_ca_file | default('') | length) > 0
+  tags: [bootstrap]
+
 # ---------- PREP: thư mục state & mạng ----------
 # Trước đây tag [bootstrap, deploy] — CỐ Ý cho "deploy" tự chạy kèm phòng khi quên bootstrap-servers.
 # Đã bỏ "deploy" (2026-07-22, theo yêu cầu người dùng — tách hẳn 2 lệnh, xem icinga-ansible.yml đầu
