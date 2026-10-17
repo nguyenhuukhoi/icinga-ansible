@@ -107,7 +107,7 @@
 
     - name: Kiểm tra Linuxfabrik package đã được cài chưa
       ansible.builtin.command:
-        argv: [dpkg-query, -W, -f=${Status}, linuxfabrik-monitoring-plugins]
+        argv: [dpkg-query, -W, '-f=${Status}', linuxfabrik-monitoring-plugins]
       register: linuxfabrik_package_status
       changed_when: false
       failed_when: false
