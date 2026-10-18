@@ -160,10 +160,16 @@ enable_icingaweb2_modules:
 director_auto_kickstart: false
 
 # File nhạy cảm dành cho check script đặt tại:
-#   /etc/icinga-ansible/config/icinga2/secret/
+#   config/icinga2/secret/                         (mọi Icinga node)
+#   config/icinga2/group_master/secret/            (chỉ master)
+#   config/icinga2/group_satellite/secret/         (chỉ satellite)
+#   config/icinga2/<inventory_hostname>/secret/    (chỉ một node)
+# Thứ tự trộn: global -> loại node -> host. Tầng sau ghi đè file cùng đường dẫn ở tầng trước;
+# những file khác vẫn được giữ. Xem QUICKSTART.md mục 3 để biết ví dụ đầy đủ.
 # Ansible đồng bộ và mount read-only vào container Icinga 2 tại:
 #   /etc/icinga-ansible/icinga2/
-# Có thể override hai đường dẫn sau nếu cần.
+# Có thể override đường dẫn global và đường dẫn trong container nếu cần. Các tầng group/host luôn nằm
+# dưới deploy_config_dir để cấu trúc override nhất quán với phần config Icinga 2 còn lại.
 icinga2_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secret"
 icinga2_secret_container_dir: "/etc/icinga-ansible/icinga2"
 

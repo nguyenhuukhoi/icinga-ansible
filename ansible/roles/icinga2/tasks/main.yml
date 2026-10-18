@@ -93,31 +93,95 @@
   ansible.builtin.set_fact:
     ic_run: "docker run --rm -v {{ ic_data }}:/data {{ images.icinga2 }}"
 
-# Files in this directory are operator-owned inputs, not Icinga DSL. The deployment node may be a
-# separate host, so copy them to every Icinga node before adding the container bind mount.
-- name: Kiểm tra thư mục secret Icinga 2 trên deployment node
+# These are operator-owned inputs, not Icinga DSL. Merge in deterministic order: global, node role,
+# host. Later sources override the same relative path from earlier sources. A topology node belongs
+# to only one Icinga role; keep the explicit order defensive and independent from group_names order.
+- name: Xác định loại Icinga node cho tầng secret
+  ansible.builtin.set_fact:
+    _ic_secret_role: >-
+      {{ 'master' if 'master' in group_names else
+         'satellite' if 'satellite' in group_names else
+         'client' if 'client' in group_names else '' }}
+
+- name: Xác định các tầng secret áp dụng cho node
+  ansible.builtin.set_fact:
+    _ic_secret_source_dirs: >-
+      {{ [icinga2_secret_source_dir]
+         + ([deploy_config_dir + '/icinga2/group_' + _ic_secret_role + '/secret']
+            if _ic_secret_role | length > 0 else [])
+         + [deploy_config_dir + '/icinga2/' + inventory_hostname + '/secret'] }}
+
+- name: Kiểm tra các tầng secret Icinga 2 trên deployment node
   ansible.builtin.stat:
-    path: "{{ icinga2_secret_source_dir }}"
+    path: "{{ secret_source_dir }}"
+  loop: "{{ _ic_secret_source_dirs }}"
+  loop_control:
+    loop_var: secret_source_dir
+    label: "{{ secret_source_dir }}"
   delegate_to: localhost
   become: false
-  register: _ic_secret_source
+  register: _ic_secret_source_stats
 
 - name: Chặn đường dẫn secret tồn tại nhưng không phải thư mục
   ansible.builtin.assert:
     that:
-      - not _ic_secret_source.stat.exists or _ic_secret_source.stat.isdir
-    fail_msg: "{{ icinga2_secret_source_dir }} phải là thư mục."
+      - not item.stat.exists or (item.stat.isdir | default(false))
+    fail_msg: "{{ item.secret_source_dir }} phải là thư mục."
+  loop: "{{ _ic_secret_source_stats.results }}"
+  loop_control:
+    label: "{{ item.secret_source_dir }}"
 
-- name: Dò file secret nguồn trên deployment node
+- name: Xác định có bật mount secret trên node này hay không
+  ansible.builtin.set_fact:
+    _ic_secret_enabled: >-
+      {{ (_ic_secret_source_stats.results
+          | selectattr('stat.exists', 'equalto', true) | list | length) > 0 }}
+    _ic_secret_effective_files: {}
+    _ic_secret_unreadable_sources: []
+
+- name: Dò file trong từng tầng secret trên deployment node
   ansible.builtin.find:
-    paths: "{{ icinga2_secret_source_dir }}"
+    paths: "{{ secret_source_stat.secret_source_dir }}"
     recurse: true
     hidden: true
     file_type: file
+  loop: "{{ _ic_secret_source_stats.results }}"
+  loop_control:
+    loop_var: secret_source_stat
+    label: "{{ secret_source_stat.secret_source_dir }}"
   delegate_to: localhost
   become: false
-  register: _ic_secret_source_files
-  when: _ic_secret_source.stat.exists
+  register: _ic_secret_source_find
+  when: secret_source_stat.stat.exists
+  no_log: true
+
+- name: Ghi nhận tầng secret có nhánh mà deployment user không đọc được
+  ansible.builtin.set_fact:
+    _ic_secret_unreadable_sources: >-
+      {{ _ic_secret_unreadable_sources
+         + [secret_source_find.secret_source_stat.secret_source_dir] }}
+  loop: "{{ _ic_secret_source_find.results | selectattr('files', 'defined') | list }}"
+  loop_control:
+    loop_var: secret_source_find
+    label: "secret source"
+  when: secret_source_find.skipped_paths | default({}) | length > 0
+  no_log: true
+
+- name: Chặn tầng secret có file hoặc thư mục con mà deployment user không đọc được
+  ansible.builtin.assert:
+    that:
+      - _ic_secret_unreadable_sources | length == 0
+    fail_msg: >-
+      User chạy Ansible không đọc được toàn bộ: {{ _ic_secret_unreadable_sources | join(', ') }}.
+      Hãy sửa owner/mode của mọi file và thư mục con trong tầng nguồn này.
+
+- name: Lập bản đồ file secret hiệu lực sau khi trộn các tầng
+  ansible.builtin.include_tasks: collect_secret_manifest.yml
+  loop: "{{ _ic_secret_source_find.results | selectattr('files', 'defined') | list }}"
+  loop_control:
+    loop_var: secret_source_find
+    label: "secret source"
+  no_log: true
 
 - name: Tạo thư mục secret runtime trên Icinga node
   ansible.builtin.file:
@@ -126,18 +190,34 @@
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
     mode: "0700"
-  when: _ic_secret_source.stat.exists
+  when: _ic_secret_enabled
 
-- name: Đồng bộ file secret từ deployment node xuống Icinga node
-  ansible.builtin.copy:
-    src: "{{ icinga2_secret_source_dir }}/"
-    dest: "{{ icinga_etc_dir }}/icinga2/secret/"
+- name: Tạo các thư mục con cho file secret hiệu lực
+  ansible.builtin.file:
+    path: "{{ icinga_etc_dir }}/icinga2/secret/{{ item }}"
+    state: directory
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
-    directory_mode: "0700"
-    mode: preserve
+    mode: "0700"
+  loop: >-
+    {{ _ic_secret_effective_files.keys() | map('dirname') | unique | list }}
+  loop_control:
+    label: "secret directory"
   no_log: true
-  when: _ic_secret_source.stat.exists
+  when: _ic_secret_enabled
+
+- name: Đồng bộ bản cuối cùng của từng file secret xuống Icinga node
+  ansible.builtin.copy:
+    src: "{{ item.value }}"
+    dest: "{{ icinga_etc_dir }}/icinga2/secret/{{ item.key }}"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: preserve
+  loop: "{{ _ic_secret_effective_files | dict2items }}"
+  loop_control:
+    label: "secret file"
+  no_log: true
+  when: _ic_secret_enabled
 
 - name: Dò file secret runtime để loại bỏ file không còn ở nguồn
   ansible.builtin.find:
@@ -146,30 +226,45 @@
     hidden: true
     file_type: file
   register: _ic_secret_runtime_files
-  when: _ic_secret_source.stat.exists
+  when: _ic_secret_enabled
 
-- name: Xóa file secret runtime đã bị gỡ khỏi deployment node
+- name: Xóa file secret runtime không còn ở bất kỳ tầng nguồn nào
   ansible.builtin.file:
     path: "{{ item.path }}"
     state: absent
   loop: "{{ _ic_secret_runtime_files.files | default([]) }}"
   loop_control:
-    label: "{{ item.path | basename }}"
+    label: "secret file"
   no_log: true
   when:
-    - _ic_secret_source.stat.exists
+    - _ic_secret_enabled
     - >-
       (item.path | regex_replace('^' ~ ((icinga_etc_dir ~ '/icinga2/secret/') | regex_escape), ''))
-      not in
-      (_ic_secret_source_files.files | map(attribute='path')
-       | map('regex_replace', '^' ~ ((icinga2_secret_source_dir ~ '/') | regex_escape), '') | list)
+      not in _ic_secret_effective_files
 
-- name: Gỡ secret runtime khi thư mục nguồn không tồn tại
+- name: Dọn thư mục con secret runtime đã rỗng
+  ansible.builtin.command:
+    argv:
+      - find
+      - "{{ icinga_etc_dir }}/icinga2/secret"
+      - -mindepth
+      - "1"
+      - -depth
+      - -type
+      - d
+      - -empty
+      - -print
+      - -delete
+  register: _ic_secret_empty_dirs_removed
+  changed_when: _ic_secret_empty_dirs_removed.stdout | length > 0
+  no_log: true
+  when: _ic_secret_enabled
+
+- name: Gỡ secret runtime khi node không có tầng nguồn nào
   ansible.builtin.file:
     path: "{{ icinga_etc_dir }}/icinga2/secret"
     state: absent
-  when: not _ic_secret_source.stat.exists
-
+  when: not _ic_secret_enabled
 # ---------- Base config skeleton (toàn bộ /etc/icinga2 image ship kèm) — seed 1 LẦN ra node ---------
 # Mục tiêu (theo yêu cầu người dùng — giống hệt kolla /etc/kolla/<svc>, KHÔNG lồng thêm thư mục con
 # nào kiểu "base/"): MỌI file trong /etc/icinga2 đều là file THẬT nằm PHẲNG ngay dưới
@@ -1407,7 +1502,7 @@
     _ic_dynamic_volumes: >-
       {{ _ic_dynamic_volumes +
          [icinga_etc_dir + '/icinga2/secret:' + icinga2_secret_container_dir + ':ro'] }}
-  when: _ic_secret_source.stat.exists
+  when: _ic_secret_enabled
 
 - name: "Xây list mount per-file: openstack-clouds.yaml (mọi node, chỉ khi có file — design.md 9.7)"
   # Mount đúng path THẬT /data/etc/icinga2/... (giống mọi mount khác trong file này), KHÔNG mount

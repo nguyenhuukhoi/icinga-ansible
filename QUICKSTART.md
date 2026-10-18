@@ -300,18 +300,36 @@ Không dùng private key quản trị OpenStack làm runtime key của Icinga. C
 `/etc/icinga2/ssh/`.
 
 Với credential dành cho plugin tùy biến (ví dụ `clouds.yaml` hoặc một SSH private key không thuộc
-luồng `prepare-check-by-ssh`), đặt file trên deployment node như sau:
+luồng `prepare-check-by-ssh`), có thể đặt file trên deployment node theo ba tầng:
 
 ```text
-/etc/icinga-ansible/config/icinga2/secret/
-├── clouds.yaml
-└── id_openstack_check
+/etc/icinga-ansible/config/icinga2/
+├── secret/                         # global: mọi master, satellite và client
+│   ├── clouds.yaml
+│   └── nested/common-token
+├── group_master/secret/            # chỉ các node trong group [master]
+│   └── clouds.yaml                 # ghi đè file global cùng đường dẫn
+├── group_satellite/secret/         # chỉ các node trong group [satellite]
+│   └── id_openstack_check
+└── master1/secret/                 # chỉ inventory host master1
+    └── clouds.yaml                 # ghi đè cả global và group_master trên master1
 ```
 
-`deploy`/`reconfigure` đồng bộ chính xác các file này xuống mỗi Icinga node rồi bind-mount read-only
-vào container tại `/etc/icinga-ansible/icinga2/`. File đã xóa khỏi thư mục nguồn cũng bị xóa khỏi bản
-runtime. Giữ private key ở mode `0600`; không commit thư mục `secret/` vào Git. Check script trong
-container đọc các đường dẫn tương ứng như `/etc/icinga-ansible/icinga2/clouds.yaml`.
+Thứ tự trộn cố định là **global → loại node → host**. Việc ghi đè diễn ra theo đường dẫn tương đối của
+từng file, không thay thế cả thư mục: trong ví dụ trên, `nested/common-token` vẫn có trên `master1`, còn
+`clouds.yaml` của `master1/secret` thắng hai tầng trước. Các tên thư mục loại node được hỗ trợ là
+`group_master`, `group_satellite` và `group_client`; tên tầng host phải khớp chính xác
+`inventory_hostname` trong inventory.
+
+`deploy`/`reconfigure` trộn các file áp dụng cho từng node rồi bind-mount read-only vào container tại
+`/etc/icinga-ansible/icinga2/`. Một file runtime bị xóa khi đường dẫn đó không còn ở bất kỳ tầng nguồn áp
+dụng cho node; các thư mục con rỗng còn lại cũng được dọn. Nếu không có cả ba thư mục nguồn, node không tạo
+và không mount thư mục runtime. Chỉ cần
+một thư mục nguồn tồn tại, kể cả đang rỗng, mount vẫn được bật. Giữ private key ở mode `0600`; không commit
+bất kỳ thư mục `secret/` nào vào Git. File mode `0600` phải thuộc user chạy Ansible, và mọi thư mục cha phải
+cho user đó quyền đi xuyên qua; playbook fail nếu `find` báo có nhánh không đọc được. Check script trong
+container đọc đường dẫn như
+`/etc/icinga-ansible/icinga2/clouds.yaml`.
 
 Đây là input của deployment node nên `backup-full` tự đưa cả thư mục vào `config-<ts>.tar.gz`, và
 `restore-config` phục hồi nó cùng `globals.yml`, `passwords.yml` và các override khác.
