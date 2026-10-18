@@ -101,9 +101,15 @@
   ansible.builtin.set_fact:
     _managed_db_services: >-
       {{ [
-           {'name': 'icingadb', 'database': 'icingadb', 'password': icingadb_db_password},
-           {'name': 'icingaweb2', 'database': 'icingaweb2', 'password': icingaweb2_db_password}
-         ] + ([{'name': 'director', 'database': 'director', 'password': director_db_password}]
+           {'name': 'icingadb', 'database': 'icingadb', 'password': icingadb_db_password,
+            'charset': 'utf8mb4', 'collation': 'utf8mb4_general_ci',
+            'accepted_encodings': ['utf8mb4/utf8mb4_general_ci']},
+           {'name': 'icingaweb2', 'database': 'icingaweb2', 'password': icingaweb2_db_password,
+            'charset': 'utf8mb4', 'collation': 'utf8mb4_general_ci',
+            'accepted_encodings': ['utf8mb4/utf8mb4_general_ci']}
+         ] + ([{'name': 'director', 'database': 'director', 'password': director_db_password,
+                'charset': 'utf8', 'collation': 'utf8_general_ci',
+                'accepted_encodings': ['utf8/utf8_general_ci', 'utf8mb3/utf8mb3_general_ci']}]
               if 'director' in (enable_icingaweb2_modules | default([])) else []) }}
   no_log: true
   when: inventory_hostname == mariadb_bootstrap_host
@@ -135,7 +141,10 @@
       - -N
       - "{{ item.database }}"
       - -e
-      - "SHOW GRANTS FOR CURRENT_USER;"
+      - >-
+        SHOW GRANTS FOR CURRENT_USER;
+        SELECT CONCAT(DEFAULT_CHARACTER_SET_NAME, '/', DEFAULT_COLLATION_NAME)
+        FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=DATABASE();
   environment:
     MYSQL_PWD: "{{ item.password }}"
   loop: "{{ _managed_db_services | default([]) }}"
@@ -161,7 +170,9 @@
           } -%}
       {%- for result in (_managed_db_auth_checks.results | default([])) -%}
         {%- if result.rc != 0 or
-              ('ON `' ~ result.item.database ~ '`.*' not in (result.stdout | default(''))) -%}
+              ('ON `' ~ result.item.database ~ '`.*' not in (result.stdout | default(''))) or
+              ((result.item.accepted_encodings
+                | intersect(result.stdout_lines | default([])) | length) == 0) -%}
           {%- for container in (consumer_map[result.item.name] | default([])) -%}
             {%- if container not in ns.containers -%}
               {%- set ns.containers = ns.containers + [container] -%}
@@ -196,7 +207,10 @@
       - "-uroot"
       - -e
       - >-
-        CREATE DATABASE IF NOT EXISTS `{{ item.item.database }}` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+        CREATE DATABASE IF NOT EXISTS `{{ item.item.database }}`
+          CHARACTER SET {{ item.item.charset }} COLLATE {{ item.item.collation }};
+        ALTER DATABASE `{{ item.item.database }}`
+          CHARACTER SET {{ item.item.charset }} COLLATE {{ item.item.collation }};
         CREATE USER IF NOT EXISTS '{{ item.item.name }}'@'%';
         SET @icinga_password = CONVERT(FROM_BASE64('{{ item.item.password | b64encode }}') USING utf8mb4);
         SET @icinga_alter_user = CONCAT(
@@ -218,7 +232,9 @@
     - inventory_hostname == mariadb_bootstrap_host
     - >-
       item.rc != 0 or
-      ('ON `' ~ item.item.database ~ '`.*' not in (item.stdout | default('')))
+      ('ON `' ~ item.item.database ~ '`.*' not in (item.stdout | default(''))) or
+      ((item.item.accepted_encodings
+        | intersect(item.stdout_lines | default([])) | length) == 0)
   no_log: true
 
 # =============================================================================

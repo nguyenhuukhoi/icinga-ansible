@@ -351,13 +351,14 @@
           'mariadb']
          + ([_mariadb_ssl_flag] if _mariadb_ssl_flag | length > 0 else [])
          + ['-h', db_host, '-P', db_port | string, '-u' ~ item.user, item.db,
-            '-e', 'SELECT 1;'] }}
+            '-N', '-e',
+            'SELECT DEFAULT_CHARACTER_SET_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=DATABASE();'] }}
   environment:
     MYSQL_PWD: "{{ item.password }}"
   loop:
-    - { user: icingadb,   password: "{{ icingadb_db_password }}",   db: "{{ icingadb_db_name }}" }
-    - { user: icingaweb2, password: "{{ icingaweb2_db_password }}", db: icingaweb2 }
-    - { user: director,   password: "{{ director_db_password }}",   db: director }
+    - { user: icingadb,   password: "{{ icingadb_db_password }}",   db: "{{ icingadb_db_name }}", charsets: [utf8mb4] }
+    - { user: icingaweb2, password: "{{ icingaweb2_db_password }}", db: icingaweb2, charsets: [utf8mb4] }
+    - { user: director,   password: "{{ director_db_password }}",   db: director, charsets: [utf8, utf8mb3] }
   loop_control: { label: "{{ item.user }}" }
   register: _ext_db_check
   no_log: true
@@ -376,17 +377,33 @@
          | map(attribute='item.user') | list }}
   when: icinga_database_type == 'external'
 
+- name: "(external) Xác định database sai charset"
+  ansible.builtin.set_fact:
+    _ext_db_wrong_charset: >-
+      {%- set ns = namespace(users=[]) -%}
+      {%- for result in (_ext_db_check.results | default([])) -%}
+        {%- if not (result.skipped | default(false)) and result.rc == 0 and
+              (result.stdout | trim) not in result.item.charsets -%}
+          {%- set ns.users = ns.users + [result.item.user] -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.users }}
+  when: icinga_database_type == 'external'
+
 - name: "(external) Dựng SQL hướng dẫn DBA (icingadb + icingaweb2 luôn, director nếu bật module)"
   ansible.builtin.set_fact:
     _ext_db_sql: >-
       {{ (
         ["CREATE DATABASE IF NOT EXISTS " ~ icingadb_db_name ~ " CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;",
+         "ALTER DATABASE " ~ icingadb_db_name ~ " CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;",
          "CREATE USER IF NOT EXISTS 'icingadb'@'%' IDENTIFIED BY '<xem icingadb_db_password trong passwords.yml>';",
          "GRANT ALL ON " ~ icingadb_db_name ~ ".* TO 'icingadb'@'%';",
          "CREATE DATABASE IF NOT EXISTS icingaweb2 CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;",
+         "ALTER DATABASE icingaweb2 CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;",
          "CREATE USER IF NOT EXISTS 'icingaweb2'@'%' IDENTIFIED BY '<xem icingaweb2_db_password trong passwords.yml>';",
          "GRANT ALL ON icingaweb2.* TO 'icingaweb2'@'%';"]
-        + (["CREATE DATABASE IF NOT EXISTS director CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;",
+        + (["CREATE DATABASE IF NOT EXISTS director CHARACTER SET utf8 COLLATE utf8_general_ci;",
+            "ALTER DATABASE director CHARACTER SET utf8 COLLATE utf8_general_ci;",
             "CREATE USER IF NOT EXISTS 'director'@'%' IDENTIFIED BY '<xem director_db_password trong passwords.yml>';",
             "GRANT ALL ON director.* TO 'director'@'%';"]
            if 'director' in (enable_icingaweb2_modules | default([])) else [])
@@ -394,12 +411,15 @@
       ) | join('\n') }}
   when:
     - icinga_database_type == 'external'
-    - _ext_db_missing | default([]) | length > 0
+    - >-
+      (_ext_db_missing | default([]) | length > 0) or
+      (_ext_db_wrong_charset | default([]) | length > 0)
 
 - name: "(external) Hướng dẫn tạo schema DB ngoài — gửi cho DBA (chỉ hiện khi kiểm tra thất bại)"
   ansible.builtin.fail:
     msg: >-
-      DBA chưa tạo sẵn (hoặc sai mật khẩu) cho user: {{ _ext_db_missing | join(', ') }}.
+      DBA chưa tạo sẵn/sai mật khẩu cho user: {{ _ext_db_missing | join(', ') }};
+      database sai charset: {{ _ext_db_wrong_charset | default([]) | join(', ') }}.
       icinga_database_type=external -> icinga-ansible KHÔNG BAO GIỜ dùng root của DB ngoài. DBA phải
       tự chạy SQL sau (điền đúng mật khẩu thật từ /etc/icinga-ansible/passwords.yml) TRƯỚC khi deploy:
       ---
@@ -407,7 +427,9 @@
       ---
   when:
     - icinga_database_type == 'external'
-    - _ext_db_missing | default([]) | length > 0
+    - >-
+      (_ext_db_missing | default([]) | length > 0) or
+      (_ext_db_wrong_charset | default([]) | length > 0)
 
 - name: "(external) Xác nhận đã kết nối OK bằng user riêng từng service (không dùng root)"
   ansible.builtin.debug:
@@ -415,6 +437,7 @@
   when:
     - icinga_database_type == 'external'
     - _ext_db_missing | default([]) | length == 0
+    - _ext_db_wrong_charset | default([]) | length == 0
 
 - name: Tóm tắt topology sẽ triển khai
   ansible.builtin.debug:

@@ -1,5 +1,6 @@
 ---
-# Module Director (loại C): DB đã tạo ở role mariadb. Ở đây: config resource + migration + kickstart.
+# Module Director (loại C): DB đã tạo ở role mariadb. Ở đây luôn cấu hình resource + migration;
+# Kickstart là opt-in vì nó import/reconcile topology và phải do người vận hành chủ động quyết định.
 #
 # BUG THẬT ĐÃ GẶP (2026-07-22, tự phát hiện khi rà lại cho nhất quán — chưa từng gây sự cố thật vì
 # bắt được trước khi ai đụng vào): trước đây file này ghi TRỰC TIẾP vào web_etc (đường dẫn DATA,
@@ -22,6 +23,14 @@
     group: "{{ web_uid }}"
     mode: "0600"
   no_log: true
+  when: director_auto_kickstart | bool
+
+- name: Xoá kickstart.ini do Ansible quản lý khi chọn Kickstart thủ công
+  ansible.builtin.file:
+    path: "{{ icinga_etc_dir }}/icingaweb2/modules/director/kickstart.ini"
+    state: absent
+  no_log: true
+  when: not (director_auto_kickstart | bool)
 
 # BUG THẬT ĐÃ GẶP (2026-07-22): "director migration run" chạy qua {{ web_run }}, container one-off
 # CHỈ mount {{ web_data }}:/data — từ khi resources.ini/config.ini/... chuyển sang mount per-file từ
@@ -43,7 +52,9 @@
       -v {{ icinga_etc_dir }}/icingaweb2/modules/icingadb/config.ini:/data/etc/icingaweb2/modules/icingadb/config.ini:ro
       -v {{ icinga_etc_dir }}/icingaweb2/modules/icingadb/redis.ini:/data/etc/icingaweb2/modules/icingadb/redis.ini:ro
       -v {{ icinga_etc_dir }}/icingaweb2/modules/director/config.ini:/data/etc/icingaweb2/modules/director/config.ini:ro
+      {% if director_auto_kickstart | bool %}
       -v {{ icinga_etc_dir }}/icingaweb2/modules/director/kickstart.ini:/data/etc/icingaweb2/modules/director/kickstart.ini:ro
+      {% endif %}
       --entrypoint icingacli {{ images.icingaweb2 }}
 
 - name: Chạy Director schema migration (idempotent)
@@ -64,4 +75,6 @@
   # Director. `kickstart run` là phép reconcile idempotent và cũng xóa object import không còn trong API.
   changed_when: false
   no_log: true
-  when: inventory_hostname == ca_host
+  when:
+    - inventory_hostname == ca_host
+    - director_auto_kickstart | bool

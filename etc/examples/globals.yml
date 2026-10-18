@@ -155,6 +155,10 @@ enable_icingaweb2_modules:
   - "icingadb"                                   # BẮT BUỘC
   # - "director"                                 # bật sau khi verify core (cần DB + migration)
 
+# false: Ansible chỉ enable/migrate Director; người dùng tự Kickstart trong Web UI.
+# true: Ansible render kickstart.ini và tự import/reconcile endpoint/zone từ Icinga API.
+director_auto_kickstart: false
+
 # Cài Linuxfabrik monitoring plugins trên các host trong [all_hosts] để CPU/RAM/disk có thể được
 # gọi từ Icinga master qua check_by_ssh. Opt-in để không thay đổi host của deployment hiện hữu.
 enable_check_by_ssh_target_plugins: false

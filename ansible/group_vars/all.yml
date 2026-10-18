@@ -102,6 +102,11 @@ openstack_service_checks: []
 # Default cho user Việt Nam — override trong globals.yml nếu cần múi giờ khác.
 icingaweb2_timezone: "Asia/Ho_Chi_Minh"
 
+# Bật module Director chỉ chuẩn bị DB/schema/module. Mặc định không tự import endpoint/zone từ
+# Icinga API; người vận hành tự quyết định và hoàn tất Kickstart trong Web UI. Chỉ bật true cho
+# môi trường muốn Ansible tự chạy `icingacli director kickstart run`.
+director_auto_kickstart: false
+
 # --- Proxy (globals override; mặc định dùng /etc/environment của managed node) -
 # proxy_group_overrides (2026-09-13, tuỳ chọn — khai trong globals.yml): override proxy RIÊNG cho
 # từng nhóm vai trò (master/satellite/galera/client) — dùng khi các nhóm nằm ở mạng khác nhau, mỗi

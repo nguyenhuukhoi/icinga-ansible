@@ -193,7 +193,35 @@
         fail_msg: >-
           Icinga DB có lỗi nghiêm trọng trong 5 phút gần đây; xem `docker logs --since 5m icingadb`.
 
-    - name: Director CLI phải báo healthy
+    - name: Kiểm tra Director còn chờ người dùng Kickstart không
+      ansible.builtin.command:
+        argv: [docker, exec, icingaweb2, icingacli, director, kickstart, required]
+      register: _director_kickstart_required
+      changed_when: false
+      # rc=2: chưa cấu hình; rc=0: đã cấu hình nhưng cần chạy; rc=1: đã hoàn tất.
+      failed_when: _director_kickstart_required.rc not in [0, 1, 2]
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+
+    - name: Thông báo Director đã sẵn sàng để người dùng tự Kickstart
+      ansible.builtin.debug:
+        msg: >-
+          Director module/schema healthy và đang chờ Kickstart trong Web UI; bỏ qua các phép kiểm tra
+          topology/object cho tới khi người dùng hoàn tất Kickstart.
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+        - _director_kickstart_required.rc in [0, 2]
+
+    - name: Kết thúc kiểm tra sâu trên CA host khi Director chưa Kickstart
+      ansible.builtin.meta: end_host
+      when:
+        - inventory_hostname == ca_host
+        - "'director' in (enable_icingaweb2_modules | default([]))"
+        - _director_kickstart_required.rc in [0, 2]
+
+    - name: Director CLI phải báo healthy sau Kickstart
       ansible.builtin.command:
         argv: [docker, exec, icingaweb2, icingacli, director, health, check]
       changed_when: false

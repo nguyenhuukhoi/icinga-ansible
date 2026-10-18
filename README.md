@@ -159,14 +159,31 @@ Icinga phát hành từng thành phần độc lập, không có bundle chính t
 
 Khi thêm hoặc xoá `director` trong `enable_icingaweb2_modules`, lần `reconfigure`
 đầu tiên sẽ **recreate container `icingaweb2`**. Đây là hành vi bắt buộc vì Docker
-không thể thêm hoặc gỡ bind mount `modules/director/config.ini` và
-`kickstart.ini` trên một container đang chạy. Dữ liệu Web và Director không mất:
+không thể thêm hoặc gỡ bind mount `modules/director/config.ini` trên một container
+đang chạy. Dữ liệu Web và Director không mất:
 chúng nằm trong bind mount `/data` và MariaDB. Với nhiều master, playbook thực
 hiện rolling từng master (`serial: 1`) để tránh dừng đồng thời toàn bộ Web/API.
 Container `icingaweb2-director-daemon` được tạo mới khi bật Director và bị xóa khi
 tắt Director. Việc chỉ bật Director không được phép làm MariaDB, Icinga 2, Icinga DB
 hoặc Redis bị restart/recreate. Khi tạo DB Director lần đầu, role chỉ dừng daemon
 Director cũ nếu nó đang tồn tại; không dừng các consumer của DB khác.
+
+Mặc định `director_auto_kickstart: false`: Ansible enable module, tạo database với
+charset `utf8` và chạy schema migration, nhưng không import Endpoint/Zone hoặc chạy
+Kickstart. Người vận hành đăng nhập Web UI và tự hoàn tất Director Kickstart. Chỉ đặt
+`director_auto_kickstart: true` khi muốn Ansible render `kickstart.ini` và tự reconcile
+topology từ Icinga API. Object management qua `director_managed_*` được bỏ qua an toàn
+cho tới khi Kickstart đã hoàn tất.
+
+Với chế độ mặc định, vào **Icinga Director → Configuration → Kickstart Wizard** và khai:
+
+- Endpoint/host: master Icinga API mà người vận hành chọn, cổng mặc định `5665`.
+- API username: `director`.
+- API password: giá trị `icinga2_director_api_user_password` trong `passwords.yml`.
+
+Sau khi hoàn tất wizard, chạy lại `icinga-ansible reconfigure` để áp dụng các object
+`director_managed_*` (nếu có), rồi chạy `icinga-ansible check`. MariaDB 12.x hiển thị
+charset database `utf8` bằng tên chuẩn `utf8mb3`; đây là cùng encoding, không phải lỗi.
 | `upgrade-plan` / `upgrade` / `rollback` | Đã có cho `managed_db`; external DB phải theo change/backup plan của DBA |
 
 ## Ghi chú kiến trúc quan trọng

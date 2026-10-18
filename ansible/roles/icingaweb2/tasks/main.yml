@@ -242,7 +242,8 @@
           {'section': 'director_db', 'option': 'port', 'value': db_port | string},
           {'section': 'director_db', 'option': 'dbname', 'value': 'director'},
           {'section': 'director_db', 'option': 'username', 'value': 'director'},
-          {'section': 'director_db', 'option': 'password', 'value': director_db_password}
+          {'section': 'director_db', 'option': 'password', 'value': director_db_password},
+          {'section': 'director_db', 'option': 'charset', 'value': 'utf8'}
         ] if 'director' in (enable_icingaweb2_modules | default([])) else [])
     }}
   loop_control:
@@ -349,7 +350,7 @@
   no_log: true
   notify: Reload icingaweb2
 
-- name: (loại C) Director — migration + kickstart nếu bật
+- name: (loại C) Director — migration và Kickstart opt-in nếu bật
   ansible.builtin.include_tasks: module-director.yml
   when: "'director' in (enable_icingaweb2_modules | default([]))"
 
@@ -380,13 +381,21 @@
 # (module-director.yml chỉ render khi đó) -> mount CHỈ khi bật, nếu không nguồn không tồn tại sẽ
 # làm docker_container lỗi/tạo nhầm thư mục rỗng (cùng bài học zones.d ở role icinga2). RW cùng lý
 # do các file trên.
-- name: "Thêm mount config.ini + kickstart.ini của Director (chỉ khi module director bật)"
+- name: "Thêm mount config.ini của Director (chỉ khi module director bật)"
   ansible.builtin.set_fact:
     _web_volumes: >-
       {{ _web_volumes +
-         [icinga_etc_dir + '/icingaweb2/modules/director/config.ini:/data/etc/icingaweb2/modules/director/config.ini',
-          icinga_etc_dir + '/icingaweb2/modules/director/kickstart.ini:/data/etc/icingaweb2/modules/director/kickstart.ini:ro'] }}
+         [icinga_etc_dir + '/icingaweb2/modules/director/config.ini:/data/etc/icingaweb2/modules/director/config.ini'] }}
   when: "'director' in (enable_icingaweb2_modules | default([]))"
+
+- name: Thêm mount kickstart.ini khi người vận hành bật Kickstart tự động
+  ansible.builtin.set_fact:
+    _web_volumes: >-
+      {{ _web_volumes +
+         [icinga_etc_dir + '/icingaweb2/modules/director/kickstart.ini:/data/etc/icingaweb2/modules/director/kickstart.ini:ro'] }}
+  when:
+    - "'director' in (enable_icingaweb2_modules | default([]))"
+    - director_auto_kickstart | bool
 
 # ---------- Chạy Apache2 + Icinga Web 2 ----------
 # Image serve Apache trên 8080 (không phải 80). Host network -> bind 8080 trên host.

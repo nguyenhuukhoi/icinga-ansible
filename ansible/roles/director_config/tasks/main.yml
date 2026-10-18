@@ -4,6 +4,26 @@
 # object identifiers; Director exposes the rule UUIDs through a dedicated
 # serviceapplyrules endpoint.
 
+- name: Kiểm tra người vận hành đã hoàn tất Director Kickstart chưa
+  ansible.builtin.command:
+    argv: [docker, exec, icingaweb2, icingacli, director, kickstart, required]
+  register: _director_kickstart_required
+  changed_when: false
+  # rc=2: chưa có kickstart.ini/cấu hình; rc=0: đã cấu hình nhưng còn cần chạy;
+  # rc=1: đã Kickstart xong, không cần chạy lại.
+  failed_when: _director_kickstart_required.rc not in [0, 1, 2]
+
+- name: Bỏ qua object management khi Director còn chờ người dùng Kickstart
+  ansible.builtin.debug:
+    msg: >-
+      Director đã được enable và migrate nhưng chưa Kickstart. Hoàn tất Kickstart trong Web UI;
+      Ansible chưa tạo/deploy object Director trong lượt chạy này.
+  when: _director_kickstart_required.rc in [0, 2]
+
+- name: Kết thúc role khi Director chưa được Kickstart
+  ansible.builtin.meta: end_role
+  when: _director_kickstart_required.rc in [0, 2]
+
 - name: Validate Director custom variable definitions
   ansible.builtin.assert:
     that:
