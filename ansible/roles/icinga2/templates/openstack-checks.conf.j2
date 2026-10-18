@@ -6,7 +6,7 @@
  * return UNKNOWN (missing binary) -- harmless if unused.
  *
  * Check script: /usr/lib/nagios/custom-plugins/check_openstack_service.py (roles/icinga2/files/).
- * This file itself is stored in zones.d/master and distributed by Icinga cluster config-sync.
+ * This file is mounted on ca_host under zones.d/master and distributed to peers by config-sync.
  * Credentials are NOT passed as CheckCommand vars -- the script reads a clouds.yaml-style file
  * mounted read-only at /etc/icinga-ansible/icinga2/clouds.yaml from the master-only secret tier
  * deploy_config_dir/icinga2/group_master/secret/clouds.yaml, and looks up the entry matching

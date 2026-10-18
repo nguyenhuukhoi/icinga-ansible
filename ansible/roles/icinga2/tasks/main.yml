@@ -1263,9 +1263,9 @@
 
 # ---------- zones.d/master ----------
 # zones.d/master sync GIỮA CÁC ENDPOINT CÙNG ZONE MASTER qua chính cơ chế cluster của Icinga2
-# (design 9.3) — không cần role tự copy sang master2/master3, tự render 2 nơi dễ lệch nội dung
-# (whitespace/thứ tự) gây "config sync conflict". Các file chung khác vẫn chỉ render trên ca_host;
-# riêng hai file OpenStack được render byte-identical trên mọi master để validate rolling độc lập.
+# (design 9.3) — chỉ ca_host giữ bản authoritative. Tuyệt đối không mount file zone master cục bộ
+# trên peer: peer sẽ coi zone là authoritative rồi từ chối config-sync, làm Host do Director deploy
+# vào zone master chỉ tồn tại trên ca_host và một nửa check HA không bao giờ chạy.
 # Ghi vào cây icinga_etc_dir (không phải ic_etc/data) để mount RO per-file được — xem block mount
 # per-file động ở dưới, trước task "Khởi động container icinga2".
 - name: Tạo thư mục zones.d/master (deploy tree)
@@ -1275,7 +1275,7 @@
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
     mode: "0750"
-  when: inventory_hostname in groups['master']
+  when: inventory_hostname == ca_host
 
 # BUG THẬT ĐÃ GẶP + ĐÃ TÌM RA FIX TRIỆT ĐỂ (2026-07-24 phát hiện, 2026-07-28 fix đúng): notification
 # cho Host/Service thuộc zone satellite bị gửi TRÙNG bởi cả 1 node master lẫn 1 node satellite. Đã
@@ -1338,8 +1338,8 @@
   notify: Reload icinga2
 
 # OpenStack service status không dùng Director. CheckCommand lẫn Host/Service đều nằm trong zone
-# master; Ansible render cùng nội dung trên từng master. Cách này cũng làm validate/reconfigure rolling
-# độc lập với thời điểm cluster config-sync cập nhật cache của peer.
+# master; Ansible render trên ca_host và Icinga config-sync sang các master peer. Cùng cơ chế này cho
+# phép object do Director deploy vào zone master được đồng bộ đầy đủ tới peer.
 - name: "Render CheckCommand OpenStack -> zones.d/master/openstack-checks.conf"
   ansible.builtin.template:
     src: openstack-checks.conf.j2
@@ -1347,21 +1347,21 @@
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
     mode: "0640"
-  when: inventory_hostname in groups['master']
+  when: inventory_hostname == ca_host
   notify: Reload icinga2
 
 # Service nằm trong file riêng để một override SSH/custom host tại hosts.conf không vô tình làm mất
 # Nova/Neutron/Cinder objects. Vì đây là config theo ZONE (không theo host Ansible), operator đặt
 # đúng một full-file override trên deployment node tại:
 #   config/icinga2/zones.d/master/openstack-services.conf
-# Ansible ghi cùng file vào từng master; Icinga HA tự phân công thực thi object trong zone master.
+# Ansible ghi file trên ca_host; Icinga config-sync sang peer và HA tự phân công thực thi object.
 - name: "Xác định override cho zones.d/master/openstack-services.conf"
   ansible.builtin.set_fact:
     _openstack_services_src: >-
       {{ (q('first_found', dict(
             files=[deploy_config_dir + '/icinga2/zones.d/master/openstack-services.conf'],
             skip=true)) | first) | default('', true) }}
-  when: inventory_hostname in groups['master']
+  when: inventory_hostname == ca_host
 
 - name: "Copy override -> zones.d/master/openstack-services.conf"
   ansible.builtin.copy:
@@ -1371,7 +1371,7 @@
     group: "{{ ic_uid }}"
     mode: "0640"
   when:
-    - inventory_hostname in groups['master']
+    - inventory_hostname == ca_host
     - _openstack_services_src | length > 0
   notify: Reload icinga2
 
@@ -1383,9 +1383,23 @@
     group: "{{ ic_uid }}"
     mode: "0640"
   when:
-    - inventory_hostname in groups['master']
+    - inventory_hostname == ca_host
     - _openstack_services_src | default('') | length == 0
   notify: Reload icinga2
+
+# Bản phát hành b9755d3 từng mount hai file OpenStack local trên mọi master. Dọn source khỏi peer để
+# lần recreate bên dưới bỏ bind mount và peer quay lại nhận toàn bộ zone master từ ca_host. Việc giữ
+# dù chỉ một file local dưới zones.d/master khiến Icinga đánh dấu cả zone authoritative.
+- name: Dọn file zone master OpenStack local trên master peer
+  ansible.builtin.file:
+    path: "{{ icinga_etc_dir }}/icinga2/zones.d/master/{{ item }}"
+    state: absent
+  loop:
+    - openstack-checks.conf
+    - openstack-services.conf
+  when:
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
 
 # Host/Service THẬT chạy trực tiếp từ zone "master" (vd SSH ra host ngoài, KHÔNG cần agent Icinga2 —
 # giống hệt cơ chế zones.d/<satellite_zone>/hosts.conf, mục 9.4, chỉ khác zone chạy check). Khác
@@ -1526,15 +1540,15 @@
     _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/hosts.conf:/data/etc/icinga2/zones.d/master/hosts.conf:ro'] }}"
   when: inventory_hostname == ca_host
 
-- name: "Xây list mount per-file: zones.d/master/openstack-services.conf (mọi master)"
+- name: "Xây list mount per-file: zones.d/master/openstack-services.conf (chỉ ca_host)"
   ansible.builtin.set_fact:
     _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/openstack-services.conf:/data/etc/icinga2/zones.d/master/openstack-services.conf:ro'] }}"
-  when: inventory_hostname in groups['master']
+  when: inventory_hostname == ca_host
 
-- name: "Xây list mount per-file: zones.d/master/openstack-checks.conf (mọi master)"
+- name: "Xây list mount per-file: zones.d/master/openstack-checks.conf (chỉ ca_host)"
   ansible.builtin.set_fact:
     _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/openstack-checks.conf:/data/etc/icinga2/zones.d/master/openstack-checks.conf:ro'] }}"
-  when: inventory_hostname in groups['master']
+  when: inventory_hostname == ca_host
 
 # zones.d/master/telegram-notifications.conf — LUÔN tồn tại trên ca_host (role-owned, không phụ
 # thuộc cấu hình nào), giống zones.d/master/hosts.conf ở trên — mount luôn. Đặt CHÍNH TRONG
@@ -1570,26 +1584,31 @@
   notify: Reload icinga2
 
 # ---------- Chạy daemon ----------
-# One-time rolling migration: the previous release mounted CheckCommand from conf.d. A peer rejects
-# the new zone file while that old definition is still loaded (duplicate object), so detect the
-# actual legacy container mount, stop only that master, and remove only the two OpenStack API-cache
-# files now owned locally under zones.d/master. The other HA master remains healthy during this step.
+# One-time rolling migration covers both the legacy conf.d mount and b9755d3's local zone mount on
+# peers. Stop only the affected master and remove only the stale OpenStack cache files. The other HA
+# master remains healthy; after restart the peer requests the authoritative master zone from ca_host.
 - name: Kiểm tra container Icinga 2 hiện tại để migrate CheckCommand OpenStack vào zone master
   community.docker.docker_container_info:
     name: icinga2
   register: _ic_container_before_openstack_zone_migration
   when: inventory_hostname in groups['master']
 
-- name: Xác định node còn dùng mount CheckCommand OpenStack cũ
+- name: Xác định node cần chuyển quyền sở hữu zone master về ca_host
   ansible.builtin.set_fact:
     _ic_openstack_zone_migration_required: >-
-      {{ (((_ic_container_before_openstack_zone_migration.container | default({}, true)).Mounts
-           | default([]))
-          | selectattr('Destination', 'equalto', '/data/etc/icinga2/conf.d/openstack-checks.conf')
-          | list | length) > 0 }}
+      {{ ((((_ic_container_before_openstack_zone_migration.container | default({}, true)).Mounts
+            | default([]))
+           | selectattr('Destination', 'equalto', '/data/etc/icinga2/conf.d/openstack-checks.conf')
+           | list | length) > 0)
+         or
+         (inventory_hostname != ca_host and
+          ((((_ic_container_before_openstack_zone_migration.container | default({}, true)).Mounts
+             | default([]))
+            | selectattr('Destination', 'equalto', '/data/etc/icinga2/zones.d/master/openstack-checks.conf')
+            | list | length) > 0)) }}
   when: inventory_hostname in groups['master']
 
-- name: Dừng rolling master còn dùng CheckCommand OpenStack cũ
+- name: Dừng rolling master cần chuyển cấu hình OpenStack về ca_host
   community.docker.docker_container:
     name: icinga2
     state: stopped
@@ -1597,7 +1616,7 @@
     - inventory_hostname in groups['master']
     - _ic_openstack_zone_migration_required | default(false)
 
-- name: Xóa riêng cache OpenStack cũ trước khi master dùng bản zones.d local
+- name: Xóa riêng cache OpenStack cũ trước khi peer nhận lại zone từ ca_host
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent

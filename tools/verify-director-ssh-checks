@@ -47,9 +47,14 @@ prefix = os.environ["HOST_PREFIX"]
 expected = int(os.environ["EXPECTED_SERVICES"])
 data = json.load(sys.stdin)
 rows = []
+linuxfabrik_commands = {
+    "by_ssh_lfmp_cpu", "by_ssh_lfmp_memory", "by_ssh_lfmp_disk"
+}
 for result in data.get("results", []):
     attrs = result.get("attrs", {})
     if not str(attrs.get("host_name", "")).startswith(prefix):
+        continue
+    if attrs.get("check_command") not in linuxfabrik_commands:
         continue
     last = attrs.get("last_check_result") or {}
     rows.append((

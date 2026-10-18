@@ -366,9 +366,10 @@ Luồng mặc định dùng `openstack_service_checks` như bên dưới. Nếu 
 /etc/icinga-ansible/config/icinga2/zones.d/master/openstack-services.conf
 ```
 
-Override này thay thế hoàn toàn nội dung sinh từ `openstack_service_checks`, không merge. Ansible copy cùng
-nội dung tới từng master để mỗi endpoint có thể validate độc lập trong lúc rolling reconfigure. Xóa override
-và chạy lại `reconfigure` sẽ tự quay về template sinh từ `openstack_service_checks`.
+Override này thay thế hoàn toàn nội dung sinh từ `openstack_service_checks`, không merge. Ansible đặt bản
+authoritative trên `ca_host`; Icinga config-sync nó tới các master peer. Không đặt bản local trên peer vì sẽ
+chặn đồng bộ các Host do Director deploy vào zone `master`. Xóa override và chạy lại `reconfigure` sẽ tự quay
+về template sinh từ `openstack_service_checks`.
 
 Image Icinga 2 phải là image custom có `/opt/icinga-venv/bin/python3`, `openstacksdk` và `PyYAML`. Khai image
 đó bằng `custom_image_overrides.icinga2` như mục 5.5. Trên deployment node, tạo credential trong tầng
@@ -427,10 +428,10 @@ Icinga master; trong mô hình hai master, Icinga HA tự chọn master thực t
 `/etc/icinga-ansible/icinga2/clouds.yaml`, nên master còn lại có thể nhận duty khi failover. File này không
 được đồng bộ tới satellite hoặc client. Không đặt nó tại `config/icinga2/secret/`, vì đó là tầng global.
 
-Trên mỗi master, hai file static được mount tại `zones.d/master/openstack-checks.conf` và
-`zones.d/master/openstack-services.conf`. Cùng một nội dung được render từ deployment node, nên mỗi master
-validate được độc lập và Icinga HA vẫn tự phân công thực thi. CheckCommand và Service có cùng phạm vi zone
-`master`, không phụ thuộc Director DB hoặc Director deployment.
+Trên `ca_host`, hai file static được mount tại `zones.d/master/openstack-checks.conf` và
+`zones.d/master/openstack-services.conf`; master peer nhận chúng qua Icinga config-sync. Icinga HA vẫn tự
+phân công thực thi. CheckCommand và Service có cùng phạm vi zone `master`, không phụ thuộc Director DB hoặc
+Director deployment, đồng thời không ngăn Director đồng bộ Host vào cùng zone.
 
 Áp dụng và kiểm tra:
 
