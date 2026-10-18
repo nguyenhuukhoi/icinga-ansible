@@ -156,6 +156,16 @@ Icinga phát hành từng thành phần độc lập, không có bundle chính t
 | `destroy` | Xoá toàn bộ container + dữ liệu + cấu hình render (`/etc/icinga-ansible`, GIỮ LẠI `globals.yml`+`passwords.yml` trên deployment node) (cần `-e confirm=yes-i-really-really-mean-it`, đúng nguyên văn — giống kolla-ansible) — giữ nguyên Docker/chrony/docker network, `deploy` lại thẳng được, không cần `bootstrap-servers`/`init-config`/`genpwd` |
 | `add-master` / `add-node` | Thêm master/satellite mới (host đã có trong inventory) — chạy `deploy`; chỉ cần `bootstrap-servers` trước nếu host đó HOÀN TOÀN MỚI (chưa từng cài Docker) |
 | `remove-master` / `remove-node` | Xoá master/satellite khỏi cluster (`-e target_host=<host> -e confirm=yes`, cần tự sửa inventory + `reconfigure` sau đó — xem TODO.md) |
+
+Khi thêm hoặc xoá `director` trong `enable_icingaweb2_modules`, lần `reconfigure`
+đầu tiên sẽ **recreate container `icingaweb2`**. Đây là hành vi bắt buộc vì Docker
+không thể thêm hoặc gỡ bind mount `modules/director/config.ini` và
+`kickstart.ini` trên một container đang chạy. Dữ liệu Web và Director không mất:
+chúng nằm trong bind mount `/data` và MariaDB. Với nhiều master, playbook thực
+hiện rolling từng master (`serial: 1`) để tránh dừng đồng thời toàn bộ Web/API.
+Container `icingaweb2-director-daemon` được tạo mới khi bật Director và bị xóa khi
+tắt Director. Việc chỉ bật Director không được phép làm MariaDB, Icinga DB hoặc
+Redis bị recreate.
 | `upgrade-plan` / `upgrade` / `rollback` | Đã có cho `managed_db`; external DB phải theo change/backup plan của DBA |
 
 ## Ghi chú kiến trúc quan trọng

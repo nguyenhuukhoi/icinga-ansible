@@ -49,7 +49,11 @@
 - name: Chạy Director schema migration (idempotent)
   ansible.builtin.command: "{{ web_run_full }} director migration run"
   register: dir_mig
-  changed_when: "'nothing to do' not in (dir_mig.stdout | default('') | lower)"
+  # Director 1.11.x trả stdout rỗng và rc=0 khi schema đã mới nhất. Điều kiện cũ
+  # coi stdout rỗng là thay đổi, nên mọi lần reconfigure đều báo changed giả.
+  changed_when:
+    - (dir_mig.stdout | default('') | trim | length) > 0
+    - "'nothing to do' not in (dir_mig.stdout | default('') | lower)"
   failed_when: dir_mig.rc != 0 and 'up to date' not in (dir_mig.stdout | default('') | lower)
   when: inventory_hostname == ca_host
 

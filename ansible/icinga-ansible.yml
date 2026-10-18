@@ -138,6 +138,9 @@
 # --- 6. Icinga Web 2 (Apache2) trên master -----------------------------------
 - name: Deploy Icinga Web 2
   hosts: master
+  # Bật/tắt Director làm thay đổi bind mount của icingaweb2 nên Docker bắt buộc
+  # recreate container. Chạy từng master để Web/API vẫn còn một node phục vụ.
+  serial: 1
   any_errors_fatal: true
   become: true
   gather_facts: true
