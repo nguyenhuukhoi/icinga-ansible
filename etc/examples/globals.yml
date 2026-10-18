@@ -161,14 +161,15 @@ director_auto_kickstart: false
 
 # File nhạy cảm dành cho check script đặt tại:
 #   config/icinga2/secret/                         (mọi Icinga node)
-#   config/icinga2/group_master/secret/            (chỉ master)
-#   config/icinga2/group_satellite/secret/         (chỉ satellite)
+#   config/icinga2/master/secret/                  (chỉ master)
+#   config/icinga2/satellite/secret/               (chỉ satellite)
+#   config/icinga2/client/secret/                  (chỉ client)
 #   config/icinga2/<inventory_hostname>/secret/    (chỉ một node)
 # Thứ tự trộn: global -> loại node -> host. Tầng sau ghi đè file cùng đường dẫn ở tầng trước;
 # những file khác vẫn được giữ. Xem QUICKSTART.md mục 3 để biết ví dụ đầy đủ.
 # Ansible đồng bộ và mount read-only vào container Icinga 2 tại:
 #   /etc/icinga-ansible/icinga2/
-# Có thể override đường dẫn global và đường dẫn trong container nếu cần. Các tầng group/host luôn nằm
+# Có thể override đường dẫn global và đường dẫn trong container nếu cần. Các tầng role/host luôn nằm
 # dưới deploy_config_dir để cấu trúc override nhất quán với phần config Icinga 2 còn lại.
 icinga2_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secret"
 icinga2_secret_container_dir: "/etc/icinga-ansible/icinga2"
@@ -178,7 +179,7 @@ icinga2_secret_container_dir: "/etc/icinga-ansible/icinga2"
 enable_check_by_ssh_target_plugins: false
 
 # OpenStack API service status (KHÔNG qua Director). Credential chỉ dành cho master, đặt tại
-# config/icinga2/group_master/secret/clouds.yaml; `cloud` phải khớp tên dưới `clouds:`.
+# config/icinga2/master/secret/clouds.yaml; `cloud` phải khớp tên dưới `clouds:`.
 # CheckCommand, Host và Service đều được render vào zones.d/master để hai master HA tự phân công check.
 openstack_service_checks: []
 # openstack_service_checks:

@@ -107,7 +107,7 @@
   ansible.builtin.set_fact:
     _ic_secret_source_dirs: >-
       {{ [icinga2_secret_source_dir]
-         + ([deploy_config_dir + '/icinga2/group_' + _ic_secret_role + '/secret']
+         + ([deploy_config_dir + '/icinga2/' + _ic_secret_role + '/secret']
             if _ic_secret_role | length > 0 else [])
          + [deploy_config_dir + '/icinga2/' + inventory_hostname + '/secret'] }}
 
@@ -308,7 +308,7 @@
       # Đường dẫn cũ trước khi CheckCommand OpenStack được chuyển vào zones.d/master. Giữ trong
       # exclude để file mồ côi không bị cơ chế base-config nhặt và mount lại.
       - conf.d/openstack-checks.conf
-      # Đường credential cũ. clouds.yaml hiện đi qua secret/group_master và được mount tại
+      # Đường credential cũ. clouds.yaml hiện đi qua secret/master và được mount tại
       # /etc/icinga-ansible/icinga2/clouds.yaml, không còn nằm dưới conf.d.
       - conf.d/clouds.yaml
       # Artifact top-level của cơ chế credential cũ. Task migration phía dưới xóa file này sau bước
@@ -1182,7 +1182,7 @@
   when: item not in _ic_ssh_names
   notify: Reload icinga2
 
-# Credential hiện được cơ chế secret phân tầng ở đầu role đồng bộ từ group_master/secret và chỉ
+# Credential hiện được cơ chế secret phân tầng ở đầu role đồng bộ từ master/secret và chỉ
 # xuất hiện trên master. Dọn artifact per-file của phiên bản cũ trên mọi node khi nâng cấp tại chỗ.
 - name: "Xóa credential OpenStack runtime theo cơ chế cũ"
   ansible.builtin.file:

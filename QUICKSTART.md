@@ -307,18 +307,18 @@ luồng `prepare-check-by-ssh`), có thể đặt file trên deployment node the
 ├── secret/                         # global: mọi master, satellite và client
 │   ├── clouds.yaml
 │   └── nested/common-token
-├── group_master/secret/            # chỉ các node trong group [master]
+├── master/secret/                  # chỉ các node trong group [master]
 │   └── clouds.yaml                 # ghi đè file global cùng đường dẫn
-├── group_satellite/secret/         # chỉ các node trong group [satellite]
+├── satellite/secret/               # chỉ các node trong group [satellite]
 │   └── id_openstack_check
 └── master1/secret/                 # chỉ inventory host master1
-    └── clouds.yaml                 # ghi đè cả global và group_master trên master1
+    └── clouds.yaml                 # ghi đè cả global và master trên master1
 ```
 
 Thứ tự trộn cố định là **global → loại node → host**. Việc ghi đè diễn ra theo đường dẫn tương đối của
 từng file, không thay thế cả thư mục: trong ví dụ trên, `nested/common-token` vẫn có trên `master1`, còn
 `clouds.yaml` của `master1/secret` thắng hai tầng trước. Các tên thư mục loại node được hỗ trợ là
-`group_master`, `group_satellite` và `group_client`; tên tầng host phải khớp chính xác
+`master`, `satellite` và `client`; tên tầng host phải khớp chính xác
 `inventory_hostname` trong inventory.
 
 `deploy`/`reconfigure` trộn các file áp dụng cho từng node rồi bind-mount read-only vào container tại
@@ -376,9 +376,9 @@ Image Icinga 2 phải là image custom có `/opt/icinga-venv/bin/python3`, `open
 secret dành riêng cho group master:
 
 ```bash
-install -d -m 0700 /etc/icinga-ansible/config/icinga2/group_master/secret
-$EDITOR /etc/icinga-ansible/config/icinga2/group_master/secret/clouds.yaml
-chmod 0600 /etc/icinga-ansible/config/icinga2/group_master/secret/clouds.yaml
+install -d -m 0700 /etc/icinga-ansible/config/icinga2/master/secret
+$EDITOR /etc/icinga-ansible/config/icinga2/master/secret/clouds.yaml
+chmod 0600 /etc/icinga-ansible/config/icinga2/master/secret/clouds.yaml
 ```
 
 ```yaml
@@ -714,7 +714,7 @@ monitor qua SSH. Loại override này đặc biệt hơn override thường (m�
 ```
 config/icinga2/zones.d/master/hosts.conf       # check chạy TỪ 1 endpoint trong zone "master"
 config/icinga2/zones.d/master/openstack-services.conf # full-file override service status OpenStack
-config/icinga2/group_master/secret/clouds.yaml         # credential chỉ mount trên master
+config/icinga2/master/secret/clouds.yaml               # credential chỉ mount trên master
 config/icinga2/zones.d/<tên_satellite_zone>/hosts.conf   # check chạy TỪ 1 satellite trong zone đó
 ```
 

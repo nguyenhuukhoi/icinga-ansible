@@ -9,7 +9,7 @@
  * This file is mounted on ca_host under zones.d/master and distributed to peers by config-sync.
  * Credentials are NOT passed as CheckCommand vars -- the script reads a clouds.yaml-style file
  * mounted read-only at /etc/icinga-ansible/icinga2/clouds.yaml from the master-only secret tier
- * deploy_config_dir/icinga2/group_master/secret/clouds.yaml, and looks up the entry matching
+ * deploy_config_dir/icinga2/master/secret/clouds.yaml, and looks up the entry matching
  * "$openstack_cloud$". This keeps the CheckCommand generic across ANY number of clouds -- adding a
  * new cloud only means adding an entry to clouds.yaml + a Host/Service in zones.d, no code change.
  */

@@ -67,6 +67,27 @@
     fail_msg: >-
       Các nhóm [master], [satellite], [client] phải rời nhau vì một Icinga endpoint chỉ có một zone.
 
+- name: Kiểm tra thư mục secret theo tên cũ có còn trên deployment node không
+  ansible.builtin.stat:
+    path: "{{ deploy_config_dir }}/icinga2/group_{{ item }}/secret"
+  loop: [master, satellite, client]
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: _precheck_legacy_role_secret_dirs
+
+- name: Chặn đường dẫn group_<role>/secret đã bỏ để không âm thầm mất credential
+  ansible.builtin.assert:
+    that:
+      - >-
+        (_precheck_legacy_role_secret_dirs.results
+         | selectattr('stat.exists', 'equalto', true) | list | length) == 0
+    fail_msg: >-
+      Tầng secret theo role đã bỏ tiền tố group_. Hãy chuyển group_master/secret thành
+      master/secret, group_satellite/secret thành satellite/secret và group_client/secret thành
+      client/secret, rồi xóa các thư mục cũ. Playbook từ chối chạy để không âm thầm bỏ sót secret.
+  run_once: true
+
 # Full-file override theo zone thắng hoàn toàn cấu hình sinh từ openstack_service_checks. Kiểm tra
 # source trên deployment node để prechecks không từ chối các biến template không còn được sử dụng.
 - name: Kiểm tra override zones.d/master/openstack-services.conf trên deployment node
@@ -111,7 +132,7 @@
 
 - name: Kiểm tra clouds.yaml thuộc tầng secret chỉ dành cho master
   ansible.builtin.stat:
-    path: "{{ deploy_config_dir }}/icinga2/group_master/secret/clouds.yaml"
+    path: "{{ deploy_config_dir }}/icinga2/master/secret/clouds.yaml"
   delegate_to: localhost
   become: false
   run_once: true
@@ -126,6 +147,7 @@
   loop:
     - "{{ deploy_config_dir }}/icinga2/secret/clouds.yaml"
     - "{{ deploy_config_dir }}/icinga2/openstack/clouds.yaml"
+    - "{{ deploy_config_dir }}/icinga2/group_master/secret/clouds.yaml"
   delegate_to: localhost
   become: false
   run_once: true
@@ -140,8 +162,8 @@
          | selectattr('stat.exists', 'equalto', true) | list | length) == 0
     fail_msg: >-
       Chỉ lưu credential OpenStack tại
-      {{ deploy_config_dir }}/icinga2/group_master/secret/clouds.yaml. Hãy xóa clouds.yaml khỏi
-      icinga2/secret (tầng global) và icinga2/openstack (đường dẫn cũ).
+      {{ deploy_config_dir }}/icinga2/master/secret/clouds.yaml. Hãy xóa clouds.yaml khỏi
+      icinga2/secret (tầng global), icinga2/openstack và icinga2/group_master/secret (đường dẫn cũ).
   run_once: true
   when: openstack_service_checks | default([]) | length > 0
 
@@ -151,7 +173,7 @@
       - _precheck_openstack_clouds_file.stat.exists | default(false)
       - _precheck_openstack_clouds_file.stat.isreg | default(false)
     fail_msg: >-
-      Phải tạo {{ deploy_config_dir }}/icinga2/group_master/secret/clouds.yaml trên deployment node
+      Phải tạo {{ deploy_config_dir }}/icinga2/master/secret/clouds.yaml trên deployment node
       trước khi khai openstack_service_checks. Không đặt credential này ở tầng secret global vì nó
       chỉ được phép đồng bộ tới các node master.
   run_once: true
@@ -164,10 +186,10 @@
     that:
       - >-
         item.cloud in
-        (((lookup('ansible.builtin.file', deploy_config_dir + '/icinga2/group_master/secret/clouds.yaml')
+        (((lookup('ansible.builtin.file', deploy_config_dir + '/icinga2/master/secret/clouds.yaml')
            | from_yaml).clouds) | default({}))
     fail_msg: >-
-      Thiếu {{ deploy_config_dir }}/icinga2/group_master/secret/clouds.yaml hoặc file không có
+      Thiếu {{ deploy_config_dir }}/icinga2/master/secret/clouds.yaml hoặc file không có
       profile clouds.{{ item.cloud }} mà openstack_service_checks yêu cầu.
   loop: "{{ openstack_service_checks | default([]) }}"
   loop_control:
