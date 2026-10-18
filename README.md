@@ -164,8 +164,9 @@ không thể thêm hoặc gỡ bind mount `modules/director/config.ini` và
 chúng nằm trong bind mount `/data` và MariaDB. Với nhiều master, playbook thực
 hiện rolling từng master (`serial: 1`) để tránh dừng đồng thời toàn bộ Web/API.
 Container `icingaweb2-director-daemon` được tạo mới khi bật Director và bị xóa khi
-tắt Director. Việc chỉ bật Director không được phép làm MariaDB, Icinga DB hoặc
-Redis bị recreate.
+tắt Director. Việc chỉ bật Director không được phép làm MariaDB, Icinga 2, Icinga DB
+hoặc Redis bị restart/recreate. Khi tạo DB Director lần đầu, role chỉ dừng daemon
+Director cũ nếu nó đang tồn tại; không dừng các consumer của DB khác.
 | `upgrade-plan` / `upgrade` / `rollback` | Đã có cho `managed_db`; external DB phải theo change/backup plan của DBA |
 
 ## Ghi chú kiến trúc quan trọng

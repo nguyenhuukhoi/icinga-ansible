@@ -90,7 +90,7 @@
   # BUG THẬT đã gặp (đọc trước khi xoá task này): task check credential/grant ngay sau đây trước kia
   # không có bước đệm nào — 1 lỗi kết nối THOÁNG QUA đúng lúc DB vừa Synced (vd server.cnf vừa đổi ở
   # phase1 khiến mariadb container vẫn còn đang khởi động lại) bị hiểu nhầm là "credential sai", kéo
-  # theo task "Dừng consumer DB trước khi rotate credential" tắt icingadb/icingaweb2 trên MỌI master —
+  # theo task dừng consumer DB lúc đó tắt icingadb/icingaweb2 trên MỌI master —
   # 1 outage hoàn toàn tránh được. Fix: retry ping ngắn bằng root trước, đảm bảo DB thật sự ổn định
   # (không chỉ Synced — Synced ở trên đo lúc join, có thể đã trôi qua vài giây/handler khác xen vào)
   # trước khi tin kết quả check credential ngay sau.
@@ -130,9 +130,31 @@
   no_log: true
   when: inventory_hostname == mariadb_bootstrap_host
 
-- name: Dừng consumer DB trước khi rotate credential
+- name: Xác định consumer cần dừng trước khi reconcile credential DB
+  ansible.builtin.set_fact:
+    _db_consumers_to_stop: >-
+      {%- set ns = namespace(containers=[]) -%}
+      {%- set consumer_map = {
+            'icingadb': ['icingadb'],
+            'icingaweb2': ['icingaweb2'],
+            'director': ['icingaweb2-director-daemon']
+          } -%}
+      {%- for result in (_managed_db_auth_checks.results | default([])) -%}
+        {%- if result.rc != 0 or
+              ('ON `' ~ result.item.database ~ '`.*' not in (result.stdout | default(''))) -%}
+          {%- for container in (consumer_map[result.item.name] | default([])) -%}
+            {%- if container not in ns.containers -%}
+              {%- set ns.containers = ns.containers + [container] -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.containers }}
+  when: inventory_hostname == mariadb_bootstrap_host
+
+- name: Dừng đúng consumer DB trước khi reconcile credential
   ansible.builtin.command:
-    argv: [docker, stop, icingadb, icingaweb2]
+    argv: "{{ ['docker', 'stop'] + _db_consumers_to_stop }}"
   delegate_to: "{{ item }}"
   loop: "{{ groups['master'] }}"
   register: _db_consumers_stopped_for_rotation
@@ -140,9 +162,7 @@
   failed_when: false
   when:
     - inventory_hostname == mariadb_bootstrap_host
-    - >-
-      (_managed_db_auth_checks.results | default([])
-       | selectattr('rc', 'ne', 0) | list | length) > 0
+    - _db_consumers_to_stop | default([]) | length > 0
 
 - name: Tạo/sửa database, credential và grant khi trạng thái chưa đúng
   ansible.builtin.command:

@@ -145,12 +145,36 @@
   no_log: true
   when: inventory_hostname == mariadb_bootstrap_host
 
-# Khi credential DB đổi, daemon/web đang chạy vẫn giữ credential cũ cho tới
-# các role phía sau. Dừng trước để không tạo retry storm và log lỗi giả trong
-# cửa sổ rotation; site playbook sẽ start lại với config mới.
-- name: Dừng consumer DB trước khi rotate credential
+# Chỉ dừng consumer thực sự dùng credential đang được reconcile. Trước đây chỉ cần
+# DB Director chưa tồn tại khi bật module lần đầu là task dừng cả icingadb và
+# icingaweb2 trên mọi master, gây outage không liên quan. Web sẽ tự recreate ở role
+# icingaweb2 khi cấu hình/mount Director thay đổi; Director daemon (nếu đã tồn tại)
+# mới là process cần dừng trước khi rotate credential Director.
+- name: Xác định consumer cần dừng trước khi reconcile credential DB
+  ansible.builtin.set_fact:
+    _db_consumers_to_stop: >-
+      {%- set ns = namespace(containers=[]) -%}
+      {%- set consumer_map = {
+            'icingadb': ['icingadb'],
+            'icingaweb2': ['icingaweb2'],
+            'director': ['icingaweb2-director-daemon']
+          } -%}
+      {%- for result in (_managed_db_auth_checks.results | default([])) -%}
+        {%- if result.rc != 0 or
+              ('ON `' ~ result.item.database ~ '`.*' not in (result.stdout | default(''))) -%}
+          {%- for container in (consumer_map[result.item.name] | default([])) -%}
+            {%- if container not in ns.containers -%}
+              {%- set ns.containers = ns.containers + [container] -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.containers }}
+  when: inventory_hostname == mariadb_bootstrap_host
+
+- name: Dừng đúng consumer DB trước khi reconcile credential
   ansible.builtin.command:
-    argv: [docker, stop, icingadb, icingaweb2]
+    argv: "{{ ['docker', 'stop'] + _db_consumers_to_stop }}"
   delegate_to: "{{ item }}"
   loop: "{{ groups['master'] }}"
   register: _db_consumers_stopped_for_rotation
@@ -158,9 +182,7 @@
   failed_when: false
   when:
     - inventory_hostname == mariadb_bootstrap_host
-    - >-
-      (_managed_db_auth_checks.results | default([])
-       | selectattr('rc', 'ne', 0) | list | length) > 0
+    - _db_consumers_to_stop | default([]) | length > 0
 
 - name: Tạo/sửa database, credential và grant khi trạng thái chưa đúng
   ansible.builtin.command:
