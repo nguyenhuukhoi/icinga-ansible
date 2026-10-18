@@ -67,6 +67,16 @@
     fail_msg: >-
       Các nhóm [master], [satellite], [client] phải rời nhau vì một Icinga endpoint chỉ có một zone.
 
+# Full-file override theo zone thắng hoàn toàn cấu hình sinh từ openstack_service_checks. Kiểm tra
+# source trên deployment node để prechecks không từ chối các biến template không còn được sử dụng.
+- name: Kiểm tra override zones.d/master/openstack-services.conf trên deployment node
+  ansible.builtin.stat:
+    path: "{{ deploy_config_dir }}/icinga2/zones.d/master/openstack-services.conf"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: _precheck_openstack_services_override
+
 - name: Kiểm tra cấu hình static OpenStack service status
   ansible.builtin.assert:
     that:
@@ -86,6 +96,7 @@
   loop: "{{ openstack_service_checks | default([]) }}"
   loop_control:
     label: "{{ item.name | default('<không tên>') }}"
+  when: not (_precheck_openstack_services_override.stat.isreg | default(false))
 
 - name: Tên OpenStack logical host phải duy nhất
   ansible.builtin.assert:
@@ -94,7 +105,9 @@
         (openstack_service_checks | default([]) | map(attribute='name') | unique | length) ==
         (openstack_service_checks | default([]) | length)
     fail_msg: "Mỗi openstack_service_checks.name phải duy nhất."
-  when: openstack_service_checks | default([]) | length > 0
+  when:
+    - not (_precheck_openstack_services_override.stat.isreg | default(false))
+    - openstack_service_checks | default([]) | length > 0
 
 - name: Kiểm tra clouds.yaml trên deployment node khi bật OpenStack service status
   ansible.builtin.stat:
@@ -103,7 +116,9 @@
   become: false
   run_once: true
   register: _precheck_openstack_clouds_file
-  when: openstack_service_checks | default([]) | length > 0
+  when:
+    - not (_precheck_openstack_services_override.stat.isreg | default(false))
+    - openstack_service_checks | default([]) | length > 0
 
 - name: Bắt buộc có clouds.yaml khi bật OpenStack service status
   ansible.builtin.assert:
@@ -114,7 +129,9 @@
       Phải tạo {{ deploy_config_dir }}/icinga2/openstack/clouds.yaml trên deployment node trước khi
       khai openstack_service_checks.
   run_once: true
-  when: openstack_service_checks | default([]) | length > 0
+  when:
+    - not (_precheck_openstack_services_override.stat.isreg | default(false))
+    - openstack_service_checks | default([]) | length > 0
 
 - name: Bắt buộc clouds.yaml có đúng cloud profile đã khai
   ansible.builtin.assert:
@@ -131,6 +148,7 @@
     label: "{{ item.cloud | default('<không cloud>') }}"
   run_once: true
   when:
+    - not (_precheck_openstack_services_override.stat.isreg | default(false))
     - openstack_service_checks | default([]) | length > 0
     - _precheck_openstack_clouds_file.stat.exists | default(false)
 

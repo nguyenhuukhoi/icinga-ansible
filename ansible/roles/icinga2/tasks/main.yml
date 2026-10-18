@@ -1181,17 +1181,41 @@
     - (groups['client'] | default([])) | length == 0
   notify: Reload icinga2
 
-# OpenStack service status là cấu hình role-owned riêng, không dùng Director và không nằm trong
-# hosts.conf override của operator. Tách file để một override SSH/custom host không vô tình làm mất
-# Nova/Neutron/Cinder objects đã khai bằng openstack_service_checks.
-- name: Render zones.d/master/openstack-services.conf (không qua Director)
+# OpenStack service status không dùng Director và nằm trong file riêng để một override SSH/custom host
+# tại hosts.conf không vô tình làm mất Nova/Neutron/Cinder objects. Vì đây là config theo ZONE (không
+# theo host Ansible), operator đặt đúng một full-file override trên deployment node tại:
+#   config/icinga2/zones.d/master/openstack-services.conf
+# Ansible chỉ ghi file vào ca_host; Icinga2 cluster config-sync phân phối cho endpoint master còn lại.
+- name: "Xác định override cho zones.d/master/openstack-services.conf"
+  ansible.builtin.set_fact:
+    _openstack_services_src: >-
+      {{ (q('first_found', dict(
+            files=[deploy_config_dir + '/icinga2/zones.d/master/openstack-services.conf'],
+            skip=true)) | first) | default('', true) }}
+  when: inventory_hostname == ca_host
+
+- name: "Copy override -> zones.d/master/openstack-services.conf"
+  ansible.builtin.copy:
+    src: "{{ _openstack_services_src }}"
+    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/openstack-services.conf"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0640"
+  when:
+    - inventory_hostname == ca_host
+    - _openstack_services_src | length > 0
+  notify: Reload icinga2
+
+- name: "Render template mặc định -> zones.d/master/openstack-services.conf"
   ansible.builtin.template:
     src: openstack-services.conf.j2
     dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/openstack-services.conf"
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
     mode: "0640"
-  when: inventory_hostname == ca_host
+  when:
+    - inventory_hostname == ca_host
+    - _openstack_services_src | default('') | length == 0
   notify: Reload icinga2
 
 # Host/Service THẬT chạy trực tiếp từ zone "master" (vd SSH ra host ngoài, KHÔNG cần agent Icinga2 —

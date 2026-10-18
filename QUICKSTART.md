@@ -323,6 +323,17 @@ CPU/RAM/Disk của từng controller/compute có thể tiếp tục dùng Host v
 Trạng thái control plane của Nova, Neutron và Cinder được khai trực tiếp trong `globals.yml`; Ansible render
 thành Host/Service static trong `zones.d/master`. Director không tạo, sửa hoặc deploy các object này.
 
+Luồng mặc định dùng `openstack_service_checks` như bên dưới. Nếu cần tự quản lý toàn bộ object Icinga DSL,
+đặt full-file override trên deployment node tại:
+
+```text
+/etc/icinga-ansible/config/icinga2/zones.d/master/openstack-services.conf
+```
+
+Override này thay thế hoàn toàn nội dung sinh từ `openstack_service_checks`, không merge. Ansible chỉ copy
+nó tới `ca_host`, sau đó Icinga2 cluster config-sync sang master còn lại. Xóa override và chạy lại
+`reconfigure` sẽ tự quay về template sinh từ `openstack_service_checks`.
+
 Image Icinga 2 phải là image custom có `/opt/icinga-venv/bin/python3`, `openstacksdk` và `PyYAML`. Khai image
 đó bằng `custom_image_overrides.icinga2` như mục 5.5. Trên deployment node, tạo file credential:
 
@@ -393,7 +404,9 @@ cd /home/ubuntu/icinga-ansible
 
 `prechecks` chặn sớm nếu tên host/cloud sai định dạng, service ngoài danh sách hỗ trợ, giá trị interval không
 hợp lệ, thiếu `clouds.yaml`, hoặc tên profile không tồn tại. Thêm một cloud khác chỉ cần thêm profile vào
-`clouds.yaml` và thêm một phần tử vào `openstack_service_checks`.
+`clouds.yaml` và thêm một phần tử vào `openstack_service_checks`. Các kiểm tra biến này chỉ áp dụng cho luồng
+render mặc định; khi có full-file override `openstack-services.conf`, người vận hành chịu trách nhiệm về nội
+dung object và credential mà file custom sử dụng. Cú pháp Icinga vẫn được kiểm tra trước khi cập nhật container.
 
 ## 4. Nếu host đích ở sau proxy công ty
 
@@ -655,6 +668,7 @@ monitor qua SSH. Loại override này đặc biệt hơn override thường (m�
 
 ```
 config/icinga2/zones.d/master/hosts.conf       # check chạy TỪ 1 endpoint trong zone "master"
+config/icinga2/zones.d/master/openstack-services.conf # full-file override service status OpenStack
 config/icinga2/zones.d/<tên_satellite_zone>/hosts.conf   # check chạy TỪ 1 satellite trong zone đó
 ```
 
