@@ -107,6 +107,12 @@ icingaweb2_timezone: "Asia/Ho_Chi_Minh"
 # môi trường muốn Ansible tự chạy `icingacli director kickstart run`.
 director_auto_kickstart: false
 
+# Secret file tùy ý cho plugin chạy trong container Icinga 2. Nguồn nằm trên deployment node;
+# role đồng bộ sang từng Icinga node rồi mount read-only vào đường dẫn container bên dưới.
+# Ví dụ: clouds.yaml, private key riêng của check script. Không commit thư mục nguồn vào Git.
+icinga2_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secret"
+icinga2_secret_container_dir: "/etc/icinga-ansible/icinga2"
+
 # --- Proxy (globals override; mặc định dùng /etc/environment của managed node) -
 # proxy_group_overrides (2026-09-13, tuỳ chọn — khai trong globals.yml): override proxy RIÊNG cho
 # từng nhóm vai trò (master/satellite/galera/client) — dùng khi các nhóm nằm ở mạng khác nhau, mỗi

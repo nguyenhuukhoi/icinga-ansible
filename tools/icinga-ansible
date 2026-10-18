@@ -90,6 +90,8 @@ Backup/restore toàn hệ thống (dựng lại hạ tầng mới sau sự cố 
                       không đụng tới)
   restore-pki         (tuỳ chọn, giữa bootstrap-servers và deploy) Pre-seed CA cũ lên ca_host để
                       giữ nguyên định danh PKI — bỏ qua bước này = deploy tự tạo CA mới hoàn toàn
+  restore-web         Khôi phục config Icinga Web riêng của từng master từ backup-full
+                      (-e restore_backup_ts=YYYYMMDD-HHMMSS -e confirm=yes), rồi chạy deploy
   # Custom image (design.md mục 9.6): icinga-ansible KHÔNG tự build — tự build/push bằng cách nào
   # cũng được, rồi khai custom_image_registry + custom_image_overrides trong globals.yml.
   # Quy trình đầy đủ: restore-config --config-backup PATH -> bootstrap-servers -> [restore-pki
@@ -271,8 +273,8 @@ init_config() {
   trap - EXIT
   echo "Đã restore cấu hình vào $CONFIG_DIR_REAL."
   echo "Tiếp theo: kiểm tra lại $GLOBALS (đổi IP/hostname nếu hạ tầng mới khác hạ tầng cũ), rồi"
-  echo "  bootstrap-servers -> (tuỳ chọn) restore-pki nếu muốn giữ PKI cũ -> deploy -> mariadb-recovery"
-  echo "  -e recovery_mode=restore-backup để khôi phục dữ liệu DB. Xem QUICKSTART.md mục backup/restore."
+  echo "  bootstrap-servers -> (tuỳ chọn) restore-pki -> deploy -> mariadb-recovery -> recover-db-only"
+  echo "  -> restore-web -> deploy -> check. Xem QUICKSTART.md mục 7.1 để dùng đúng timestamp/confirm."
   exit 0
 }
 
@@ -401,6 +403,12 @@ case "$COMMAND" in
     cd "$ANSIBLE_DIR"
     "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/recover-db-only.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+  restore-web)
+    cd "$ANSIBLE_DIR"
+    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/restore-web.yml" \
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
+      "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 
   backup-full)

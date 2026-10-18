@@ -274,4 +274,4 @@
           - "Run: icinga-ansible deploy -i <inventory>"
           - "Then run: icinga-ansible check -i <inventory>"
           - "Icinga DB/Web remain stopped until deploy rotates/reconciles service credentials."
-          - "The old CA was not recovered; re-enroll every old satellite/agent."
+          - "If the old CA was not restored separately, re-enroll every old satellite/agent."

@@ -297,7 +297,24 @@ Không dùng private key quản trị OpenStack làm runtime key của Icinga. C
   sao lưu thư mục này.
 - `/etc/icinga-ansible/icinga2/ssh/` trên mỗi node chạy Icinga 2 là **bản runtime** do Ansible đồng bộ từ
   nguồn trên. Bản này có thể tái tạo bằng `reconfigure` và được mount read-only vào container tại
-  `/etc/icinga2/ssh/`.
+`/etc/icinga2/ssh/`.
+
+Với credential dành cho plugin tùy biến (ví dụ `clouds.yaml` hoặc một SSH private key không thuộc
+luồng `prepare-check-by-ssh`), đặt file trên deployment node như sau:
+
+```text
+/etc/icinga-ansible/config/icinga2/secret/
+├── clouds.yaml
+└── id_openstack_check
+```
+
+`deploy`/`reconfigure` đồng bộ chính xác các file này xuống mỗi Icinga node rồi bind-mount read-only
+vào container tại `/etc/icinga-ansible/icinga2/`. File đã xóa khỏi thư mục nguồn cũng bị xóa khỏi bản
+runtime. Giữ private key ở mode `0600`; không commit thư mục `secret/` vào Git. Check script trong
+container đọc các đường dẫn tương ứng như `/etc/icinga-ansible/icinga2/clouds.yaml`.
+
+Đây là input của deployment node nên `backup-full` tự đưa cả thư mục vào `config-<ts>.tar.gz`, và
+`restore-config` phục hồi nó cùng `globals.yml`, `passwords.yml` và các override khác.
 
 Nếu deployment node là máy riêng, không thuộc group `[master]` hoặc `[satellite]`, nó chỉ cần thư mục nguồn
 dưới `config/`. Thư mục runtime không được tạo mới trên deployment node; nếu còn ở đó thì thường là dữ liệu
@@ -767,6 +784,7 @@ thực thi check, không phải nơi bạn đặt override).
 | `backup-full` | Backup TOÀN HỆ THỐNG: config control-node + DB + PKI + icingaweb2 config (xem mục 7.1) |
 | `CONFIRM=yes-i-really-mean-it restore-config --config-backup <path>` | Khôi phục `/etc/icinga-ansible` từ 1 bản `backup-full` (dùng khi mất trắng deployment node, xem mục 7.1 — **biến môi trường `CONFIRM=`, không phải cờ `-e confirm=`**) |
 | `restore-pki -e pki_backup=<path>` | Khôi phục CA/PKI cũ (giữ nguyên cert/CA cũ) trước khi `deploy` lại, xem mục 7.1 |
+| `restore-web -e restore_backup_ts=<ts> -e confirm=yes` | Khôi phục cấu hình Icinga Web riêng của từng master từ `backup-full`; chạy `deploy` ngay sau đó |
 | `destroy` | Xoá sạch container + dữ liệu + cấu hình render (`/etc/icinga-ansible`: mọi override — GIỮ LẠI `globals.yml`+`passwords.yml` trên deployment node) (**bắt buộc** thêm `-e confirm=yes-i-really-really-mean-it` đúng nguyên văn, giống `kolla-ansible destroy`, không thì bị chặn an toàn) |
 
 Ví dụ đổi mật khẩu admin web sau khi đã deploy:
@@ -789,7 +807,7 @@ Làm lại từ đầu (xoá sạch rồi deploy lại):
 
 ### 7.1. Backup/Restore toàn hệ thống (dựng lại cụm mới từ backup)
 
-Khác `mariadb-backup` (chỉ DB), `backup-full` sao lưu CẢ 3 phần cần để dựng lại cụm từ đầu:
+Khác `mariadb-backup` (chỉ DB), `backup-full` sao lưu CẢ 4 phần cần để dựng lại cụm từ đầu:
 
 1. **Config control-node** — `globals.yml`, `passwords.yml`, mọi override (`deploy_config_dir/`) —
    nằm trên **deployment node** (máy chạy CLI), KHÔNG phải trên `master1`/`master2`/...
@@ -798,9 +816,17 @@ Khác `mariadb-backup` (chỉ DB), `backup-full` sao lưu CẢ 3 phần cần đ
 3. **PKI (CA)** — `ca.crt`/`ca.key` dùng để ký cert cho mọi node — nằm trên **`ca_host`**
    (`master[0]`, ví dụ `m1`) — **KHÁC** node DB chính, dễ nhầm vì 2 vai trò này thường không cùng 1
    host trong topology HA.
+4. **Icinga Web config theo từng master** — gồm thay đổi file qua Web UI không có trong override; khôi
+   phục bằng `restore-web` rồi chạy lại `deploy` để reconcile credential/endpoint được quản lý.
 
 Đã **verify thật nhiều lần trên hạ tầng lab** (design.md mục 10.6/10.7), gồm cả trường hợp dựng lại
-trên **hạ tầng IP hoàn toàn khác** bản backup — xem 3 case cụ thể bên dưới.
+trên **hạ tầng IP hoàn toàn khác** bản backup — xem các case cụ thể bên dưới.
+
+Drill gần nhất ngày **2026-10-18** dùng topology 2 master + 3 Galera trên cùng các VM sau khi chạy
+`destroy` và xóa toàn bộ `/etc/icinga-ansible`. Bundle được kiểm tra SHA-256 trước restore. Kết quả xác
+nhận DB marker, file cấu hình Web riêng trên cả hai master, CA fingerprint và Icinga DB environment ID
+đều khớp bản trước khi xóa; thư mục secret được phục hồi; `check` kết thúc với `failed=0`. Drill này
+kiểm chứng teardown/rebuild trên cùng hạ tầng, không được hiểu là một lần tạo VM hoặc đổi IP mới.
 
 ```bash
 # Chạy định kỳ (cron) hoặc trước khi làm việc rủi ro — TỪ deployment node
@@ -823,24 +849,7 @@ trên **hạ tầng IP hoàn toàn khác** bản backup — xem 3 case cụ th�
 > bash thuần, không qua Ansible — khác mọi lệnh khác trong bảng ở trên). Gõ nhầm thành `-e confirm=...`
 > sẽ không có tác dụng, lệnh vẫn dừng lại hỏi xác nhận.
 
-#### Case 1 — Chỉ mất deployment node, cụm (`master`/`satellite`/`galera`) vẫn sống bình thường
-
-Trường hợp nhẹ nhất: máy chạy CLI (laptop/VM riêng) bị hỏng/mất, nhưng `master1`, `master2`,
-`galera1`... vẫn đang chạy tốt — chỉ cần lấy lại QUYỀN QUẢN LÝ (để `reconfigure`/thêm node/... về sau),
-không cần đụng gì tới cụm đang chạy.
-
-```bash
-# Trên deployment node MỚI: cài icinga-ansible như bình thường (mục 1-2), rồi:
-CONFIRM=yes-i-really-mean-it ./tools/icinga-ansible restore-config \
-  --config-backup /path/to/config-20260802-044728.tar.gz
-# Xong — /etc/icinga-ansible đã có lại globals.yml/passwords.yml/mọi override y hệt trước.
-# KHÔNG cần bootstrap-servers/deploy/restore-pki/mariadb-recovery gì cả — cụm vẫn đang chạy nguyên vẹn.
-
-# Xác nhận đã quản lý lại được:
-./tools/icinga-ansible check -i ansible/inventory/my-cluster
-```
-
-#### Case 2 — Mất TOÀN BỘ hạ tầng, dựng lại trên ĐÚNG IP/hostname cũ
+#### Case 1 — Mất TOÀN BỘ hạ tầng, dựng lại trên ĐÚNG IP/hostname cũ
 
 Đã verify thật 2026-07-24 (design.md mục 10.6) trên hạ tầng 7 host (2 master + 2 satellite + 3
 galera). Ví dụ cụ thể với timestamp backup `20260802-044728`:
@@ -857,7 +866,7 @@ CONFIRM=yes-i-really-mean-it ./tools/icinga-ansible restore-config \
 scp pki-20260802-044728.tar.gz m1:/home/ubuntu/
 ./tools/icinga-ansible restore-pki -i ansible/inventory/my-cluster \
   -e pki_backup=/home/ubuntu/pki-20260802-044728.tar.gz -e confirm=yes
-# 2b. HƯỚNG "PKI mới" (đơn giản hơn, không cần lo TicketSalt — xem lưu ý Case 3) — bỏ qua hẳn bước 2a,
+# 2b. HƯỚNG "PKI mới" (đơn giản hơn; xem bảng chọn PKI bên dưới) — bỏ qua hẳn bước 2a,
 #     "deploy" ở bước 3 sẽ tự sinh CA mới hoàn toàn.
 
 # 3. Chép lại toàn bộ thư mục backup vào đúng icinga_config_backup_dir trên deployment node mới,
@@ -866,7 +875,10 @@ scp pki-20260802-044728.tar.gz m1:/home/ubuntu/
 ./tools/icinga-ansible deploy -i ansible/inventory/my-cluster
 ./tools/icinga-ansible mariadb-recovery -i ansible/inventory/my-cluster \
   -e recovery_mode=restore-backup -e restore_backup_ts=20260802-044728 -e confirm=yes
-./tools/icinga-ansible deploy -i ansible/inventory/my-cluster   # restart icingadb (restore không tự bật lại)
+./tools/icinga-ansible recover-db-only -i ansible/inventory/my-cluster -e confirm=yes
+./tools/icinga-ansible restore-web -i ansible/inventory/my-cluster \
+  -e restore_backup_ts=20260802-044728 -e confirm=yes
+./tools/icinga-ansible deploy -i ansible/inventory/my-cluster   # reconcile config/credential và bật lại service
 ```
 
 Xác nhận đã khôi phục đúng:
@@ -876,11 +888,11 @@ Xác nhận đã khôi phục đúng:
 docker exec icinga2 openssl x509 -in /data/var/lib/icinga2/ca/ca.crt -noout -fingerprint -sha256
 ```
 
-#### Case 3 — Mất TOÀN BỘ hạ tầng, dựng lại trên phần cứng MỚI (IP khác, có thể cả topology khác)
+#### Case 2 — Mất TOÀN BỘ hạ tầng, dựng lại trên phần cứng MỚI (IP khác, có thể cả topology khác)
 
 Đã verify thật 2026-08-02 (design.md mục 10.7): destroy hẳn cụm 2 master + 2 satellite + 3 galera,
 dựng lại thành **2 master (bớt satellite), IP master đổi hẳn sang vị trí khác** — CA fingerprint khớp
-byte-for-byte, DB khôi phục đủ, cụm hoạt động bình thường ở IP mới. **Quy trình y hệt Case 2**, chỉ
+byte-for-byte, DB khôi phục đủ, cụm hoạt động bình thường ở IP mới. **Quy trình y hệt Case 1**, chỉ
 khác 2 điểm:
 
 1. **KHÔNG cần IP giống bản backup** — chỉ cần **tên host (`inventory_hostname`)** khớp với những gì
@@ -934,7 +946,7 @@ satellite
 | Rủi ro | Bug TicketSalt nếu thêm node mới cùng lúc (đã fix, xem trên) | Không có rủi ro tương tự |
 | Khi nào chọn | Cụm có nhiều client/satellite bên ngoài không tiện enroll lại (vd hàng chục host SSH-monitor) | Disaster recovery đơn giản, số node ít, hoặc không chắc PKI cũ còn nguyên vẹn |
 
-#### Case 4 — Chỉ còn bản backup DB, mất cả hai master và không có backup CA/config
+#### Case 3 — Chỉ còn bản backup DB, mất cả hai master và không có backup CA/config
 
 Runbook thao tác đầy đủ, gồm topology, safety gate và lệnh verify sau restore nằm trong
 [`OPERATIONS-RUNBOOK-VI.md`](OPERATIONS-RUNBOOK-VI.md), mục recovery khi chỉ còn DB.
@@ -995,9 +1007,9 @@ Sau recovery phải xác nhận hai master trả cùng nội dung JSON ở
 được và mọi agent/satellite đã enroll lại. File environment ID tạm trước recovery được giữ cạnh file
 thật với suffix `.before-db-only-recovery` để audit; không được dùng lại file tạm này.
 
-#### Case 5 — Còn nguyên deployment node (config/password/inventory) và DB backup; mất toàn bộ service node
+#### Case 4 — Còn nguyên deployment node (config/password/inventory) và DB backup; mất toàn bộ service node
 
-Đây là trường hợp thuận lợi hơn Case 4 và là drill đã chạy thật ngày 2026-10-04 với 2 master, 2 satellite,
+Đây là trường hợp thuận lợi hơn Case 3 và là drill đã chạy thật ngày 2026-10-04 với 2 master, 2 satellite,
 3 Galera. Không chạy `init-config`/`genpwd`, vì `/etc/icinga-ansible/globals.yml`, `passwords.yml`, inventory
 và override trên deployment node chính là desired state cần giữ. Nếu không còn PKI backup, để lần deploy đầu
 tạo CA mới; các satellite/agent được dựng lại phải enroll bằng CA mới.
@@ -1012,15 +1024,18 @@ tạo CA mới; các satellite/agent được dựng lại phải enroll bằng 
 ./tools/icinga-ansible mariadb-recovery -i ansible/inventory/my-cluster \
   -e recovery_mode=restore-backup -e restore_backup_tag=full -e confirm=yes
 
-# 3. Khôi phục environment ID cũ từ DB, sau đó hội tụ toàn stack và kiểm tra sâu.
+# 3. Khôi phục config Web từng master và environment ID cũ từ DB, sau đó hội tụ toàn stack.
+./tools/icinga-ansible restore-web -i ansible/inventory/my-cluster \
+  -e restore_backup_ts=<timestamp-trong-LATEST_COMPLETE> -e confirm=yes
 ./tools/icinga-ansible recover-db-only -i ansible/inventory/my-cluster -e confirm=yes
 ./tools/icinga-ansible deploy -i ansible/inventory/my-cluster
 ./tools/icinga-ansible check -i ansible/inventory/my-cluster
 ```
 
-Director DB được restore nguyên vẹn. Lần deploy cuối chạy migration và kickstart reconcile với topology hiện
-tại. Nếu inventory mới vẫn là 2 master + 2 satellite, Director phải có đúng bốn endpoint đó và đúng các zone
-khai trong `satellite_zones`; `check` sẽ fail nếu còn endpoint/zone cũ hoặc thiếu object mới.
+Director DB được restore nguyên vẹn. Lần deploy cuối chạy migration Director. Với mặc định
+`director_auto_kickstart: false`, người vận hành tự chạy Kickstart trong Web UI sau khi restore; Ansible chưa
+import hoặc reconcile endpoint/zone trước bước đó. Sau khi Kickstart hoàn tất, chạy lại `reconfigure` và
+`check` để kiểm tra topology/object đã phục hồi.
 
 ## 8. Thêm/bớt node vào cụm đang chạy (HA)
 

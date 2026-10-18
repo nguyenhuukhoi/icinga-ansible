@@ -159,6 +159,14 @@ enable_icingaweb2_modules:
 # true: Ansible render kickstart.ini và tự import/reconcile endpoint/zone từ Icinga API.
 director_auto_kickstart: false
 
+# File nhạy cảm dành cho check script đặt tại:
+#   /etc/icinga-ansible/config/icinga2/secret/
+# Ansible đồng bộ và mount read-only vào container Icinga 2 tại:
+#   /etc/icinga-ansible/icinga2/
+# Có thể override hai đường dẫn sau nếu cần.
+icinga2_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secret"
+icinga2_secret_container_dir: "/etc/icinga-ansible/icinga2"
+
 # Cài Linuxfabrik monitoring plugins trên các host trong [all_hosts] để CPU/RAM/disk có thể được
 # gọi từ Icinga master qua check_by_ssh. Opt-in để không thay đổi host của deployment hiện hữu.
 enable_check_by_ssh_target_plugins: false

@@ -629,16 +629,30 @@ Không dùng `--delete` nếu policy lưu nhiều generation ở storage đích.
 
 ### 12.4. Lưu ý về archive Icinga Web
 
-`restore-config` chỉ restore archive `config-*` của deployment node. Nó không tự giải nén `icingaweb2-<host>-*.tar.gz` lên master.
+`restore-config` chỉ restore archive `config-*` của deployment node. Dùng lệnh riêng `restore-web` để
+khôi phục `icingaweb2-<host>-*.tar.gz` lên đúng master:
 
-Database restore đã phục hồi database `icingaweb2` và `director`. Archive Web chỉ cần dùng khi có thay đổi file qua UI không tồn tại trong override. Trước khi merge thủ công:
+```bash
+./tools/icinga-ansible restore-web -i inventory-prod \
+  -e restore_backup_ts=<timestamp> -e confirm=yes
+./tools/icinga-ansible deploy -i inventory-prod
+```
+
+`restore-web` kiểm tra toàn bộ manifest SHA-256, yêu cầu đủ archive cho mọi master hiện tại, dừng Web
+theo rolling `serial: 1`, thay cây config và giữ mode file trong archive. Lần `deploy` ngay sau đó
+reconcile endpoint/credential do Ansible quản lý và khởi động lại Web/Director daemon.
+
+Database restore đã phục hồi database `icingaweb2` và `director`. Archive Web chứa phần file thay đổi
+qua UI không tồn tại trong override. Nếu topology mới khác tên master, archive cũ không thể tự ánh xạ
+sang tên mới; hãy xem và chuyển phần cần giữ thành override trước khi deploy:
 
 1. chạy `tar -tzf` để xem cấu trúc;
 2. so sánh từng file với `/etc/icinga-ansible/icingaweb2` trên master mới;
 3. đưa phần cần giữ trở lại `/etc/icinga-ansible/config/` để trở thành desired state;
 4. chạy `reconfigure` và `check`.
 
-Không giải nén mù toàn bộ archive của master cũ lên topology mới vì có thể ghi đè endpoint hoặc credential vừa được reconcile.
+Không đổi tên archive để ép restore sang một master khác. `restore-web` cố ý khớp archive theo đúng
+`inventory_hostname`; topology đổi tên cần được review thủ công.
 
 ## 13. Khôi phục và sửa MariaDB/Galera
 

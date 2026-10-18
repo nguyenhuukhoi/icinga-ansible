@@ -93,6 +93,83 @@
   ansible.builtin.set_fact:
     ic_run: "docker run --rm -v {{ ic_data }}:/data {{ images.icinga2 }}"
 
+# Files in this directory are operator-owned inputs, not Icinga DSL. The deployment node may be a
+# separate host, so copy them to every Icinga node before adding the container bind mount.
+- name: Kiểm tra thư mục secret Icinga 2 trên deployment node
+  ansible.builtin.stat:
+    path: "{{ icinga2_secret_source_dir }}"
+  delegate_to: localhost
+  become: false
+  register: _ic_secret_source
+
+- name: Chặn đường dẫn secret tồn tại nhưng không phải thư mục
+  ansible.builtin.assert:
+    that:
+      - not _ic_secret_source.stat.exists or _ic_secret_source.stat.isdir
+    fail_msg: "{{ icinga2_secret_source_dir }} phải là thư mục."
+
+- name: Dò file secret nguồn trên deployment node
+  ansible.builtin.find:
+    paths: "{{ icinga2_secret_source_dir }}"
+    recurse: true
+    hidden: true
+    file_type: file
+  delegate_to: localhost
+  become: false
+  register: _ic_secret_source_files
+  when: _ic_secret_source.stat.exists
+
+- name: Tạo thư mục secret runtime trên Icinga node
+  ansible.builtin.file:
+    path: "{{ icinga_etc_dir }}/icinga2/secret"
+    state: directory
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0700"
+  when: _ic_secret_source.stat.exists
+
+- name: Đồng bộ file secret từ deployment node xuống Icinga node
+  ansible.builtin.copy:
+    src: "{{ icinga2_secret_source_dir }}/"
+    dest: "{{ icinga_etc_dir }}/icinga2/secret/"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    directory_mode: "0700"
+    mode: preserve
+  no_log: true
+  when: _ic_secret_source.stat.exists
+
+- name: Dò file secret runtime để loại bỏ file không còn ở nguồn
+  ansible.builtin.find:
+    paths: "{{ icinga_etc_dir }}/icinga2/secret"
+    recurse: true
+    hidden: true
+    file_type: file
+  register: _ic_secret_runtime_files
+  when: _ic_secret_source.stat.exists
+
+- name: Xóa file secret runtime đã bị gỡ khỏi deployment node
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ _ic_secret_runtime_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  no_log: true
+  when:
+    - _ic_secret_source.stat.exists
+    - >-
+      (item.path | regex_replace('^' ~ ((icinga_etc_dir ~ '/icinga2/secret/') | regex_escape), ''))
+      not in
+      (_ic_secret_source_files.files | map(attribute='path')
+       | map('regex_replace', '^' ~ ((icinga2_secret_source_dir ~ '/') | regex_escape), '') | list)
+
+- name: Gỡ secret runtime khi thư mục nguồn không tồn tại
+  ansible.builtin.file:
+    path: "{{ icinga_etc_dir }}/icinga2/secret"
+    state: absent
+  when: not _ic_secret_source.stat.exists
+
 # ---------- Base config skeleton (toàn bộ /etc/icinga2 image ship kèm) — seed 1 LẦN ra node ---------
 # Mục tiêu (theo yêu cầu người dùng — giống hệt kolla /etc/kolla/<svc>, KHÔNG lồng thêm thư mục con
 # nào kiểu "base/"): MỌI file trong /etc/icinga2 đều là file THẬT nằm PHẲNG ngay dưới
@@ -124,7 +201,7 @@
 # — ic_data lúc đó đã có bản ĐÚNG do chính node setup vừa ghi, copy thẳng sang icinga_etc_dir.
 - name: "Danh sách loại trừ dùng chung cho seed + mount base config (cơ chế riêng hoặc render riêng)"
   ansible.builtin.set_fact:
-    _ic_base_exclude_prefixes: ['features-enabled/', 'zones\.d/', 'ssh/', 'custom-plugins/']
+    _ic_base_exclude_prefixes: ['features-enabled/', 'zones\.d/', 'ssh/', 'secret/', 'custom-plugins/']
     _ic_base_exclude_relpaths:
       - constants.conf
       - zones.conf
@@ -1324,6 +1401,13 @@
     _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/ssh/' + item + ':/data/etc/icinga2/ssh/' + item + ':ro'] }}"
   loop: "{{ _ic_ssh_names }}"
   loop_control: { label: "{{ item }}" }
+
+- name: "Mount thư mục secret operator vào container Icinga 2"
+  ansible.builtin.set_fact:
+    _ic_dynamic_volumes: >-
+      {{ _ic_dynamic_volumes +
+         [icinga_etc_dir + '/icinga2/secret:' + icinga2_secret_container_dir + ':ro'] }}
+  when: _ic_secret_source.stat.exists
 
 - name: "Xây list mount per-file: openstack-clouds.yaml (mọi node, chỉ khi có file — design.md 9.7)"
   # Mount đúng path THẬT /data/etc/icinga2/... (giống mọi mount khác trong file này), KHÔNG mount

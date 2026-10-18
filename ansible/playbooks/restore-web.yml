@@ -1,0 +1,147 @@
+---
+# Restore the per-master Icinga Web configuration archives produced by backup-full.
+# Run after the initial deploy has recreated host directories and before the final deploy/check.
+
+- name: Validate full-backup bundle before restoring Icinga Web
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [restore_web_validate]
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Require explicit confirmation and backup timestamp
+      ansible.builtin.assert:
+        that:
+          - confirm | default('') == 'yes'
+          - restore_backup_ts | default('') is regex('^[0-9]{8}-[0-9]{6}$')
+        fail_msg: >-
+          restore-web overwrites the Icinga Web config on every master. Pass
+          -e restore_backup_ts=YYYYMMDD-HHMMSS -e confirm=yes.
+
+    - name: Verify every artifact in the completed bundle against its manifest
+      ansible.builtin.command:
+        argv:
+          - sha256sum
+          - --strict
+          - --check
+          - "manifest-{{ restore_backup_ts }}.sha256"
+        chdir: "{{ icinga_config_backup_dir }}"
+      changed_when: false
+      check_mode: false
+
+    - name: Check the expected per-master Icinga Web archives
+      ansible.builtin.stat:
+        path: >-
+          {{ icinga_config_backup_dir }}/icingaweb2-{{ item }}-{{ restore_backup_ts }}.tar.gz
+      loop: "{{ groups['master'] | default([]) }}"
+      register: _web_archives
+
+    - name: Reject an incomplete Icinga Web restore set
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.size | int > 0
+        fail_msg: "Missing Icinga Web archive: {{ item.item }}"
+      loop: "{{ _web_archives.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Read archive member names before extracting on any master
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -tzf
+          - >-
+            {{ icinga_config_backup_dir }}/icingaweb2-{{ item }}-{{ restore_backup_ts }}.tar.gz
+      loop: "{{ groups['master'] | default([]) }}"
+      register: _web_archive_members
+      changed_when: false
+      check_mode: false
+
+    - name: Reject empty archives, path traversal and unexpected archive roots
+      ansible.builtin.assert:
+        that:
+          - item.stdout_lines | length > 0
+          - item.stdout_lines | select('match', '^/') | list | length == 0
+          - item.stdout_lines | select('search', '(^|/)\.\.(/|$)') | list | length == 0
+          - item.stdout_lines | reject('match', '^icingaweb2(/|$)') | list | length == 0
+        fail_msg: "Unsafe Icinga Web archive for {{ item.item }}."
+      loop: "{{ _web_archive_members.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+- name: Restore Icinga Web configuration on every master
+  hosts: master
+  serial: 1
+  become: true
+  gather_facts: false
+  tags: [restore_web_apply]
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _web_restore_archive: "icingaweb2-{{ inventory_hostname }}-{{ restore_backup_ts }}.tar.gz"
+    _web_restore_stage: "/tmp/{{ _web_restore_archive }}"
+  tasks:
+    - name: Check whether Icinga Web containers exist
+      ansible.builtin.command:
+        argv: [docker, inspect, "{{ item }}"]
+      loop:
+        - icingaweb2-director-daemon
+        - icingaweb2
+      register: _web_restore_containers
+      changed_when: false
+      failed_when: false
+
+    - name: Stop existing Icinga Web containers before replacing bind-mounted files
+      ansible.builtin.command:
+        argv: [docker, stop, "{{ item.item }}"]
+      loop: "{{ _web_restore_containers.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.rc == 0
+      changed_when: true
+
+    - name: Stage this master's verified archive
+      ansible.builtin.copy:
+        src: "{{ icinga_config_backup_dir }}/{{ _web_restore_archive }}"
+        dest: "{{ _web_restore_stage }}"
+        mode: "0600"
+
+    - name: Remove current Icinga Web config tree
+      ansible.builtin.file:
+        path: "{{ icinga_etc_dir }}/icingaweb2"
+        state: absent
+
+    - name: Restore archived Icinga Web config tree
+      ansible.builtin.unarchive:
+        src: "{{ _web_restore_stage }}"
+        dest: "{{ icinga_etc_dir }}"
+        remote_src: true
+
+    - name: Restore runtime ownership without changing archived file modes
+      ansible.builtin.file:
+        path: "{{ icinga_etc_dir }}/icingaweb2"
+        state: directory
+        owner: "33"
+        group: "33"
+        recurse: true
+
+    - name: Restrict the restored config root directory
+      ansible.builtin.file:
+        path: "{{ icinga_etc_dir }}/icingaweb2"
+        state: directory
+        owner: "33"
+        group: "33"
+        mode: "0750"
+
+    - name: Remove staged archive
+      ansible.builtin.file:
+        path: "{{ _web_restore_stage }}"
+        state: absent
+
+    - name: Require a final deploy to reconcile credentials and restart services
+      ansible.builtin.debug:
+        msg: >-
+          Restored {{ _web_restore_archive }}. Run icinga-ansible deploy after all masters finish.
