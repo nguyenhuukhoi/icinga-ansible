@@ -105,9 +105,13 @@
 
 - name: Xác định các tầng secret áp dụng cho node
   ansible.builtin.set_fact:
+    # Tầng theo role dùng tiền tố "group_" cho ĐỒNG NHẤT với tầng override config
+    # (render_config_item.yml: config/icinga2/group_<nhóm>/<file>) — quyết định người dùng 2026-10-18.
+    # Trước đó tầng secret bỏ tiền tố (master/secret) nên cùng một khái niệm "theo nhóm" lại có hai
+    # cách viết khác nhau, rất dễ nhầm. prechecks chặn đường dẫn CŨ để không âm thầm bỏ sót credential.
     _ic_secret_source_dirs: >-
       {{ [icinga2_secret_source_dir]
-         + ([deploy_config_dir + '/icinga2/' + _ic_secret_role + '/secret']
+         + ([deploy_config_dir + '/icinga2/group_' + _ic_secret_role + '/secret']
             if _ic_secret_role | length > 0 else [])
          + [deploy_config_dir + '/icinga2/' + inventory_hostname + '/secret'] }}
 

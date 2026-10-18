@@ -154,7 +154,7 @@ $EDITOR /etc/icinga-ansible/globals.yml
 ```
 
 `icinga_master_zone_name` chỉ đổi tên object Icinga Zone và thư mục `zones.d` tương ứng. Inventory
-vẫn phải dùng group `[master]`; các tầng secret `icinga2/master/secret` và cấu hình proxy theo role
+vẫn phải dùng group `[master]`; các tầng secret `icinga2/group_master/secret` và cấu hình proxy theo role
 `master` cũng giữ nguyên tên. Có thể dùng chữ, số, `_`, `-`, `.`. Không được trùng
 `global-templates`, `director-global`, tên client hoặc tên satellite zone.
 
@@ -390,9 +390,9 @@ Image Icinga 2 phải là image custom có `/opt/icinga-venv/bin/python3`, `open
 secret dành riêng cho group master:
 
 ```bash
-install -d -m 0700 /etc/icinga-ansible/config/icinga2/master/secret
-$EDITOR /etc/icinga-ansible/config/icinga2/master/secret/clouds.yaml
-chmod 0600 /etc/icinga-ansible/config/icinga2/master/secret/clouds.yaml
+install -d -m 0700 /etc/icinga-ansible/config/icinga2/group_master/secret
+$EDITOR /etc/icinga-ansible/config/icinga2/group_master/secret/clouds.yaml
+chmod 0600 /etc/icinga-ansible/config/icinga2/group_master/secret/clouds.yaml
 ```
 
 ```yaml
@@ -728,7 +728,7 @@ monitor qua SSH. Loại override này đặc biệt hơn override thường (m�
 ```
 config/icinga2/zones.d/<master-zone>/hosts.conf       # <master-zone> = icinga_master_zone_name
 config/icinga2/zones.d/<master-zone>/openstack-services.conf # full-file override service OpenStack
-config/icinga2/master/secret/clouds.yaml               # credential chỉ mount trên master
+config/icinga2/group_master/secret/clouds.yaml               # credential chỉ mount trên master
 config/icinga2/zones.d/<tên_satellite_zone>/hosts.conf   # check chạy TỪ 1 satellite trong zone đó
 ```
 

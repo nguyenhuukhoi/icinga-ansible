@@ -4,7 +4,7 @@
 # CPU/RAM/Disk checks.
 #
 # Required on the deployment node:
-#   /etc/icinga-ansible/config/icinga2/master/secret/clouds.yaml
+#   /etc/icinga-ansible/config/icinga2/group_master/secret/clouds.yaml
 # The profile under `clouds:` must match the `cloud` value below.
 openstack_service_checks:
   - name: "openstack-production"
