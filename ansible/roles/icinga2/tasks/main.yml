@@ -1616,6 +1616,58 @@
     - inventory_hostname in groups['master']
     - _ic_openstack_zone_migration_required | default(false)
 
+# A peer that used to mount even one local file below zones.d/master has already marked the whole
+# received zone cache as authoritative. Removing the bind mount later is not enough: the persistent
+# /data volume keeps api/zones/master/.authoritative, so the peer rejects every subsequent master-zone
+# update from ca_host. This is especially damaging with Director: the active Icinga DB daemon can run
+# on that peer and delete all Director hosts/services from the shared database while master1 still
+# reports them through its API. Icinga's official config-sync troubleshooting procedure is to purge the
+# stale received zone and restart the receiver. Do exactly that, only on a non-authoritative master and
+# only when the marker proves that the stale state exists.
+- name: Kiểm tra marker authoritative cũ của zone master trên master peer
+  ansible.builtin.stat:
+    path: "{{ ic_data }}/var/lib/icinga2/api/zones/master/.authoritative"
+  register: _ic_peer_master_authoritative_marker
+  when:
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
+
+- name: Kiểm tra cây zone master local cũ bên trong volume của master peer
+  ansible.builtin.stat:
+    path: "{{ ic_etc }}/zones.d/master"
+  register: _ic_peer_local_master_zone
+  when:
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
+
+- name: Dừng master peer trước khi dọn cache zone authoritative cũ
+  community.docker.docker_container:
+    name: icinga2
+    state: stopped
+  when:
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
+    - >-
+      (_ic_peer_master_authoritative_marker.stat.exists | default(false)) or
+      (_ic_peer_local_master_zone.stat.exists | default(false))
+
+- name: Dọn cache zone master authoritative cũ trên peer để nhận lại từ ca_host
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ ic_etc }}/zones.d/master"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones/master"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones-stage/master"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - inventory_hostname in groups['master']
+    - inventory_hostname != ca_host
+    - >-
+      (_ic_peer_master_authoritative_marker.stat.exists | default(false)) or
+      (_ic_peer_local_master_zone.stat.exists | default(false))
+
 - name: Xóa riêng cache OpenStack cũ trước khi peer nhận lại zone từ ca_host
   ansible.builtin.file:
     path: "{{ item }}"
