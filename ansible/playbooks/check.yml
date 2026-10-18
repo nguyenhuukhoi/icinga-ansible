@@ -397,7 +397,7 @@
               + (groups['satellite'] | default([]))
               + (groups['client'] | default([]))) | unique | sort | join(',') }}
         _director_expected_zones: >-
-          {{ (['director-global', 'global-templates', 'master']
+          {{ (['director-global', 'global-templates', icinga_master_zone_name]
               + (satellite_zones | default([]) | map(attribute='name') | list)
               + (groups['client'] | default([]))) | unique | sort | join(',') }}
       when:

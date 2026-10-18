@@ -90,6 +90,10 @@ mariadb_allow_rolling_series_upgrade: false
 is_ha_master:    "{{ (groups['master'] | default([]) | length) > 1 }}"   # >1, không chỉ ==2 (N master)
 ca_host:         "{{ (groups['master'] | default([]))[0] | default('') }}"   # master[0] = CA gốc
 
+# Tên Icinga zone chứa các endpoint thuộc inventory group [master]. Group role vẫn luôn
+# là [master]; chỉ tên object Zone/path zones.d thay đổi theo biến này.
+icinga_master_zone_name: "master"
+
 # --- Zone satellite (khai trong globals; rỗng ở P1) ---------------------------
 satellite_zones: []
 

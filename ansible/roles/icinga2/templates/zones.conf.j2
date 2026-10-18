@@ -14,7 +14,7 @@ object Endpoint "{{ h }}" { host = "{{ hostvars[h].ansible_host | default(h) }}"
 {% endfor %}
 
 /* ===== Master zone ({{ groups['master'] | length }} endpoint) ===== */
-object Zone "master" {
+object Zone "{{ icinga_master_zone_name }}" {
   endpoints = [ {% for h in groups['master'] %}"{{ h }}"{% if not loop.last %}, {% endif %}{% endfor %} ]
 }
 
@@ -22,7 +22,7 @@ object Zone "master" {
 {% for z in satellite_zones %}
 object Zone "{{ z.name }}" {
   endpoints = [ {% for m in z.members %}"{{ m }}"{% if not loop.last %}, {% endif %}{% endfor %} ]
-  parent    = "{{ z.parent | default('master') }}"
+  parent    = "{{ z.parent | default(icinga_master_zone_name) }}"
 }
 {% endfor %}
 
@@ -30,7 +30,7 @@ object Zone "{{ z.name }}" {
 {% for h in groups['client'] | default([]) %}
 object Zone "{{ h }}" {
   endpoints = [ "{{ h }}" ]
-  parent    = "master"
+  parent    = "{{ icinga_master_zone_name }}"
 }
 {% endfor %}
 

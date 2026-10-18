@@ -139,6 +139,8 @@ $EDITOR my-ha-cluster
 
 # 4. (tuỳ chọn) Sửa cấu hình — vd khai satellite_zones cho zone con "dc-hcm" gồm sat01+sat02
 $EDITOR /etc/icinga-ansible/globals.yml
+# Muốn đổi tên master zone, khai TRƯỚC deploy đầu:
+# icinga_master_zone_name: "csoc-monitoring"
 
 # 5. Chuẩn bị cả 7 host (cài Docker/chrony, tạo thư mục/mạng) — chỉ cần 1 lần
 ./tools/icinga-ansible bootstrap-servers -i my-ha-cluster
@@ -150,6 +152,18 @@ $EDITOR /etc/icinga-ansible/globals.yml
 # 7. In thông tin truy cập
 ./tools/icinga-ansible post-deploy -i my-ha-cluster
 ```
+
+`icinga_master_zone_name` chỉ đổi tên object Icinga Zone và thư mục `zones.d` tương ứng. Inventory
+vẫn phải dùng group `[master]`; các tầng secret `icinga2/master/secret` và cấu hình proxy theo role
+`master` cũng giữ nguyên tên. Có thể dùng chữ, số, `_`, `-`, `.`. Không được trùng
+`global-templates`, `director-global`, tên client hoặc tên satellite zone.
+
+Chỉ đặt biến này **trước lần deploy đầu tiên**. `reconfigure` sẽ dừng với lỗi rõ ràng nếu
+`constants.conf` trên một master đã có `ZoneName` khác, vì đổi tên một cluster đang chạy còn phải
+migrate object của Director và cache config-sync; đây không phải thao tác đổi tên an toàn tại chỗ.
+Với custom zone, đặt override master tại
+`config/icinga2/zones.d/<icinga_master_zone_name>/...`. Có thể bỏ `parent` trong `satellite_zones`;
+tool tự lấy đúng master zone đã cấu hình.
 
 `failed=0` trên **cả 7 host** trong recap là thành công (không chỉ 1 dòng `localhost` như mục 2).
 Login Web UI ở **bất kỳ master nào** cũng được (`http://<ip-master1 hoặc master2>:8080/...`) — cả 2
@@ -363,7 +377,7 @@ Luồng mặc định dùng `openstack_service_checks` như bên dưới. Nếu 
 đặt full-file override trên deployment node tại:
 
 ```text
-/etc/icinga-ansible/config/icinga2/zones.d/master/openstack-services.conf
+/etc/icinga-ansible/config/icinga2/zones.d/<master-zone>/openstack-services.conf
 ```
 
 Override này thay thế hoàn toàn nội dung sinh từ `openstack_service_checks`, không merge. Ansible đặt bản
@@ -712,8 +726,8 @@ monitor qua SSH. Loại override này đặc biệt hơn override thường (m�
 **tên host chạy Ansible**, mà theo **tên ZONE Icinga2** sẽ thực thi check:
 
 ```
-config/icinga2/zones.d/master/hosts.conf       # check chạy TỪ 1 endpoint trong zone "master"
-config/icinga2/zones.d/master/openstack-services.conf # full-file override service status OpenStack
+config/icinga2/zones.d/<master-zone>/hosts.conf       # <master-zone> = icinga_master_zone_name
+config/icinga2/zones.d/<master-zone>/openstack-services.conf # full-file override service OpenStack
 config/icinga2/master/secret/clouds.yaml               # credential chỉ mount trên master
 config/icinga2/zones.d/<tên_satellite_zone>/hosts.conf   # check chạy TỪ 1 satellite trong zone đó
 ```
@@ -722,23 +736,47 @@ Dù đặt ở đâu, file này **luôn chỉ cần ghi 1 bản** — dù cụm 
 zone, Ansible chỉ ghi ra đúng 1 nơi (`ca_host` = master đầu tiên), rồi chính **Icinga2 cluster tự
 đồng bộ xuống mọi node còn lại trong zone đó** (không phải cơ chế override thường ở mục 6.1).
 
-**Cách 1 — check chạy từ zone `master`** (không cần satellite):
+> **MỌI config theo zone đi qua deployment node TRƯỚC** (2026-10-18). `deploy` tự sinh đủ các file
+> trên chính deployment node tại `config/icinga2/zones.d/<zone>/`, rồi mới copy xuống node đích —
+> nên muốn biết cụm đang chạy config gì, chỉ cần xem thư mục đó, không phải suy ra từ template
+> trong repo. Sau lần `deploy` đầu bạn sẽ thấy sẵn `hosts.conf`, `openstack-checks.conf`,
+> `openstack-services.conf`, `telegram-notifications.conf` (và `clients.conf` nếu có nhóm
+> `[client]`). Không cần `mkdir` trước nữa.
+>
+> Các file được sinh tự động đều mang dòng marker `icinga-ansible:generated` và **được render lại mỗi lần
+> deploy** (nội dung sinh từ `globals.yml`/inventory/`passwords.yml`).
+>
+> Muốn tự khai riêng một file: **xoá dòng marker** `icinga-ansible:generated` trong file đó. Ansible
+> sẽ giữ nguyên nội dung bạn viết và chỉ copy xuống node, kèm một dòng log thông báo. Muốn quay lại
+> bản sinh tự động: xoá file rồi `deploy` lại.
+>
+> Hai điều phải nhớ:
+> - **Thêm Host/Service vào `hosts.conf` thì phải xoá dòng marker**, nếu không nó bị ghi đè ở lần
+>   deploy kế tiếp.
+> - **Đừng sửa file trên node đích** — bản trên deployment node luôn được copy đè xuống.
+>
+> Lưu ý khi đổi `icinga_master_zone_name`: thư mục `zones.d/<tên zone cũ>` trở thành **mồ côi**
+> (role chỉ đọc `zones.d/<tên hiện tại>`). `prechecks` sẽ **chặn** và liệt kê thư mục lạ — di chuyển
+> nội dung sang thư mục zone đúng tên rồi xoá thư mục cũ.
+
+**Cách 1 — check chạy từ master zone** (không cần satellite). Ví dụ dưới dùng
+`icinga_master_zone_name: "csoc-monitoring"`:
 ```bash
-mkdir -p /etc/icinga-ansible/config/icinga2/zones.d/master
-$EDITOR /etc/icinga-ansible/config/icinga2/zones.d/master/hosts.conf
+# deploy đã sinh sẵn file này; chỉ cần sửa rồi chạy lại deploy/reconfigure
+$EDITOR /etc/icinga-ansible/config/icinga2/zones.d/csoc-monitoring/hosts.conf
 ```
 ```
 object Host "my-server" {
   address       = "10.0.0.50"
   check_command = "by_ssh_disk"
   vars.ssh_user = "ubuntu"
-  zone          = "master"   // BẮT BUỘC khai tường minh trên CẢ Host lẫn Service — khác zone
+  zone          = "csoc-monitoring" // BẮT BUỘC khai tường minh trên CẢ Host lẫn Service
 }                             // satellite (mục dưới), ở đây thư mục KHÔNG tự ngụ ý zone
 
 object Service "disk" {
   host_name     = "my-server"
   check_command = "by_ssh_disk"
-  zone          = "master"   // thiếu dòng này Service sẽ bị "paused: true", không chạy
+  zone          = "csoc-monitoring" // thiếu dòng này Service sẽ bị "paused: true", không chạy
 }
 ```
 

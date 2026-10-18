@@ -491,6 +491,46 @@
     state: absent
   notify: Reload icinga2
 
+# Renaming the parent zone of a running cluster is a topology migration, not a normal reconfigure:
+# Director external objects and received zone caches still reference the old name. Permit any valid
+# name on a fresh deployment, but fail before overwriting an already-rendered master identity.
+- name: Kiểm tra ZoneName đã render trên master
+  ansible.builtin.stat:
+    path: "{{ icinga_etc_dir }}/icinga2/constants.conf"
+  register: _ic_existing_master_constants
+  when: inventory_hostname in groups['master']
+
+- name: Đọc ZoneName hiện tại trước khi reconfigure master
+  ansible.builtin.slurp:
+    src: "{{ icinga_etc_dir }}/icinga2/constants.conf"
+  register: _ic_existing_master_constants_content
+  when:
+    - inventory_hostname in groups['master']
+    - _ic_existing_master_constants.stat.exists | default(false)
+
+- name: Trích ZoneName hiện tại từ constants.conf của master
+  ansible.builtin.set_fact:
+    _ic_existing_master_zone_names: >-
+      {{ (_ic_existing_master_constants_content.content | b64decode)
+         | regex_findall('(?m)^\s*const\s+ZoneName\s*=\s*"([^"]+)"\s*$') }}
+  when:
+    - inventory_hostname in groups['master']
+    - _ic_existing_master_constants.stat.exists | default(false)
+
+- name: Chặn đổi tên master zone ngầm trên cluster đang chạy
+  ansible.builtin.assert:
+    that:
+      - _ic_existing_master_zone_names | length == 1
+      - _ic_existing_master_zone_names[0] == icinga_master_zone_name
+    fail_msg: >-
+      Master này có ZoneName {{ _ic_existing_master_zone_names | default([]) | join(', ') | default('<không đọc được>', true) }},
+      khác giá trị yêu cầu '{{ icinga_master_zone_name }}'. Không đổi icinga_master_zone_name bằng
+      reconfigure; hãy giữ tên cũ hoặc dùng quy trình migration topology riêng. Tên tùy chọn được
+      hỗ trợ ngay từ lần deploy đầu.
+  when:
+    - inventory_hostname in groups['master']
+    - _ic_existing_master_constants.stat.exists | default(false)
+
 # ---------- Bootstrap master (chỉ ca_host, chỉ lần đầu) ----------
 # Gate theo cert RIÊNG của ca_host ({{ inventory_hostname }}.crt), KHÔNG phải theo ca.crt (2026-07-24,
 # phục vụ restore-pki — mục backup/restore toàn hệ thống). Lý do: kịch bản "giữ PKI cũ" pre-seed
@@ -562,7 +602,7 @@
 
 - name: Bootstrap master node (tạo CA + cert + ApiListener)
   ansible.builtin.command: >
-    {{ ic_run }} icinga2 node setup --master --cn {{ inventory_hostname }} --zone master
+    {{ ic_run }} icinga2 node setup --master --cn {{ inventory_hostname }} --zone {{ icinga_master_zone_name }}
   register: _ca_host_node_setup
   when:
     - inventory_hostname == ca_host
@@ -735,8 +775,8 @@
     {{ ic_run }} icinga2 node setup
     --cn {{ inventory_hostname }}
     --endpoint {{ ca_host }},{{ hostvars[ca_host].ansible_host | default(ca_host) }},{{ icinga2_api_port }}
-    --zone master
-    --parent_zone master
+    --zone {{ icinga_master_zone_name }}
+    --parent_zone {{ icinga_master_zone_name }}
     --parent_host {{ hostvars[ca_host].ansible_host | default(ca_host) }},{{ icinga2_api_port }}
     --trustedcert /var/lib/icinga2/certs/trusted-parent.crt
     --ticket {{ master2_ticket.stdout | trim }}
@@ -964,7 +1004,7 @@
     --cn {{ inventory_hostname }}
     --endpoint {{ ca_host }},{{ hostvars[ca_host].ansible_host | default(ca_host) }},{{ icinga2_api_port }}
     --zone {{ satellite_zone }}
-    --parent_zone master
+    --parent_zone {{ icinga_master_zone_name }}
     --parent_host {{ hostvars[ca_host].ansible_host | default(ca_host) }},{{ icinga2_api_port }}
     --trustedcert /var/lib/icinga2/certs/trusted-parent.crt
     --ticket {{ sat_ticket.stdout | trim }}
@@ -1067,7 +1107,7 @@
     --cn {{ inventory_hostname }}
     --endpoint {{ ca_host }},{{ hostvars[ca_host].ansible_host | default(ca_host) }},{{ icinga2_api_port }}
     --zone {{ inventory_hostname }}
-    --parent_zone master
+    --parent_zone {{ icinga_master_zone_name }}
     --parent_host {{ hostvars[ca_host].ansible_host | default(ca_host) }},{{ icinga2_api_port }}
     --trustedcert /var/lib/icinga2/certs/trusted-parent.crt
     --ticket {{ client_ticket.stdout | trim }}
@@ -1268,9 +1308,9 @@
 # vào zone master chỉ tồn tại trên ca_host và một nửa check HA không bao giờ chạy.
 # Ghi vào cây icinga_etc_dir (không phải ic_etc/data) để mount RO per-file được — xem block mount
 # per-file động ở dưới, trước task "Khởi động container icinga2".
-- name: Tạo thư mục zones.d/master (deploy tree)
+- name: Tạo thư mục master zone trong deploy tree
   ansible.builtin.file:
-    path: "{{ icinga_etc_dir }}/icinga2/zones.d/master"
+    path: "{{ icinga_etc_dir }}/icinga2/zones.d/{{ icinga_master_zone_name }}"
     state: directory
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
@@ -1304,95 +1344,104 @@
 # đây chính là khuyến nghị thực tế cho kiến trúc HA nhiều-zone của Icinga2 (bản thân Icinga2 core
 # không có cơ chế đúng để "satellite tự gửi" mà không duplicate). Nhờ vậy, workaround check_source
 # phức tạp ở 2 script telegram-*-notification.sh (2026-07-27) KHÔNG CÒN CẦN THIẾT — đã gỡ bỏ.
-- name: Render zones.d/master/telegram-notifications.conf (NotificationCommand Telegram)
-  ansible.builtin.template:
-    src: telegram-notifications.conf.j2
-    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/telegram-notifications.conf"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0640"
-  when: inventory_hostname == ca_host
-  notify: Reload icinga2
+- name: Render NotificationCommand Telegram trong master zone (qua deployment node)
+  ansible.builtin.include_tasks: render_zone_config_item.yml
+  vars:
+    zcfg:
+      zone: "{{ icinga_master_zone_name }}"
+      file: telegram-notifications.conf
+      template: telegram-notifications.conf.j2
 
-- name: Render Host/Service cho client (command endpoint) vào zones.d/master/clients.conf
-  ansible.builtin.template:
-    src: clients.conf.j2
-    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/clients.conf"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0640"
+      secret: true      # chứa bot token + chat id từ passwords.yml
+  when: inventory_hostname == ca_host
+
+- name: Render Host/Service cho client (command endpoint) vào master zone (qua deployment node)
+  ansible.builtin.include_tasks: render_zone_config_item.yml
+  vars:
+    zcfg:
+      zone: "{{ icinga_master_zone_name }}"
+      file: clients.conf
+      template: clients.conf.j2
+
   when:
     - inventory_hostname == ca_host
     - (groups['client'] | default([])) | length > 0
-  notify: Reload icinga2
 
 # Xoá file mồ côi nếu [client] rỗng đi (host cuối cùng đã bị gỡ khỏi inventory) — task render ở trên
 # chỉ SKIP khi rỗng, không tự xoá file cũ đã render từ lần trước.
-- name: "Xoá zones.d/master/clients.conf mồ côi nếu [client] rỗng"
+- name: "Xoá clients.conf mồ côi trong master zone nếu [client] rỗng"
   ansible.builtin.file:
-    path: "{{ icinga_etc_dir }}/icinga2/zones.d/master/clients.conf"
+    path: "{{ icinga_etc_dir }}/icinga2/zones.d/{{ icinga_master_zone_name }}/clients.conf"
     state: absent
   when:
     - inventory_hostname == ca_host
     - (groups['client'] | default([])) | length == 0
   notify: Reload icinga2
 
+# Dọn luôn bản trên deployment node — nếu không, lần deploy sau "Đẩy ... xuống" của include sẽ copy
+# lại file của inventory CŨ (lúc còn [client]) xuống node, làm việc gỡ client không bao giờ có hiệu
+# lực. Chỉ xoá khi file còn marker "icinga-ansible:generated": file người vận hành đã nhận quyền sở
+# hữu thì giữ nguyên, họ tự quyết định.
+- name: "Kiểm tra clients.conf trên deployment node trước khi dọn"
+  ansible.builtin.slurp:
+    src: "{{ deploy_config_dir }}/icinga2/zones.d/{{ icinga_master_zone_name }}/clients.conf"
+  register: _clients_deploy_content
+  delegate_to: localhost
+  become: false
+  failed_when: false
+  when:
+    - inventory_hostname == ca_host
+    - (groups['client'] | default([])) | length == 0
+
+- name: "Xoá clients.conf sinh tự động trên deployment node nếu [client] rỗng"
+  ansible.builtin.file:
+    path: "{{ deploy_config_dir }}/icinga2/zones.d/{{ icinga_master_zone_name }}/clients.conf"
+    state: absent
+  delegate_to: localhost
+  become: false
+  when:
+    - inventory_hostname == ca_host
+    - (groups['client'] | default([])) | length == 0
+    - "'icinga-ansible:generated' in (_clients_deploy_content.content | default('') | b64decode)"
+
 # OpenStack service status không dùng Director. CheckCommand lẫn Host/Service đều nằm trong zone
 # master; Ansible render trên ca_host và Icinga config-sync sang các master peer. Cùng cơ chế này cho
 # phép object do Director deploy vào zone master được đồng bộ đầy đủ tới peer.
-- name: "Render CheckCommand OpenStack -> zones.d/master/openstack-checks.conf"
-  ansible.builtin.template:
-    src: openstack-checks.conf.j2
-    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/openstack-checks.conf"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0640"
+- name: "Render CheckCommand OpenStack vào master zone (qua deployment node)"
+  ansible.builtin.include_tasks: render_zone_config_item.yml
+  vars:
+    zcfg:
+      zone: "{{ icinga_master_zone_name }}"
+      file: openstack-checks.conf
+      template: openstack-checks.conf.j2
+
   when: inventory_hostname == ca_host
-  notify: Reload icinga2
 
 # Service nằm trong file riêng để một override SSH/custom host tại hosts.conf không vô tình làm mất
 # Nova/Neutron/Cinder objects. Vì đây là config theo ZONE (không theo host Ansible), operator đặt
 # đúng một full-file override trên deployment node tại:
-#   config/icinga2/zones.d/master/openstack-services.conf
+#   config/icinga2/zones.d/<icinga_master_zone_name>/openstack-services.conf
 # Ansible ghi file trên ca_host; Icinga config-sync sang peer và HA tự phân công thực thi object.
-- name: "Xác định override cho zones.d/master/openstack-services.conf"
-  ansible.builtin.set_fact:
-    _openstack_services_src: >-
-      {{ (q('first_found', dict(
-            files=[deploy_config_dir + '/icinga2/zones.d/master/openstack-services.conf'],
-            skip=true)) | first) | default('', true) }}
+# Tầng override first_found cũ đã BỎ: deployment node giờ là nguồn duy nhất, và "override" chính là
+# việc sửa file ngay tại deploy_config_dir rồi xoá dòng marker để nhận quyền sở hữu (xem
+# render_zone_config_item.yml). Nhờ vậy không còn trường hợp file override mang tên zone cũ bị bỏ qua
+# im lặng sau khi đổi icinga_master_zone_name.
+- name: "Render OpenStack services vào master zone (qua deployment node)"
+  ansible.builtin.include_tasks: render_zone_config_item.yml
+  vars:
+    zcfg:
+      zone: "{{ icinga_master_zone_name }}"
+      file: openstack-services.conf
+      template: openstack-services.conf.j2
+
   when: inventory_hostname == ca_host
-
-- name: "Copy override -> zones.d/master/openstack-services.conf"
-  ansible.builtin.copy:
-    src: "{{ _openstack_services_src }}"
-    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/openstack-services.conf"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0640"
-  when:
-    - inventory_hostname == ca_host
-    - _openstack_services_src | length > 0
-  notify: Reload icinga2
-
-- name: "Render template mặc định -> zones.d/master/openstack-services.conf"
-  ansible.builtin.template:
-    src: openstack-services.conf.j2
-    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/openstack-services.conf"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0640"
-  when:
-    - inventory_hostname == ca_host
-    - _openstack_services_src | default('') | length == 0
-  notify: Reload icinga2
 
 # Bản phát hành b9755d3 từng mount hai file OpenStack local trên mọi master. Dọn source khỏi peer để
 # lần recreate bên dưới bỏ bind mount và peer quay lại nhận toàn bộ zone master từ ca_host. Việc giữ
 # dù chỉ một file local dưới zones.d/master khiến Icinga đánh dấu cả zone authoritative.
 - name: Dọn file zone master OpenStack local trên master peer
   ansible.builtin.file:
-    path: "{{ icinga_etc_dir }}/icinga2/zones.d/master/{{ item }}"
+    path: "{{ icinga_etc_dir }}/icinga2/zones.d/{{ icinga_master_zone_name }}/{{ item }}"
     state: absent
   loop:
     - openstack-checks.conf
@@ -1405,37 +1454,14 @@
 # giống hệt cơ chế zones.d/<satellite_zone>/hosts.conf, mục 9.4, chỉ khác zone chạy check). Khác
 # clients.conf ở trên (command-endpoint, cần agent) — file RIÊNG, luôn tồn tại (không phụ thuộc
 # [client] có host hay không), override-aware giống mẫu render_satellite_zone.yml.
-- name: "Xác định override cho zones.d/master/hosts.conf"
-  ansible.builtin.set_fact:
-    _master_hosts_src: >-
-      {{ (q('first_found', dict(
-            files=[deploy_config_dir + '/icinga2/zones.d/master/hosts.conf'],
-            skip=true)) | first) | default('', true) }}
+- name: "Render hosts.conf cho master zone (qua deployment node)"
+  ansible.builtin.include_tasks: render_zone_config_item.yml
+  vars:
+    zcfg:
+      zone: "{{ icinga_master_zone_name }}"
+      file: hosts.conf
+      template: master_hosts.conf.j2
   when: inventory_hostname == ca_host
-
-- name: "Copy override -> zones.d/master/hosts.conf"
-  ansible.builtin.copy:
-    src: "{{ _master_hosts_src }}"
-    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/hosts.conf"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0640"
-  when:
-    - inventory_hostname == ca_host
-    - _master_hosts_src | length > 0
-  notify: Reload icinga2
-
-- name: "Render template mặc định -> zones.d/master/hosts.conf"
-  ansible.builtin.template:
-    src: master_hosts.conf.j2
-    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/hosts.conf"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0640"
-  when:
-    - inventory_hostname == ca_host
-    - _master_hosts_src | default('') | length == 0
-  notify: Reload icinga2
 
 # ---------- Host/Service monitor bởi zone satellite (zones.d/<zone>, chỉ render trên ca_host) ----------
 # Khác "client" ở trên (chạy trong zone master, command-endpoint): đây là Host/Service THẬT chạy BỞI
@@ -1468,7 +1494,7 @@
   when:
     - inventory_hostname == ca_host
     - (item | basename) not in (satellite_zones | map(attribute='name') | list)
-    - (item | basename) not in ['master', 'global-templates']
+    - (item | basename) not in [icinga_master_zone_name, 'global-templates']
   notify: Reload icinga2
 
 # ---------- Xây danh sách mount per-file ĐỘNG cho docker_container ----------
@@ -1526,37 +1552,37 @@
   loop_control: { label: "{{ item.name }}" }
   when: inventory_hostname == ca_host
 
-- name: "Xây list mount per-file: zones.d/master/clients.conf (chỉ ca_host, chỉ khi có client)"
+- name: "Xây mount clients.conf của master zone (chỉ ca_host, chỉ khi có client)"
   ansible.builtin.set_fact:
-    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/clients.conf:/data/etc/icinga2/zones.d/master/clients.conf:ro'] }}"
+    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/' + icinga_master_zone_name + '/clients.conf:/data/etc/icinga2/zones.d/' + icinga_master_zone_name + '/clients.conf:ro'] }}"
   when:
     - inventory_hostname == ca_host
     - (groups['client'] | default([])) | length > 0
 
 # zones.d/master/hosts.conf (Host/Service SSH chạy trực tiếp từ zone master) LUÔN tồn tại trên
 # ca_host (không phụ thuộc [client] như clients.conf ở trên) — mount luôn, không cần điều kiện thêm.
-- name: "Xây list mount per-file: zones.d/master/hosts.conf (chỉ ca_host)"
+- name: "Xây mount hosts.conf của master zone (chỉ ca_host)"
   ansible.builtin.set_fact:
-    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/hosts.conf:/data/etc/icinga2/zones.d/master/hosts.conf:ro'] }}"
+    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/' + icinga_master_zone_name + '/hosts.conf:/data/etc/icinga2/zones.d/' + icinga_master_zone_name + '/hosts.conf:ro'] }}"
   when: inventory_hostname == ca_host
 
-- name: "Xây list mount per-file: zones.d/master/openstack-services.conf (chỉ ca_host)"
+- name: "Xây mount OpenStack services của master zone (chỉ ca_host)"
   ansible.builtin.set_fact:
-    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/openstack-services.conf:/data/etc/icinga2/zones.d/master/openstack-services.conf:ro'] }}"
+    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/' + icinga_master_zone_name + '/openstack-services.conf:/data/etc/icinga2/zones.d/' + icinga_master_zone_name + '/openstack-services.conf:ro'] }}"
   when: inventory_hostname == ca_host
 
-- name: "Xây list mount per-file: zones.d/master/openstack-checks.conf (chỉ ca_host)"
+- name: "Xây mount OpenStack CheckCommand của master zone (chỉ ca_host)"
   ansible.builtin.set_fact:
-    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/openstack-checks.conf:/data/etc/icinga2/zones.d/master/openstack-checks.conf:ro'] }}"
+    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/' + icinga_master_zone_name + '/openstack-checks.conf:/data/etc/icinga2/zones.d/' + icinga_master_zone_name + '/openstack-checks.conf:ro'] }}"
   when: inventory_hostname == ca_host
 
 # zones.d/master/telegram-notifications.conf — LUÔN tồn tại trên ca_host (role-owned, không phụ
 # thuộc cấu hình nào), giống zones.d/master/hosts.conf ở trên — mount luôn. Đặt CHÍNH TRONG
 # zones.d/master (không phải global-templates) là fix triệt để bug duplicate notification — xem
 # giải thích đầy đủ ở task render tương ứng trong main.yml.
-- name: "Xây list mount per-file: zones.d/master/telegram-notifications.conf (chỉ ca_host)"
+- name: "Xây mount Telegram notification của master zone (chỉ ca_host)"
   ansible.builtin.set_fact:
-    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/telegram-notifications.conf:/data/etc/icinga2/zones.d/master/telegram-notifications.conf:ro'] }}"
+    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/' + icinga_master_zone_name + '/telegram-notifications.conf:/data/etc/icinga2/zones.d/' + icinga_master_zone_name + '/telegram-notifications.conf:ro'] }}"
   when: inventory_hostname == ca_host
 
 - name: Bật các feature khai báo (idempotent)
@@ -1604,7 +1630,7 @@
          (inventory_hostname != ca_host and
           ((((_ic_container_before_openstack_zone_migration.container | default({}, true)).Mounts
              | default([]))
-            | selectattr('Destination', 'equalto', '/data/etc/icinga2/zones.d/master/openstack-checks.conf')
+           | selectattr('Destination', 'equalto', '/data/etc/icinga2/zones.d/' + icinga_master_zone_name + '/openstack-checks.conf')
             | list | length) > 0)) }}
   when: inventory_hostname in groups['master']
 
@@ -1618,7 +1644,8 @@
 
 # A peer that used to mount even one local file below zones.d/master has already marked the whole
 # received zone cache as authoritative. Removing the bind mount later is not enough: the persistent
-# /data volume keeps api/zones/master/.authoritative, so the peer rejects every subsequent master-zone
+# /data volume keeps api/zones/<master-zone>/.authoritative, so the peer rejects every subsequent
+# master-zone
 # update from ca_host. This is especially damaging with Director: the active Icinga DB daemon can run
 # on that peer and delete all Director hosts/services from the shared database while master1 still
 # reports them through its API. Icinga's official config-sync troubleshooting procedure is to purge the
@@ -1626,7 +1653,7 @@
 # only when the marker proves that the stale state exists.
 - name: Kiểm tra marker authoritative cũ của zone master trên master peer
   ansible.builtin.stat:
-    path: "{{ ic_data }}/var/lib/icinga2/api/zones/master/.authoritative"
+    path: "{{ ic_data }}/var/lib/icinga2/api/zones/{{ icinga_master_zone_name }}/.authoritative"
   register: _ic_peer_master_authoritative_marker
   when:
     - inventory_hostname in groups['master']
@@ -1634,7 +1661,7 @@
 
 - name: Kiểm tra cây zone master local cũ bên trong volume của master peer
   ansible.builtin.stat:
-    path: "{{ ic_etc }}/zones.d/master"
+    path: "{{ ic_etc }}/zones.d/{{ icinga_master_zone_name }}"
   register: _ic_peer_local_master_zone
   when:
     - inventory_hostname in groups['master']
@@ -1656,9 +1683,9 @@
     path: "{{ item }}"
     state: absent
   loop:
-    - "{{ ic_etc }}/zones.d/master"
-    - "{{ ic_data }}/var/lib/icinga2/api/zones/master"
-    - "{{ ic_data }}/var/lib/icinga2/api/zones-stage/master"
+    - "{{ ic_etc }}/zones.d/{{ icinga_master_zone_name }}"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones/{{ icinga_master_zone_name }}"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones-stage/{{ icinga_master_zone_name }}"
   loop_control:
     label: "{{ item }}"
   when:
@@ -1673,10 +1700,10 @@
     path: "{{ item }}"
     state: absent
   loop:
-    - "{{ ic_data }}/var/lib/icinga2/api/zones/master/_etc/openstack-checks.conf"
-    - "{{ ic_data }}/var/lib/icinga2/api/zones/master/_etc/openstack-services.conf"
-    - "{{ ic_data }}/var/lib/icinga2/api/zones-stage/master/_etc/openstack-checks.conf"
-    - "{{ ic_data }}/var/lib/icinga2/api/zones-stage/master/_etc/openstack-services.conf"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones/{{ icinga_master_zone_name }}/_etc/openstack-checks.conf"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones/{{ icinga_master_zone_name }}/_etc/openstack-services.conf"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones-stage/{{ icinga_master_zone_name }}/_etc/openstack-checks.conf"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones-stage/{{ icinga_master_zone_name }}/_etc/openstack-services.conf"
   loop_control:
     label: "{{ item | basename }}"
   when:

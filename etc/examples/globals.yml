@@ -103,14 +103,18 @@ enable_icinga2_integration_features: []
 #  - "graphite"
 #  - "influxdb2"
 
-# Zone "master" — KHÔNG khai ở globals.yml, TỰ SINH từ inventory nhóm [master] (mỗi host trong
-# [master] -> 1 Endpoint, tất cả gộp vào đúng 1 Zone "master" trong zones.conf, xem design.md mục
-# 9.1). Vd inventory có master1+master2 -> zones.conf tự có Zone "master" { endpoints = ["master1",
-# "master2"] } — không có cờ nào ở đây để "bật/tắt", chỉ cần liệt kê host vào nhóm [master] trong
-# inventory. satellite_zones bên dưới mới là chỗ khai ZONE CON (satellite) — zone cha luôn là
-# "master" mặc định.
+# Tên Icinga Zone của các node trong inventory group [master]. Có thể đổi trước
+# lần deploy đầu, vd "csoc-monitoring". Group inventory, master/secret và proxy role vẫn
+# giữ tên "master" vì đó là vai trò Ansible, không phải tên Icinga Zone.
+icinga_master_zone_name: "master"
 
-# Satellite: mỗi phần tử là 1 zone con của "master". "members" phải khớp tên host trong
+# Master zone — tên lấy từ icinga_master_zone_name, thành viên TỰ SINH từ inventory nhóm
+# [master] (mỗi host -> 1 Endpoint, tất cả gộp vào đúng 1 zone trong zones.conf, xem design.md mục
+# 9.1). Vd inventory có master1+master2 và giữ giá trị mặc định -> zones.conf tự có Zone "master"
+# { endpoints = ["master1", "master2"] }. Không có cờ nào ở đây để "bật/tắt", chỉ cần liệt kê host
+# vào nhóm [master] trong inventory. satellite_zones bên dưới mới là chỗ khai ZONE CON.
+
+# Satellite: mỗi phần tử là 1 zone con của icinga_master_zone_name. "members" phải khớp tên host trong
 # inventory (nhóm [satellite]). Để trống ([]) nếu không có satellite. Satellite KHÔNG chạy
 # redis/icingadb/web — chỉ container icinga2 (design.md mục 8.3).
 #
@@ -123,16 +127,15 @@ enable_icinga2_integration_features: []
 #   satellite_zones:
 #     - name: "dc-hcm"
 #       members: ["sat01", "sat02"]
-#       parent: "master"
+#       # parent có thể bỏ qua; mặc định lấy icinga_master_zone_name.
+#       # Nếu khai tường minh thì giá trị phải đúng bằng icinga_master_zone_name.
 #
 # Ví dụ 2 — 2 zone con riêng biệt theo khu vực (mỗi zone 1 satellite, không HA từng zone):
 #   satellite_zones:
 #     - name: "dc-hanoi"
 #       members: ["sat01"]
-#       parent: "master"
 #     - name: "dc-saigon"
 #       members: ["sat02"]
-#       parent: "master"
 satellite_zones: []
 
 ###############################################################################

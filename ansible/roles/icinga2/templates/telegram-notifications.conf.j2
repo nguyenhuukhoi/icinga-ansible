@@ -10,7 +10,7 @@
  *     vars.notification.telegram = { users = [ "telegram-notify-user" ] }
  *   }
  *
- * QUAN TRỌNG — file này CHỈ ĐƯỢC RENDER Ở zones.d/master/ (xem roles/icinga2/tasks/main.yml, KHÔNG
+ * QUAN TRỌNG — file này CHỈ ĐƯỢC RENDER Ở zones.d/{{ icinga_master_zone_name }}/ (xem roles/icinga2/tasks/main.yml, KHÔNG
  * phải conf.d/ hay zones.d/global-templates/) — đây là fix triệt để bug notification gửi trùng cho
  * Host/Service thuộc zone satellite. Xem giải thích đầy đủ (lịch sử 3 hướng thử thất bại + root
  * cause đọc từ source Icinga2 + fix cuối cùng) ở comment "BUG NGHIÊM TRỌNG" ngay tại task render

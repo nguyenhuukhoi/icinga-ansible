@@ -10,7 +10,7 @@ const PluginContribDir = "/usr/lib/nagios/plugins"
 const CustomPluginDir = "/usr/lib/nagios/custom-plugins"
 
 const NodeName = "{{ inventory_hostname }}"
-const ZoneName = "{{ 'master' if inventory_hostname in groups['master'] else (satellite_zone if inventory_hostname in (groups['satellite'] | default([])) else inventory_hostname) }}"
+const ZoneName = "{{ icinga_master_zone_name if inventory_hostname in groups['master'] else (satellite_zone if inventory_hostname in (groups['satellite'] | default([])) else inventory_hostname) }}"
 
 /* TicketSalt cố định (từ passwords.yml) để master thứ 2 & satellite ký được cert. */
 const TicketSalt = {{ (icinga2_ticket_salt if inventory_hostname in groups['master'] else '') | to_json }}

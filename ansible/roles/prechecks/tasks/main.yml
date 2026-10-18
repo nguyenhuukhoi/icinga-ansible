@@ -11,20 +11,31 @@
       {{ groups['master'] | default([]) | length }}). Icinga 2 cảnh báo zone có hơn 2 endpoint vì
       có thể tạo message-routing loop; topology lớn hơn chưa được project này hỗ trợ.
 
+- name: Tên Icinga master zone phải hợp lệ
+  ansible.builtin.assert:
+    that:
+      - icinga_master_zone_name | default('') | length > 0
+      - icinga_master_zone_name is regex('^[A-Za-z0-9_.-]+$')
+      - icinga_master_zone_name not in ['global-templates', 'director-global']
+      - icinga_master_zone_name not in (groups['client'] | default([]))
+    fail_msg: >-
+      icinga_master_zone_name phải dùng A-Z/a-z/0-9/_.-, không được trùng global zone
+      hoặc zone client. Giá trị hiện tại: {{ icinga_master_zone_name | default('<rỗng>') }}.
+
 - name: Mỗi satellite zone chỉ hỗ trợ tối đa hai endpoint HA
   ansible.builtin.assert:
     that:
       - item.name | default('') | length > 0
       - item.name is regex('^[A-Za-z0-9_.-]+$')
-      - item.name not in ['master', 'global-templates', 'director-global']
+      - item.name not in [icinga_master_zone_name, 'global-templates', 'director-global']
       - item.members | default([]) | length >= 1
       - item.members | default([]) | length <= 2
       - item.members | difference(groups['satellite'] | default([])) | length == 0
-      - item.parent | default('master') == 'master'
+      - item.parent | default(icinga_master_zone_name) == icinga_master_zone_name
     fail_msg: >-
       satellite_zones entry '{{ item.name | default('<không tên>') }}' phải có 1-2 members và mọi
-      member phải thuộc [satellite]. Tên zone chỉ dùng A-Z/a-z/0-9/_.-, không được là master hoặc
-      global-templates/director-global; parent hiện chỉ hỗ trợ master. Đang có:
+      member phải thuộc [satellite]. Tên zone chỉ dùng A-Z/a-z/0-9/_.-, không được trùng
+      master zone/global-templates/director-global; parent phải là {{ icinga_master_zone_name }}. Đang có:
       {{ item.members | default([]) }}.
   loop: "{{ satellite_zones | default([]) }}"
   loop_control:
@@ -88,15 +99,68 @@
       client/secret, rồi xóa các thư mục cũ. Playbook từ chối chạy để không âm thầm bỏ sót secret.
   run_once: true
 
-# Full-file override theo zone thắng hoàn toàn cấu hình sinh từ openstack_service_checks. Kiểm tra
-# source trên deployment node để prechecks không từ chối các biến template không còn được sử dụng.
-- name: Kiểm tra override zones.d/master/openstack-services.conf trên deployment node
-  ansible.builtin.stat:
-    path: "{{ deploy_config_dir }}/icinga2/zones.d/master/openstack-services.conf"
+# File openstack-services.conf có marker được sinh từ openstack_service_checks. Nếu operator xóa marker
+# để tự quản lý toàn bộ file thì các biến sinh tự động không còn là nguồn cấu hình và không được dùng để
+# quyết định credential/precheck.
+# Đổi icinga_master_zone_name (hoặc đổi satellite_zones[].name) làm thư mục zone CŨ dưới
+# deploy_config_dir thành mồ côi: role chỉ đọc/ghi zones.d/<tên hiện tại>, nên file trong thư mục cũ
+# không còn tác dụng. Trước đây việc này diễn ra IM LẶNG (first_found có skip=true) và file đích bị
+# template mặc định ghi đè — đã tái hiện thật 2026-10-18 khi test rename zone. Chặn ở đây để operator
+# biết mà xoá/di chuyển, thay vì tưởng override vẫn đang chạy.
+- name: Liệt kê thư mục zone trên deployment node
+  ansible.builtin.find:
+    paths: "{{ deploy_config_dir }}/icinga2/zones.d"
+    file_type: directory
+    recurse: false
   delegate_to: localhost
   become: false
   run_once: true
-  register: _precheck_openstack_services_override
+  register: _precheck_zone_dirs
+
+- name: Chặn thư mục zone mồ côi dưới deploy_config_dir/icinga2/zones.d
+  ansible.builtin.assert:
+    that:
+      - >-
+        (_precheck_zone_dirs.files | default([]) | map(attribute='path') | map('basename') | list
+         | difference([icinga_master_zone_name, 'global-templates', 'director-global']
+                      + (satellite_zones | default([]) | map(attribute='name') | list)
+                      + (groups['client'] | default([])))) | length == 0
+    fail_msg: >-
+      {{ deploy_config_dir }}/icinga2/zones.d còn thư mục không khớp zone nào đang dùng:
+      {{ (_precheck_zone_dirs.files | default([]) | map(attribute='path') | map('basename') | list
+          | difference([icinga_master_zone_name, 'global-templates', 'director-global']
+                       + (satellite_zones | default([]) | map(attribute='name') | list)
+                       + (groups['client'] | default([])))) | join(', ') }}.
+      Zone hiện tại: master={{ icinga_master_zone_name }},
+      satellite={{ satellite_zones | default([]) | map(attribute='name') | list | join(', ') | default('(không)', true) }}.
+      File trong thư mục đó KHÔNG còn được dùng. Hãy di chuyển nội dung sang thư mục zone đúng tên
+      rồi xoá thư mục cũ (thường gặp sau khi đổi icinga_master_zone_name hoặc đổi tên satellite zone).
+  run_once: true
+
+- name: Kiểm tra openstack-services.conf trên deployment node
+  ansible.builtin.stat:
+    path: "{{ deploy_config_dir }}/icinga2/zones.d/{{ icinga_master_zone_name }}/openstack-services.conf"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: _precheck_openstack_services_file
+
+- name: Đọc openstack-services.conf hiện có để xác định quyền quản lý
+  ansible.builtin.slurp:
+    src: "{{ deploy_config_dir }}/icinga2/zones.d/{{ icinga_master_zone_name }}/openstack-services.conf"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: _precheck_openstack_services_content
+  when: _precheck_openstack_services_file.stat.isreg | default(false)
+
+- name: Xác định có dùng cấu hình OpenStack sinh tự động hay không
+  ansible.builtin.set_fact:
+    _precheck_use_generated_openstack_services: >-
+      {{ not (_precheck_openstack_services_file.stat.isreg | default(false)) or
+         ('icinga-ansible:generated' in
+          (_precheck_openstack_services_content.content | default('') | b64decode)) }}
+  run_once: true
 
 - name: Kiểm tra cấu hình static OpenStack service status
   ansible.builtin.assert:
@@ -117,7 +181,7 @@
   loop: "{{ openstack_service_checks | default([]) }}"
   loop_control:
     label: "{{ item.name | default('<không tên>') }}"
-  when: not (_precheck_openstack_services_override.stat.isreg | default(false))
+  when: _precheck_use_generated_openstack_services | bool
 
 - name: Tên OpenStack logical host phải duy nhất
   ansible.builtin.assert:
@@ -127,7 +191,7 @@
         (openstack_service_checks | default([]) | length)
     fail_msg: "Mỗi openstack_service_checks.name phải duy nhất."
   when:
-    - not (_precheck_openstack_services_override.stat.isreg | default(false))
+    - _precheck_use_generated_openstack_services | bool
     - openstack_service_checks | default([]) | length > 0
 
 - name: Kiểm tra clouds.yaml thuộc tầng secret chỉ dành cho master
@@ -138,7 +202,7 @@
   run_once: true
   register: _precheck_openstack_clouds_file
   when:
-    - not (_precheck_openstack_services_override.stat.isreg | default(false))
+    - _precheck_use_generated_openstack_services | bool
     - openstack_service_checks | default([]) | length > 0
 
 - name: Kiểm tra credential OpenStack không nằm ở đường dẫn có thể phát tán ngoài master
@@ -152,7 +216,9 @@
   become: false
   run_once: true
   register: _precheck_openstack_forbidden_clouds_files
-  when: openstack_service_checks | default([]) | length > 0
+  when:
+    - _precheck_use_generated_openstack_services | bool
+    - openstack_service_checks | default([]) | length > 0
 
 - name: Chặn credential OpenStack ở tầng global hoặc đường dẫn cũ
   ansible.builtin.assert:
@@ -165,7 +231,9 @@
       {{ deploy_config_dir }}/icinga2/master/secret/clouds.yaml. Hãy xóa clouds.yaml khỏi
       icinga2/secret (tầng global), icinga2/openstack và icinga2/group_master/secret (đường dẫn cũ).
   run_once: true
-  when: openstack_service_checks | default([]) | length > 0
+  when:
+    - _precheck_use_generated_openstack_services | bool
+    - openstack_service_checks | default([]) | length > 0
 
 - name: Bắt buộc có clouds.yaml khi bật OpenStack service status
   ansible.builtin.assert:
@@ -178,7 +246,7 @@
       chỉ được phép đồng bộ tới các node master.
   run_once: true
   when:
-    - not (_precheck_openstack_services_override.stat.isreg | default(false))
+    - _precheck_use_generated_openstack_services | bool
     - openstack_service_checks | default([]) | length > 0
 
 - name: Bắt buộc clouds.yaml có đúng cloud profile đã khai
@@ -196,7 +264,7 @@
     label: "{{ item.cloud | default('<không cloud>') }}"
   run_once: true
   when:
-    - not (_precheck_openstack_services_override.stat.isreg | default(false))
+    - _precheck_use_generated_openstack_services | bool
     - openstack_service_checks | default([]) | length > 0
     - _precheck_openstack_clouds_file.stat.exists | default(false)
 
@@ -492,5 +560,6 @@
     msg:
       - "Version image: icinga2 {{ icinga_image_versions.icinga2 }}, icingadb {{ icinga_image_versions.icingadb }}, web {{ icinga_image_versions.icingaweb2 }}, redis {{ icinga_image_versions.icingadb_redis }}, mariadb {{ icinga_image_versions.mariadb }}"
       - "Master       : {{ master_count }} ({{ 'HA' if is_ha_master else 'single' }})  CA={{ ca_host }}"
+      - "Master zone  : {{ icinga_master_zone_name }}"
       - "Satellite    : {{ satellite_count }}"
       - "Database      : {{ icinga_database_type }}  (galera nodes: {{ galera_count }})  endpoint: {{ db_host }}:{{ db_port }}"

@@ -1,5 +1,5 @@
 /* {{ ansible_managed }}
- * Host/Service monitor bởi zone "master" — mặc định RỖNG.
+ * Host/Service monitor bởi master zone "{{ icinga_master_zone_name }}" — mặc định RỖNG.
  *
  * Khác zones.d/master/clients.conf (command-endpoint, cần agent Icinga2 trên host bị monitor): đây
  * là Host/Service THẬT chạy TRỰC TIẾP bởi 1 endpoint trong zone master (vd SSH ra host ngoài cluster,
@@ -9,7 +9,7 @@
  *
  * Cách thêm 1 host bị monitor qua zone master này:
  *   1. Đặt override tại:
- *        {{ deploy_config_dir }}/icinga2/zones.d/master/hosts.conf
+ *        {{ deploy_config_dir }}/icinga2/zones.d/{{ icinga_master_zone_name }}/hosts.conf
  *      (đè hẳn nội dung file này — không merge).
  *   2. Dùng CheckCommand SSH có sẵn: by_ssh_disk / by_ssh_load / by_ssh_mem (xem
  *      ssh-checks.conf, ghi bởi role, KHÔNG cần override) — hoặc ITL "by_ssh" gốc nếu cần tuỳ biến.
@@ -19,15 +19,15 @@
  *        object Host "ext-xyz" {
  *          address       = "10.0.0.99"
  *          check_command = "by_ssh_disk"
- *          zone          = "master"
+ *          zone          = "{{ icinga_master_zone_name }}"
  *          vars.ssh_user = "ubuntu"
  *        }
  *        object Service "disk" {
  *          host_name     = "ext-xyz"
  *          check_command = "by_ssh_disk"
- *          zone          = "master"
+ *          zone          = "{{ icinga_master_zone_name }}"
  *        }
- *      LƯU Ý: phải khai "zone = \"master\"" tường minh trên CẢ Host lẫn Service — qua conf.d/zones.d
+ *      LƯU Ý: phải khai zone = "{{ icinga_master_zone_name }}" tường minh trên CẢ Host lẫn Service
  *      trực tiếp (không đi qua override host-name như client), Service KHÔNG tự kế thừa zone từ Host
  *      (bug thật đã gặp — xem design.md mục 14.5).
  *   3. icinga-ansible reconfigure — ghi trên ca_host, tự đồng bộ giữa các endpoint CÙNG zone master
