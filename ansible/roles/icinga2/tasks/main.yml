@@ -332,6 +332,28 @@
       # không cần thiết và làm fingerprint đổi khiến cả hai container Icinga 2 bị recreate một lần.
       - check_openstack_service.py
 
+# Seed base config là việc MỘT LẦN theo đúng nghĩa: "copy" dùng force:false nên từ lần chạy thứ hai
+# trở đi cả hai loop bên dưới chỉ quét ~100 file để kết luận "không có gì đổi". Đo thật bằng
+# profile_tasks trên cụm 2 master (2026-10-19): "Đảm bảo thư mục cha" 10.95s + "Seed từng file"
+# 12.36s = 23.3s MỖI master, tức ~47s hoàn toàn vô ích trên mỗi lần deploy/reconfigure — chiếm gần
+# 1/5 tổng thời gian 258s. Gate bằng stamp file ghi chính image đã seed: image đổi (skeleton có thể
+# thêm file mới) thì tự seed lại, còn lại skip sạch.
+#
+# Muốn ép seed lại (vd đã xoá tay một file base config trên node và muốn lấy lại bản gốc):
+#   rm {{ icinga_etc_dir }}/icinga2/.base-config-seeded   rồi chạy lại deploy/reconfigure.
+- name: Đọc stamp base config đã seed
+  ansible.builtin.slurp:
+    src: "{{ icinga_etc_dir }}/icinga2/.base-config-seeded"
+  register: _ic_base_stamp
+  failed_when: false
+  changed_when: false
+
+- name: Xác định có cần seed base config hay không
+  ansible.builtin.set_fact:
+    _ic_base_seed_needed: >-
+      {{ (_ic_base_stamp.content is not defined)
+         or ((_ic_base_stamp.content | b64decode | trim) != images.icinga2) }}
+
 - name: Dò toàn bộ file trong skeleton /data/etc/icinga2 (để seed ra node)
   ansible.builtin.find:
     paths: "{{ ic_etc }}"
@@ -339,6 +361,7 @@
     file_type: file
     excludes: ["*.orig"]
   register: _ic_base_find
+  when: _ic_base_seed_needed | bool
 
 # BUG THẬT ĐÃ GẶP: đường dẫn host thật đằng sau /data/etc/icinga2/ssh có sẵn id_monitor/known_hosts
 # từ trước (không phải do cơ chế seed này ghi) — không loại trừ "ssh/" thì scan nhặt luôn, seed ra
@@ -354,6 +377,7 @@
          | list
          | select('match', '^(?!' ~ (_ic_base_exclude_prefixes | join('|')) ~ ').*$')
          | list }}
+  when: _ic_base_seed_needed | bool
 
 # BUG THẬT ĐÃ GẶP: "copy" với remote_src:true KHÔNG tự tạo thư mục cha (khác bản copy thường từ
 # control node) — thiếu bước này làm mọi file trong conf.d/, features-available/ (đều nằm trong
@@ -365,8 +389,10 @@
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
     mode: "0750"
-  loop: "{{ _ic_base_relpaths }}"
+  loop: "{{ _ic_base_relpaths | default([]) }}"
   loop_control: { label: "{{ item }}" }
+  when: _ic_base_seed_needed | bool
+
 
 - name: Seed từng file base config ra node (1 lần, không đè nếu node đã có)
   ansible.builtin.copy:
@@ -377,8 +403,18 @@
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
     mode: preserve   # giữ nguyên bit thực thi cho scripts/mail-*.sh, không hardcode 0640
-  loop: "{{ _ic_base_relpaths }}"
+  loop: "{{ _ic_base_relpaths | default([]) }}"
   loop_control: { label: "{{ item }}" }
+  when: _ic_base_seed_needed | bool
+# Ghi stamp SAU khi seed xong — lần chạy sau đọc stamp này và skip cả block.
+- name: Ghi stamp base config đã seed (theo image hiện tại)
+  ansible.builtin.copy:
+    content: "{{ images.icinga2 }}"
+    dest: "{{ icinga_etc_dir }}/icinga2/.base-config-seeded"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0640"
+  when: _ic_base_seed_needed | bool
 
 # Không dùng lại _ic_base_relpaths (đó là danh sách trong SKELETON /data) — ở đây cần danh sách
 # THẬT đang có trên node, kể cả file đã seed từ lần chạy trước hoặc bạn tự thêm tay sau này. Loại

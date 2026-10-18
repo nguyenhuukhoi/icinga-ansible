@@ -369,27 +369,41 @@
   changed_when: false
   no_log: true
 
-- name: Check legacy direct services selected for migration
-  ansible.builtin.command:
-    argv:
-      - docker
-      - exec
-      - icingaweb2
-      - icingacli
-      - director
-      - service
-      - exists
-      - "{{ item.1 }}"
-      - --host
-      - "{{ item.0.name }}"
-  loop: >-
-    {{ (director_managed_hosts | default([]))
-       | product(director_managed_direct_services_absent | default([])) | list }}
-  loop_control:
-    label: "{{ item.0.name }}/{{ item.1 }}"
-  register: _director_legacy_service_exists
+# ĐO THẬT (profile_tasks, 2026-10-19): task cũ gọi "docker exec icingacli director service exists"
+# cho TỪNG cặp host×service — với 6 host và 3 service là 18 lần gọi, mất 11.92s mỗi master và chạy
+# lại ở MỌI lần deploy/reconfigure dù migration đã xong từ lâu. Thay bằng ĐÚNG MỘT truy vấn DB
+# Director (chính là nơi icingacli đọc) rồi so khớp trong Jinja: giữ nguyên độ chính xác, không cần
+# stamp hay cờ thủ công, và không bỏ sót trường hợp object được tạo lại sau này.
+- name: Đọc toàn bộ Service object trực tiếp hiện có trong Director DB
+  ansible.builtin.command: >-
+    docker run --rm --network host -e MYSQL_PWD {{ images.mariadb }}
+    mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }}
+    -udirector -N director
+    -e "SELECT CONCAT(h.object_name, '/', s.object_name) FROM icinga_service s
+        JOIN icinga_host h ON h.id = s.host_id WHERE s.object_type = 'object';"
+  environment:
+    MYSQL_PWD: "{{ director_db_password }}"
+  register: _director_direct_services_present
   changed_when: false
-  failed_when: _director_legacy_service_exists.rc not in [0, 1]
+  no_log: true
+
+# KHÔNG dùng product() + map('join') ở đây: product() trả về tuple (dict host, string service) nên
+# join sẽ nối cả dict vào chuỗi, ra "{'name': 'x', ...}/CPU" thay vì "x/CPU". Dựng tường minh bằng
+# namespace cho chắc, cùng mẫu đã dùng ở roles/prechecks và recover-cluster.
+- name: Xác định Service object cũ cần xoá (giao của danh sách khai báo và thực tế trong DB)
+  ansible.builtin.set_fact:
+    _director_legacy_to_delete: >-
+      {%- set present = (_director_direct_services_present.stdout_lines | default([]))
+                        | map('trim') | list -%}
+      {%- set ns = namespace(found=[]) -%}
+      {%- for host in director_managed_hosts | default([]) -%}
+        {%- for svc in director_managed_direct_services_absent | default([]) -%}
+          {%- if (host.name ~ '/' ~ svc) in present -%}
+            {%- set ns.found = ns.found + [host.name ~ '/' ~ svc] -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.found }}
 
 - name: Remove legacy direct services replaced by Apply Rules
   ansible.builtin.command:
@@ -401,13 +415,12 @@
       - director
       - service
       - delete
-      - "{{ item.item.1 }}"
+      - "{{ item.split('/')[1] }}"
       - --host
-      - "{{ item.item.0.name }}"
-  loop: "{{ _director_legacy_service_exists.results | default([]) }}"
+      - "{{ item.split('/')[0] }}"
+  loop: "{{ _director_legacy_to_delete }}"
   loop_control:
-    label: "{{ item.item.0.name }}/{{ item.item.1 }}"
-  when: item.rc == 0
+    label: "{{ item }}"
   register: _director_legacy_service_delete
   changed_when: "'has been deleted' in (_director_legacy_service_delete.stdout | default(''))"
 

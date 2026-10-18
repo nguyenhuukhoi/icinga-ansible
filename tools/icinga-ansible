@@ -44,6 +44,19 @@ DEPLOY_CONFIG_DIR="$CONFIG_DIR/config"    # override tuỳ biến (giống /etc/
 INVENTORY="$ANSIBLE_DIR/inventory/all-in-one"
 EXTRA_ARGS=()
 LIMIT=""
+USER_TAGS=""        # "-t/--tags" người dùng tự truyền — nếu có thì THAY THẾ tag mặc định, xem parse args
+TAG_ARGS=()
+
+# Tag mặc định của subcommand CHỈ áp dụng khi người dùng không tự truyền -t/--tags. Phải tách ra thành
+# hàm vì ansible-playbook cộng dồn nhiều --tags (xem giải thích ở nhánh -t trong parse args).
+set_default_tags() {   # set_default_tags <tag mặc định>
+  if [[ -n "$USER_TAGS" ]]; then
+    TAG_ARGS=()
+    echo "--tags '$USER_TAGS' (bạn truyền) THAY THẾ tag mặc định '$1' của lệnh '$COMMAND'." >&2
+  else
+    TAG_ARGS=(--tags "$1")
+  fi
+}
 
 usage() {
   cat <<EOF
@@ -102,6 +115,11 @@ Backup/restore toàn hệ thống (dựng lại hạ tầng mới sau sự cố 
 Options:
   -i, --inventory PATH   inventory (mặc định: all-in-one)
       --limit HOSTS      giới hạn host (ansible --limit)
+  -t, --tags TAGS        chạy hẹp theo tag — THAY THẾ tag mặc định của lệnh (không cộng dồn).
+                         Tag có sẵn: bootstrap, prechecks, mariadb, redis, icinga2, icingadb,
+                         web, director-config, lb. Ví dụ chỉ đẩy lại config Icinga 2:
+                           icinga-ansible reconfigure -i <inv> -t icinga2
+                         Lưu ý: tag hẹp bỏ qua prechecks (gắn tag prechecks/deploy).
       --config-backup PATH   dùng với restore-config
   các tham số khác được chuyển thẳng cho ansible-playbook.
 EOF
@@ -119,6 +137,19 @@ while [[ $# -gt 0 ]]; do
     --limit)
       [[ $# -ge 2 ]] || { echo "$1 cần danh sách host." >&2; exit 2; }
       LIMIT="$2"; shift 2;;
+    # BUG THẬT (2026-10-19, người dùng tự gặp): trước đây "-t/--tags" không được CLI nhận diện nên
+    # rơi vào nhánh *) và bị NỐI THÊM vào sau "--tags deploy" mà subcommand luôn chèn. ansible-playbook
+    # xử lý nhiều --tags theo kiểu CỘNG DỒN (union), không ghi đè — nên tag hiệu lực thành
+    # {deploy, <tag của bạn>}. Vì MỌI role trong chuỗi deploy đều đã gắn tag "deploy", việc thêm tag
+    # hẹp hơn KHÔNG loại trừ được gì: "reconfigure -t icinga2" chạy đúng y như "reconfigure" (đã đo:
+    # 641 task cả hai trường hợp, trong khi chỉ "--tags icinga2" là 487). Tức tool âm thầm làm việc
+    # khác hẳn điều người dùng yêu cầu. Giờ bắt tường minh: tag người dùng truyền vào THAY THẾ tag
+    # mặc định của subcommand, và in rõ một dòng cho biết điều đó.
+    -t|--tags)
+      [[ $# -ge 2 ]] || { echo "$1 cần danh sách tag." >&2; exit 2; }
+      USER_TAGS="$2"; EXTRA_ARGS+=("--tags" "$2"); shift 2;;
+    --tags=*)
+      USER_TAGS="${1#--tags=}"; EXTRA_ARGS+=("$1"); shift;;
     --config-backup)
       [[ $# -ge 2 ]] || { echo "$1 cần đường dẫn file backup." >&2; exit 2; }
       CONFIG_BACKUP="$2"; shift 2;;   # dùng cho "restore-config" — xem bên dưới
@@ -315,16 +346,16 @@ run() {   # run <ansible extra args...>
 }
 
 case "$COMMAND" in
-  bootstrap-servers) run --tags bootstrap ;;
+  bootstrap-servers) set_default_tags bootstrap; run "${TAG_ARGS[@]}" ;;
   prepare-check-by-ssh)
     cd "$ANSIBLE_DIR"
     "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/prepare-check-by-ssh.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
       "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
-  prechecks)         run --tags prechecks ;;
-  deploy)            run --tags deploy ;;
-  reconfigure)       run --tags deploy -e icinga_action=reconfigure ;;
+  prechecks)         set_default_tags prechecks; run "${TAG_ARGS[@]}" ;;
+  deploy)            set_default_tags deploy; run "${TAG_ARGS[@]}" ;;
+  reconfigure)       set_default_tags deploy; run "${TAG_ARGS[@]}" -e icinga_action=reconfigure ;;
   pull)
     cd "$ANSIBLE_DIR"
     "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/pull.yml" \
@@ -375,7 +406,7 @@ case "$COMMAND" in
     # LƯU Ý (2026-07-22, "deploy" không còn tự bootstrap): nếu host MỚI THÊM chưa từng chạy
     # bootstrap-servers (chưa có Docker/chrony/mạng), phải tự chạy "bootstrap-servers" TRƯỚC lệnh
     # này (trước đây "deploy" tự lo hộ, giờ tách hẳn — xem usage()).
-    run --tags deploy
+    set_default_tags deploy; run "${TAG_ARGS[@]}"
     ;;
   remove-master|remove-node)
     # KHÔNG dùng run(): playbook riêng, không phải $PLAYBOOK mặc định.
@@ -388,7 +419,7 @@ case "$COMMAND" in
     echo "!!! Nhớ: xoá host khỏi inventory rồi chạy 'icinga-ansible reconfigure' để đồng bộ"
     echo "    zones.conf trên các host còn lại (xem thông báo cuối playbook ở trên)."
     ;;
-  mariadb-backup)    run --tags mariadb -e icinga_action=backup ;;
+  mariadb-backup)    set_default_tags mariadb; run "${TAG_ARGS[@]}" -e icinga_action=backup ;;
   mariadb-recovery)
     # KHÔNG dùng run(): playbook riêng, không phải $PLAYBOOK mặc định. Bắt buộc:
     # -e recovery_mode=restore-backup|recover-cluster -e confirm=yes (xem design.md 10.4).
