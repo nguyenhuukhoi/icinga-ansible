@@ -13,9 +13,9 @@ WARNING = 1
 CRITICAL = 2
 UNKNOWN = 3
 
-# Mounted read-only from deploy_config_dir/icinga2/openstack/clouds.yaml (per-node, design.md 9.7) --
-# standard clouds.yaml format, same file python-openstackclient itself understands.
-CONFIG_FILE = "/etc/icinga2/conf.d/clouds.yaml"
+# Mounted through the master-only layered secret directory. This is standard clouds.yaml format,
+# the same format understood by python-openstackclient.
+CONFIG_FILE = "/etc/icinga-ansible/icinga2/clouds.yaml"
 
 
 def load_auth(cloud_name):

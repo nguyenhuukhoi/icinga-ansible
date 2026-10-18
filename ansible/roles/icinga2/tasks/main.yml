@@ -305,15 +305,15 @@
       - conf.d/api-users.conf
       - conf.d/custom-commands.conf
       - conf.d/ssh-checks.conf
+      # Đường dẫn cũ trước khi CheckCommand OpenStack được chuyển vào zones.d/master. Giữ trong
+      # exclude để file mồ côi không bị cơ chế base-config nhặt và mount lại.
       - conf.d/openstack-checks.conf
-      # conf.d/clouds.yaml: KHÔNG phải file base render ở đây — đây là ĐÍCH mount của
-      # openstack-clouds.yaml (nguồn thật nằm ở top-level icinga_etc_dir/icinga2/openstack-clouds.yaml,
-      # xem block "OpenStack multi-cloud credentials"), mount RIÊNG bằng task khác. Thiếu dòng loại trừ
-      # này gây "mount point appears twice" (BUG THẬT ĐÃ GẶP 2026-08-01, giống hệt lý do loại trừ ssh/
-      # ở trên): Docker tự tạo 1 file 0-byte tại đúng path này lúc container fail lúc trước, scan "Dò
-      # danh sách file base ĐÃ CÓ trên node" nhặt nhầm file rác đó rồi mount trùng đích với mount tường
-      # minh của openstack-clouds.yaml.
+      # Đường credential cũ. clouds.yaml hiện đi qua secret/group_master và được mount tại
+      # /etc/icinga-ansible/icinga2/clouds.yaml, không còn nằm dưới conf.d.
       - conf.d/clouds.yaml
+      # Artifact top-level của cơ chế credential cũ. Task migration phía dưới xóa file này sau bước
+      # scan, nên phải exclude ngay tại đây để danh sách mount không giữ một source vừa bị xóa.
+      - openstack-clouds.yaml
       # conf.d/telegram-notifications.conf: KHÔNG còn render ở đây (đã chuyển sang
       # zones.d/global-templates/, xem block "BUG THẬT ĐÃ GẶP 2026-07-24" phía dưới) — vẫn phải giữ
       # trong exclude_relpaths (dù không render nữa) để file MỒ CÔI (còn sót từ bản deploy cũ, task
@@ -451,13 +451,19 @@
     insertafter: '^include "conf\.d/custom-commands\.conf"'
   notify: Reload icinga2
 
-# CheckCommand check_openstack_compute/check_openstack_network (design.md mục 9.4/9.6) — role-owned,
-# LUÔN có nội dung thật (khác custom-commands.conf).
-- name: Include lại riêng conf.d/openstack-checks.conf (CheckCommand check_openstack_compute/network)
+# CheckCommand OpenStack đã chuyển vào zones.d/master. Xóa include cũ để một cụm nâng cấp tại chỗ
+# không load đồng thời bản conf.d và bản zone rồi lỗi duplicate object.
+- name: Dọn include conf.d/openstack-checks.conf sau khi chuyển CheckCommand vào zone master
   ansible.builtin.lineinfile:
     path: "{{ icinga_etc_dir }}/icinga2/icinga2.conf"
-    line: 'include "conf.d/openstack-checks.conf"'
-    insertafter: '^include "conf\.d/ssh-checks\.conf"'
+    regexp: '^include "conf\.d/openstack-checks\.conf"'
+    state: absent
+  notify: Reload icinga2
+
+- name: Xóa file conf.d/openstack-checks.conf mồ côi sau khi chuyển vào zone master
+  ansible.builtin.file:
+    path: "{{ icinga_etc_dir }}/icinga2/conf.d/openstack-checks.conf"
+    state: absent
   notify: Reload icinga2
 
 # NotificationCommand Telegram — CHUYỂN sang zones.d/global-templates (xem block render phía dưới,
@@ -1096,7 +1102,6 @@
     - { relpath: "conf.d/api-users.conf",             template: api-users.conf.j2 }
     - { relpath: "conf.d/custom-commands.conf",       template: custom-commands.conf.j2 }
     - { relpath: "conf.d/ssh-checks.conf",            template: ssh-checks.conf.j2 }
-    - { relpath: "conf.d/openstack-checks.conf",      template: openstack-checks.conf.j2 }
   loop_control:
     loop_var: cfg
 
@@ -1105,8 +1110,8 @@
 # cùng chỗ với custom-plugins/ (không cần cơ chế dò động vì đây không phải file người dùng tự thêm/xoá
 # tuỳ ý). check_openstack_service.py (design.md mục 9.7): dùng openstacksdk trong venv
 # /opt/icinga-venv (image custom) để check compute/volume/network/masakari, ĐA CLOUD — credential
-# đọc từ file "clouds.yaml" mount riêng (xem block "OpenStack multi-cloud credentials" phía dưới,
-# KHÔNG qua env CheckCommand nữa), CheckCommand chỉ truyền "-c <tên cloud> -s <loại service>".
+# đọc từ file "clouds.yaml" trong secret master-only, KHÔNG qua env CheckCommand; CheckCommand chỉ
+# truyền "-c <tên cloud> -s <loại service>".
 - name: "Seed script telegram-*-notification.sh ra node (1 lần, giữ tương thích cấu hình cũ)"
   ansible.builtin.copy:
     src: "{{ item }}"
@@ -1177,34 +1182,12 @@
   when: item not in _ic_ssh_names
   notify: Reload icinga2
 
-# ---------- OpenStack multi-cloud credentials (clouds.yaml, design.md 9.7) ----------
-# 1 file CỐ ĐỊNH (cùng mẫu ssh/id_monitor phía trên) — sync per-file ra MỌI node (check có thể chạy
-# từ satellite lẫn master), chứa credential CHO NHIỀU cloud (mỗi cloud 1 entry dưới "clouds:") — thêm
-# cloud mới chỉ cần sửa file này + thêm Host/Service trong zones.d, KHÔNG cần đổi CheckCommand/script.
-# Optional: nếu chưa dùng check_openstack, không tạo deploy_config_dir/icinga2/openstack/clouds.yaml
-# thì đơn giản là không mount gì (CheckCommand check_openstack tồn tại nhưng không ai gọi tới vẫn OK).
-- name: "Kiểm tra deploy node có openstack/clouds.yaml không"
-  ansible.builtin.stat:
-    path: "{{ deploy_config_dir }}/icinga2/openstack/clouds.yaml"
-  delegate_to: localhost
-  become: false
-  register: _ic_openstack_clouds_stat
-
-- name: "Đồng bộ openstack/clouds.yaml từ deploy node ra target node (nếu có)"
-  ansible.builtin.copy:
-    src: "{{ deploy_config_dir }}/icinga2/openstack/clouds.yaml"
-    dest: "{{ icinga_etc_dir }}/icinga2/openstack-clouds.yaml"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0600"
-  when: _ic_openstack_clouds_stat.stat.exists
-  notify: Reload icinga2
-
-- name: "Xoá openstack-clouds.yaml trên target nếu đã bị xoá khỏi deploy node (mồ côi)"
+# Credential hiện được cơ chế secret phân tầng ở đầu role đồng bộ từ group_master/secret và chỉ
+# xuất hiện trên master. Dọn artifact per-file của phiên bản cũ trên mọi node khi nâng cấp tại chỗ.
+- name: "Xóa credential OpenStack runtime theo cơ chế cũ"
   ansible.builtin.file:
     path: "{{ icinga_etc_dir }}/icinga2/openstack-clouds.yaml"
     state: absent
-  when: not _ic_openstack_clouds_stat.stat.exists
   notify: Reload icinga2
 
 # ---------- Script check tuỳ biến (per-file, dò động — design.md 14.5) ----------
@@ -1278,10 +1261,11 @@
     state: absent
   when: inventory_hostname == ca_host
 
-# ---------- zones.d/master (chỉ render 1 lần trên ca_host) ----------
+# ---------- zones.d/master ----------
 # zones.d/master sync GIỮA CÁC ENDPOINT CÙNG ZONE MASTER qua chính cơ chế cluster của Icinga2
 # (design 9.3) — không cần role tự copy sang master2/master3, tự render 2 nơi dễ lệch nội dung
-# (whitespace/thứ tự) gây "config sync conflict". Chỉ render 1 lần trên ca_host là đủ.
+# (whitespace/thứ tự) gây "config sync conflict". Các file chung khác vẫn chỉ render trên ca_host;
+# riêng hai file OpenStack được render byte-identical trên mọi master để validate rolling độc lập.
 # Ghi vào cây icinga_etc_dir (không phải ic_etc/data) để mount RO per-file được — xem block mount
 # per-file động ở dưới, trước task "Khởi động container icinga2".
 - name: Tạo thư mục zones.d/master (deploy tree)
@@ -1291,7 +1275,7 @@
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
     mode: "0750"
-  when: inventory_hostname == ca_host
+  when: inventory_hostname in groups['master']
 
 # BUG THẬT ĐÃ GẶP + ĐÃ TÌM RA FIX TRIỆT ĐỂ (2026-07-24 phát hiện, 2026-07-28 fix đúng): notification
 # cho Host/Service thuộc zone satellite bị gửi TRÙNG bởi cả 1 node master lẫn 1 node satellite. Đã
@@ -1353,18 +1337,31 @@
     - (groups['client'] | default([])) | length == 0
   notify: Reload icinga2
 
-# OpenStack service status không dùng Director và nằm trong file riêng để một override SSH/custom host
-# tại hosts.conf không vô tình làm mất Nova/Neutron/Cinder objects. Vì đây là config theo ZONE (không
-# theo host Ansible), operator đặt đúng một full-file override trên deployment node tại:
+# OpenStack service status không dùng Director. CheckCommand lẫn Host/Service đều nằm trong zone
+# master; Ansible render cùng nội dung trên từng master. Cách này cũng làm validate/reconfigure rolling
+# độc lập với thời điểm cluster config-sync cập nhật cache của peer.
+- name: "Render CheckCommand OpenStack -> zones.d/master/openstack-checks.conf"
+  ansible.builtin.template:
+    src: openstack-checks.conf.j2
+    dest: "{{ icinga_etc_dir }}/icinga2/zones.d/master/openstack-checks.conf"
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0640"
+  when: inventory_hostname in groups['master']
+  notify: Reload icinga2
+
+# Service nằm trong file riêng để một override SSH/custom host tại hosts.conf không vô tình làm mất
+# Nova/Neutron/Cinder objects. Vì đây là config theo ZONE (không theo host Ansible), operator đặt
+# đúng một full-file override trên deployment node tại:
 #   config/icinga2/zones.d/master/openstack-services.conf
-# Ansible chỉ ghi file vào ca_host; Icinga2 cluster config-sync phân phối cho endpoint master còn lại.
+# Ansible ghi cùng file vào từng master; Icinga HA tự phân công thực thi object trong zone master.
 - name: "Xác định override cho zones.d/master/openstack-services.conf"
   ansible.builtin.set_fact:
     _openstack_services_src: >-
       {{ (q('first_found', dict(
             files=[deploy_config_dir + '/icinga2/zones.d/master/openstack-services.conf'],
             skip=true)) | first) | default('', true) }}
-  when: inventory_hostname == ca_host
+  when: inventory_hostname in groups['master']
 
 - name: "Copy override -> zones.d/master/openstack-services.conf"
   ansible.builtin.copy:
@@ -1374,7 +1371,7 @@
     group: "{{ ic_uid }}"
     mode: "0640"
   when:
-    - inventory_hostname == ca_host
+    - inventory_hostname in groups['master']
     - _openstack_services_src | length > 0
   notify: Reload icinga2
 
@@ -1386,7 +1383,7 @@
     group: "{{ ic_uid }}"
     mode: "0640"
   when:
-    - inventory_hostname == ca_host
+    - inventory_hostname in groups['master']
     - _openstack_services_src | default('') | length == 0
   notify: Reload icinga2
 
@@ -1477,7 +1474,6 @@
       - "{{ icinga_etc_dir }}/icinga2/telegram-host-notification.sh:/usr/lib/nagios/custom-plugins/telegram-host-notification.sh:ro"
       - "{{ icinga_etc_dir }}/icinga2/telegram-service-notification.sh:/usr/lib/nagios/custom-plugins/telegram-service-notification.sh:ro"
       - "{{ icinga_etc_dir }}/icinga2/check_openstack_service.py:/usr/lib/nagios/custom-plugins/check_openstack_service.py:ro"
-      - "{{ icinga_etc_dir }}/icinga2/conf.d/openstack-checks.conf:/data/etc/icinga2/conf.d/openstack-checks.conf:ro"
 
 - name: "Xây list mount per-file: base config skeleton đã seed (mọi node)"
   ansible.builtin.set_fact:
@@ -1503,14 +1499,6 @@
       {{ _ic_dynamic_volumes +
          [icinga_etc_dir + '/icinga2/secret:' + icinga2_secret_container_dir + ':ro'] }}
   when: _ic_secret_enabled
-
-- name: "Xây list mount per-file: openstack-clouds.yaml (mọi node, chỉ khi có file — design.md 9.7)"
-  # Mount đúng path THẬT /data/etc/icinga2/... (giống mọi mount khác trong file này), KHÔNG mount
-  # qua symlink /etc/icinga2 -> /data/etc/icinga2 của image — script tự đọc "/etc/icinga2/conf.d/
-  # clouds.yaml" (theo đúng symlink đó lúc runtime), 2 đường dẫn trỏ về CÙNG 1 file vật lý.
-  ansible.builtin.set_fact:
-    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/openstack-clouds.yaml:/data/etc/icinga2/conf.d/clouds.yaml:ro'] }}"
-  when: _ic_openstack_clouds_stat.stat.exists
 
 # zones.d/<zone>/hosts.conf + zones.d/master/clients.conf chỉ THẬT SỰ tồn tại trên host này khi nó
 # LÀ ca_host (Ansible chỉ render ở đó — mọi node khác nhận nội dung qua chính cluster config-sync
@@ -1538,10 +1526,15 @@
     _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/hosts.conf:/data/etc/icinga2/zones.d/master/hosts.conf:ro'] }}"
   when: inventory_hostname == ca_host
 
-- name: "Xây list mount per-file: zones.d/master/openstack-services.conf (chỉ ca_host)"
+- name: "Xây list mount per-file: zones.d/master/openstack-services.conf (mọi master)"
   ansible.builtin.set_fact:
     _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/openstack-services.conf:/data/etc/icinga2/zones.d/master/openstack-services.conf:ro'] }}"
-  when: inventory_hostname == ca_host
+  when: inventory_hostname in groups['master']
+
+- name: "Xây list mount per-file: zones.d/master/openstack-checks.conf (mọi master)"
+  ansible.builtin.set_fact:
+    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/master/openstack-checks.conf:/data/etc/icinga2/zones.d/master/openstack-checks.conf:ro'] }}"
+  when: inventory_hostname in groups['master']
 
 # zones.d/master/telegram-notifications.conf — LUÔN tồn tại trên ca_host (role-owned, không phụ
 # thuộc cấu hình nào), giống zones.d/master/hosts.conf ở trên — mount luôn. Đặt CHÍNH TRONG
@@ -1577,6 +1570,48 @@
   notify: Reload icinga2
 
 # ---------- Chạy daemon ----------
+# One-time rolling migration: the previous release mounted CheckCommand from conf.d. A peer rejects
+# the new zone file while that old definition is still loaded (duplicate object), so detect the
+# actual legacy container mount, stop only that master, and remove only the two OpenStack API-cache
+# files now owned locally under zones.d/master. The other HA master remains healthy during this step.
+- name: Kiểm tra container Icinga 2 hiện tại để migrate CheckCommand OpenStack vào zone master
+  community.docker.docker_container_info:
+    name: icinga2
+  register: _ic_container_before_openstack_zone_migration
+  when: inventory_hostname in groups['master']
+
+- name: Xác định node còn dùng mount CheckCommand OpenStack cũ
+  ansible.builtin.set_fact:
+    _ic_openstack_zone_migration_required: >-
+      {{ (((_ic_container_before_openstack_zone_migration.container | default({}, true)).Mounts
+           | default([]))
+          | selectattr('Destination', 'equalto', '/data/etc/icinga2/conf.d/openstack-checks.conf')
+          | list | length) > 0 }}
+  when: inventory_hostname in groups['master']
+
+- name: Dừng rolling master còn dùng CheckCommand OpenStack cũ
+  community.docker.docker_container:
+    name: icinga2
+    state: stopped
+  when:
+    - inventory_hostname in groups['master']
+    - _ic_openstack_zone_migration_required | default(false)
+
+- name: Xóa riêng cache OpenStack cũ trước khi master dùng bản zones.d local
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ ic_data }}/var/lib/icinga2/api/zones/master/_etc/openstack-checks.conf"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones/master/_etc/openstack-services.conf"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones-stage/master/_etc/openstack-checks.conf"
+    - "{{ ic_data }}/var/lib/icinga2/api/zones-stage/master/_etc/openstack-services.conf"
+  loop_control:
+    label: "{{ item | basename }}"
+  when:
+    - inventory_hostname in groups['master']
+    - _ic_openstack_zone_migration_required | default(false)
+
 # icinga-ansible KHÔNG tự build image — "images.icinga2" đã tự chọn bản gốc (images_upstream) hay bản
 # custom (custom_image_registry + custom_image_overrides.icinga2, xem group_vars/all.yml + design.md
 # mục 9.6) tuỳ globals.yml, docker_container tự pull về nếu node chưa có, mọi role/task khác trong

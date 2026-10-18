@@ -93,9 +93,9 @@ ca_host:         "{{ (groups['master'] | default([]))[0] | default('') }}"   # m
 # --- Zone satellite (khai trong globals; rỗng ở P1) ---------------------------
 satellite_zones: []
 
-# OpenStack control-plane service checks are static Icinga objects in zones.d/master; Director is
-# deliberately not involved. Each entry represents one clouds.yaml profile and creates one logical
-# Host plus the selected Nova/Neutron/Cinder/Masakari Service objects.
+# OpenStack control-plane checks are static Icinga objects in zones.d/master; Director is deliberately
+# not involved. CheckCommand also lives in that zone. Credential must be supplied through the
+# group_master secret tier. Each entry creates one logical Host plus the selected Service objects.
 openstack_service_checks: []
 
 # --- Timezone hiển thị Icinga Web 2 (config.ini [global] timezone) ------------

@@ -109,9 +109,9 @@
     - not (_precheck_openstack_services_override.stat.isreg | default(false))
     - openstack_service_checks | default([]) | length > 0
 
-- name: Kiểm tra clouds.yaml trên deployment node khi bật OpenStack service status
+- name: Kiểm tra clouds.yaml thuộc tầng secret chỉ dành cho master
   ansible.builtin.stat:
-    path: "{{ deploy_config_dir }}/icinga2/openstack/clouds.yaml"
+    path: "{{ deploy_config_dir }}/icinga2/group_master/secret/clouds.yaml"
   delegate_to: localhost
   become: false
   run_once: true
@@ -120,14 +120,40 @@
     - not (_precheck_openstack_services_override.stat.isreg | default(false))
     - openstack_service_checks | default([]) | length > 0
 
+- name: Kiểm tra credential OpenStack không nằm ở đường dẫn có thể phát tán ngoài master
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ deploy_config_dir }}/icinga2/secret/clouds.yaml"
+    - "{{ deploy_config_dir }}/icinga2/openstack/clouds.yaml"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: _precheck_openstack_forbidden_clouds_files
+  when: openstack_service_checks | default([]) | length > 0
+
+- name: Chặn credential OpenStack ở tầng global hoặc đường dẫn cũ
+  ansible.builtin.assert:
+    that:
+      - >-
+        (_precheck_openstack_forbidden_clouds_files.results | default([])
+         | selectattr('stat.exists', 'equalto', true) | list | length) == 0
+    fail_msg: >-
+      Chỉ lưu credential OpenStack tại
+      {{ deploy_config_dir }}/icinga2/group_master/secret/clouds.yaml. Hãy xóa clouds.yaml khỏi
+      icinga2/secret (tầng global) và icinga2/openstack (đường dẫn cũ).
+  run_once: true
+  when: openstack_service_checks | default([]) | length > 0
+
 - name: Bắt buộc có clouds.yaml khi bật OpenStack service status
   ansible.builtin.assert:
     that:
       - _precheck_openstack_clouds_file.stat.exists | default(false)
       - _precheck_openstack_clouds_file.stat.isreg | default(false)
     fail_msg: >-
-      Phải tạo {{ deploy_config_dir }}/icinga2/openstack/clouds.yaml trên deployment node trước khi
-      khai openstack_service_checks.
+      Phải tạo {{ deploy_config_dir }}/icinga2/group_master/secret/clouds.yaml trên deployment node
+      trước khi khai openstack_service_checks. Không đặt credential này ở tầng secret global vì nó
+      chỉ được phép đồng bộ tới các node master.
   run_once: true
   when:
     - not (_precheck_openstack_services_override.stat.isreg | default(false))
@@ -138,11 +164,11 @@
     that:
       - >-
         item.cloud in
-        (((lookup('ansible.builtin.file', deploy_config_dir + '/icinga2/openstack/clouds.yaml')
+        (((lookup('ansible.builtin.file', deploy_config_dir + '/icinga2/group_master/secret/clouds.yaml')
            | from_yaml).clouds) | default({}))
     fail_msg: >-
-      Thiếu {{ deploy_config_dir }}/icinga2/openstack/clouds.yaml hoặc file không có profile
-      clouds.{{ item.cloud }} mà openstack_service_checks yêu cầu.
+      Thiếu {{ deploy_config_dir }}/icinga2/group_master/secret/clouds.yaml hoặc file không có
+      profile clouds.{{ item.cloud }} mà openstack_service_checks yêu cầu.
   loop: "{{ openstack_service_checks | default([]) }}"
   loop_control:
     label: "{{ item.cloud | default('<không cloud>') }}"

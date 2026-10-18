@@ -6,9 +6,10 @@
  * return UNKNOWN (missing binary) -- harmless if unused.
  *
  * Check script: /usr/lib/nagios/custom-plugins/check_openstack_service.py (roles/icinga2/files/).
+ * This file itself is stored in zones.d/master and distributed by Icinga cluster config-sync.
  * Credentials are NOT passed as CheckCommand vars -- the script reads a clouds.yaml-style file
- * (mounted read-only at /etc/icinga2/conf.d/clouds.yaml, synced from
- * deploy_config_dir/icinga2/openstack/clouds.yaml, design.md 9.7) and looks up the entry matching
+ * mounted read-only at /etc/icinga-ansible/icinga2/clouds.yaml from the master-only secret tier
+ * deploy_config_dir/icinga2/group_master/secret/clouds.yaml, and looks up the entry matching
  * "$openstack_cloud$". This keeps the CheckCommand generic across ANY number of clouds -- adding a
  * new cloud only means adding an entry to clouds.yaml + a Host/Service in zones.d, no code change.
  */
