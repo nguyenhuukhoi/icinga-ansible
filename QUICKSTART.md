@@ -321,12 +321,12 @@ luồng `prepare-check-by-ssh`), có thể đặt file trên deployment node the
 ├── secret/                         # global: mọi master, satellite và client
 │   ├── clouds.yaml
 │   └── nested/common-token
-├── master/secret/                  # chỉ các node trong group [master]
+├── group_master/secret/            # chỉ các node trong group [master]
 │   └── clouds.yaml                 # ghi đè file global cùng đường dẫn
-├── satellite/secret/               # chỉ các node trong group [satellite]
+├── group_satellite/secret/         # chỉ các node trong group [satellite]
 │   └── id_openstack_check
-└── master1/secret/                 # chỉ inventory host master1
-    └── clouds.yaml                 # ghi đè cả global và master trên master1
+└── master1/secret/                 # chỉ inventory host master1 (tên host, KHÔNG có group_)
+    └── clouds.yaml                 # ghi đè cả global và group_master trên master1
 ```
 
 Thứ tự trộn cố định là **global → loại node → host**. Việc ghi đè diễn ra theo đường dẫn tương đối của
