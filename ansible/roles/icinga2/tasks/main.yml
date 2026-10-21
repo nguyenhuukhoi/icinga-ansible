@@ -1503,6 +1503,20 @@
       template: master_hosts.conf.j2
   when: inventory_hostname == ca_host
 
+# Mọi file .conf operator tự thêm vào zones.d/<master zone>/ cũng được đẩy xuống + mount — xem
+# sync_zone_extra_conf.yml để biết vì sao cần (trước đây file ngoài danh sách cứng bị bỏ qua im lặng).
+- name: "Đồng bộ file .conf thêm ngoài trong zones.d/<master zone>"
+  ansible.builtin.include_tasks: sync_zone_extra_conf.yml
+  vars:
+    zx_zone: "{{ icinga_master_zone_name }}"
+    zx_managed:
+      - hosts.conf
+      - clients.conf
+      - openstack-checks.conf
+      - openstack-services.conf
+      - telegram-notifications.conf
+  when: inventory_hostname == ca_host
+
 # ---------- Host/Service monitor bởi zone satellite (zones.d/<zone>, chỉ render trên ca_host) ----------
 # Khác "client" ở trên (chạy trong zone master, command-endpoint): đây là Host/Service THẬT chạy BỞI
 # satellite (vd SSH ra host ngoài — design.md mục 9.4). Zone cha "master" đẩy config xuống zone con
@@ -1623,6 +1637,14 @@
 - name: "Xây mount Telegram notification của master zone (chỉ ca_host)"
   ansible.builtin.set_fact:
     _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/zones.d/' + icinga_master_zone_name + '/telegram-notifications.conf:/data/etc/icinga2/zones.d/' + icinga_master_zone_name + '/telegram-notifications.conf:ro'] }}"
+  when: inventory_hostname == ca_host
+
+# Mount cho mọi file .conf operator tự thêm vào zones.d/<zone>/ — danh sách do
+# sync_zone_extra_conf.yml gom lại cho CẢ master zone lẫn từng satellite zone. Thêm/bớt file làm tập
+# mount đổi, và "comparisons: volumes: strict" ở task khởi động container sẽ tự recreate để áp lại.
+- name: "Xây list mount per-file: .conf thêm ngoài trong zones.d (chỉ ca_host)"
+  ansible.builtin.set_fact:
+    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + (_ic_zone_extra_mounts | default([])) }}"
   when: inventory_hostname == ca_host
 
 - name: Bật các feature khai báo (idempotent)

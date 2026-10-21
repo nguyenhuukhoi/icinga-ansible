@@ -25,3 +25,10 @@
       zone: "{{ sat_zone.name }}"
       file: hosts.conf
       template: satellite_hosts.conf.j2
+
+# Zone satellite cũng nhận được file .conf tuỳ ý, giống master zone.
+- name: "Đồng bộ file .conf thêm ngoài trong zones.d/{{ sat_zone.name }}"
+  ansible.builtin.include_tasks: sync_zone_extra_conf.yml
+  vars:
+    zx_zone: "{{ sat_zone.name }}"
+    zx_managed: [hosts.conf]
