@@ -235,6 +235,7 @@
       register: _director_custom_variables_health
       changed_when: false
       when:
+        - icinga_manage_monitoring_config | bool
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
         - (director_managed_custom_variables | default([]) | length) > 0
@@ -258,6 +259,7 @@
       loop_control:
         label: "{{ item.name }}"
       when:
+        - icinga_manage_monitoring_config | bool
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
 
@@ -280,6 +282,7 @@
       register: _director_service_templates_health
       no_log: true
       when:
+        - icinga_manage_monitoring_config | bool
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
 
@@ -299,6 +302,7 @@
       loop_control:
         label: "{{ item.item.name }}"
       when:
+        - icinga_manage_monitoring_config | bool
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
 
@@ -316,6 +320,7 @@
       register: _director_apply_rules_health
       no_log: true
       when:
+        - icinga_manage_monitoring_config | bool
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
         - (director_managed_service_apply_rules | default([]) | length) > 0
@@ -349,6 +354,7 @@
       loop_control:
         label: "{{ item.name }}"
       when:
+        - icinga_manage_monitoring_config | bool
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
 
@@ -374,6 +380,7 @@
       changed_when: false
       failed_when: false
       when:
+        - icinga_manage_monitoring_config | bool
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
 
@@ -387,6 +394,7 @@
       loop_control:
         label: "{{ item.item.0.name }}/{{ item.item.1 }}"
       when:
+        - icinga_manage_monitoring_config | bool
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
 
