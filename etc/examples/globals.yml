@@ -108,20 +108,6 @@ enable_icinga2_integration_features: []
 # giữ tên "master" vì đó là vai trò Ansible, không phải tên Icinga Zone.
 icinga_master_zone_name: "master"
 
-# Ranh giới giữa TẦNG CLUSTER và NỘI DUNG MONITORING (2026-10-21).
-#   true  (mặc định) — tool sinh luôn Host/Service/CheckCommand/Notification: zones.d/<zone>/
-#         hosts.conf, clients.conf, openstack-checks.conf, openstack-services.conf,
-#         telegram-notifications.conf, conf.d/custom-commands.conf, conf.d/ssh-checks.conf, và
-#         quản lý object trong Director (director_managed_*).
-#   false — tool CHỈ lo tầng cluster: zones.conf, constants.conf, api-users.conf,
-#         features-available/icingadb.conf, resources.ini, server.cnf, PKI/enrollment,
-#         Endpoint/Zone của Director, mount per-file, lifecycle container. Toàn bộ nội dung
-#         monitoring do BẠN khai: đặt file .conf của bạn vào
-#         config/icinga2/zones.d/<zone>/ — tool copy xuống node, mount read-only, và dọn khi bạn
-#         xoá nguồn. director_config không chạy; prechecks bỏ phần openstack_service_checks.
-#         conf.d/custom-commands.conf và conf.d/ssh-checks.conf vẫn được seed MỘT LẦN vì
-#         icinga2.conf có dòng include tường minh — thiếu file là Icinga fail khi load config.
-icinga_manage_monitoring_config: true
 
 # Master zone — tên lấy từ icinga_master_zone_name, thành viên TỰ SINH từ inventory nhóm
 # [master] (mỗi host -> 1 Endpoint, tất cả gộp vào đúng 1 zone trong zones.conf, xem design.md mục
@@ -196,28 +182,6 @@ icinga2_secret_container_dir: "/etc/icinga-ansible/icinga2"
 # gọi từ Icinga master qua check_by_ssh. Opt-in để không thay đổi host của deployment hiện hữu.
 enable_check_by_ssh_target_plugins: false
 
-# OpenStack API service status (KHÔNG qua Director). Credential chỉ dành cho master, đặt tại
-# config/icinga2/group_master/secret/clouds.yaml; `cloud` phải khớp tên dưới `clouds:`.
-# CheckCommand, Host và Service đều được render vào zones.d/master để hai master HA tự phân công check.
-openstack_service_checks: []
-# openstack_service_checks:
-#   - name: "openstack-production"
-#     display_name: "OpenStack Production"
-#     cloud: "production"
-#     services: [nova, neutron, cinder]
-#     check_interval: 60       # giây
-#     retry_interval: 30       # giây
-#     max_check_attempts: 3
-
-# Object do Director quản lý. Để rỗng mặc định; inventory/extra-vars của từng môi trường mới khai.
-# Mẫu đầy đủ cho OpenStack + custom vars xem:
-# ansible/inventory/openstack-cluster-director-extra.yml
-director_managed_hosts: []
-director_managed_services: []                    # service gắn trực tiếp từng host (chỉ dùng khi thật sự cần)
-director_managed_custom_variables: []             # schema biến có kiểu/label; UUID phải ổn định qua backup/restore
-director_managed_service_templates: []            # default và ô nhập Custom Variables cho Apply Rule
-director_managed_service_apply_rules: []         # khuyến nghị cho check dùng chung nhiều host
-director_managed_direct_services_absent: []      # tên service trực tiếp cũ cần xoá khi chuyển sang Apply Rule
 
 # (nâng cao) version module web đi THEO image icingaweb2 (module build sẵn trong image) — thường
 # để trống. Chỉ khai nếu muốn nạp chồng 1 module bản khác image (P6, chưa hiện thực).

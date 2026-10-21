@@ -10,31 +10,3 @@ enable_icingaweb2_modules:
 
 # Cài bộ plugin CPU/RAM/disk trên host đích để Director gọi qua check_by_ssh.
 enable_check_by_ssh_target_plugins: true
-
-# Các object này được lưu trong Director DB, không render vào hosts.conf tĩnh.
-director_managed_hosts:
-  - { name: "icinga5-master1", address: "172.28.82.170", display_name: "Icinga master 1", vars: { monitor_linuxfabrik: true } }
-  - { name: "icinga5-master2", address: "172.28.82.171", display_name: "Icinga master 2", vars: { monitor_linuxfabrik: true } }
-  - { name: "icinga5-db1", address: "172.28.82.172", display_name: "Galera DB 1", vars: { monitor_linuxfabrik: true } }
-  - { name: "icinga5-db2", address: "172.28.82.173", display_name: "Galera DB 2", vars: { monitor_linuxfabrik: true } }
-  - { name: "icinga5-db3", address: "172.28.82.174", display_name: "Galera DB 3", vars: { monitor_linuxfabrik: true } }
-
-director_managed_custom_variables:
-  - { name: "lfmp_cpu_warn", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5501", type: "number", label: "CPU warning (%)", description: "Linuxfabrik CPU warning threshold in percent" }
-  - { name: "lfmp_cpu_crit", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5502", type: "number", label: "CPU critical (%)", description: "Linuxfabrik CPU critical threshold in percent" }
-  - { name: "lfmp_memory_warn", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5503", type: "number", label: "RAM warning (%)", description: "Linuxfabrik memory warning threshold in percent" }
-  - { name: "lfmp_memory_crit", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5504", type: "number", label: "RAM critical (%)", description: "Linuxfabrik memory critical threshold in percent" }
-  - { name: "lfmp_disk_warn", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5505", type: "number", label: "Disk warning (%)", description: "Linuxfabrik disk warning threshold in percent" }
-  - { name: "lfmp_disk_crit", uuid: "7ae6c919-40f8-5fc2-8b2d-e1455dfc5506", type: "number", label: "Disk critical (%)", description: "Linuxfabrik disk critical threshold in percent" }
-
-director_managed_service_templates:
-  - { name: "Linuxfabrik CPU defaults", check_command: "by_ssh_lfmp_cpu", vars: { lfmp_cpu_warn: 80, lfmp_cpu_crit: 90 } }
-  - { name: "Linuxfabrik RAM defaults", check_command: "by_ssh_lfmp_memory", vars: { lfmp_memory_warn: 90, lfmp_memory_crit: 95 } }
-  - { name: "Linuxfabrik Disk defaults", check_command: "by_ssh_lfmp_disk", vars: { lfmp_disk_warn: 90, lfmp_disk_crit: 95 } }
-
-director_managed_service_apply_rules:
-  - { name: "CPU", check_command: "by_ssh_lfmp_cpu", assign_filter: "host.vars.monitor_linuxfabrik=true", imports: ["Linuxfabrik CPU defaults"], vars: { ssh_user: "icinga-monitor" } }
-  - { name: "RAM", check_command: "by_ssh_lfmp_memory", assign_filter: "host.vars.monitor_linuxfabrik=true", imports: ["Linuxfabrik RAM defaults"], vars: { ssh_user: "icinga-monitor" } }
-  - { name: "Disk", check_command: "by_ssh_lfmp_disk", assign_filter: "host.vars.monitor_linuxfabrik=true", imports: ["Linuxfabrik Disk defaults"], vars: { ssh_user: "icinga-monitor" } }
-
-director_managed_direct_services_absent: [CPU, RAM, Disk]

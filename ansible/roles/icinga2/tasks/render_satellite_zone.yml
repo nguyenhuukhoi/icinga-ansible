@@ -3,7 +3,7 @@
 # Tham số: sat_zone (1 phần tử của satellite_zones, có .name).
 #
 # 2026-10-18: file này giờ đi qua DEPLOYMENT NODE trước, giống mọi config theo zone khác — xem
-# render_zone_config_item.yml để biết quy tắc seed/marker/sở hữu. Tầng override first_found cũ đã bỏ:
+# sync_zone_extra_conf.yml. Tool KHÔNG sinh nội dung monitoring; file .conf là của operator.
 # "override" bây giờ chính là sửa thẳng file tại deploy_config_dir rồi xoá dòng marker.
 #
 # Thư mục đích trên node đích vẫn phải là .../zones.d/{{ sat_zone.name }}/hosts.conf (Icinga2 tự quét
@@ -18,18 +18,8 @@
     group: "{{ ic_uid }}"
     mode: "0750"
 
-- name: "Render hosts.conf cho zone {{ sat_zone.name }} (qua deployment node)"
-  ansible.builtin.include_tasks: render_zone_config_item.yml
-  vars:
-    zcfg:
-      zone: "{{ sat_zone.name }}"
-      file: hosts.conf
-      template: satellite_hosts.conf.j2
-  when: icinga_manage_monitoring_config | bool
-
 # Zone satellite cũng nhận được file .conf tuỳ ý, giống master zone.
-- name: "Đồng bộ file .conf thêm ngoài trong zones.d/{{ sat_zone.name }}"
+- name: "Đồng bộ file .conf của operator trong zones.d/{{ sat_zone.name }}"
   ansible.builtin.include_tasks: sync_zone_extra_conf.yml
   vars:
     zx_zone: "{{ sat_zone.name }}"
-    zx_managed: "{{ ['hosts.conf'] if icinga_manage_monitoring_config | bool else [] }}"

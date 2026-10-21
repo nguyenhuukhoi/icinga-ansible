@@ -148,18 +148,6 @@
     - role: icingaweb2
       tags: [web, deploy]
 
-# --- 6b. Object CPU/RAM/disk trong Director DB (không dùng config Host/Service tĩnh) ---
-- name: Configure Director-managed monitoring objects
-  hosts: "{{ groups['master'][0] | default('localhost') }}"
-  become: true
-  gather_facts: false
-  roles:
-    - role: director_config
-      tags: [director-config, deploy]
-      when:
-        - "'director' in (enable_icingaweb2_modules | default([]))"
-        - icinga_manage_monitoring_config | bool
-
 # --- 7. Load balancer / VIP (chỉ khi HA, P2) ---------------------------------
 # BUG THẬT (đọc trước khi thêm lại "when: master_count > 1"): role loadbalancer là stub CỐ Ý fail
 # cứng bất cứ khi nào [loadbalancer] có host (xem roles/loadbalancer/tasks/main.yml — "Không thể báo

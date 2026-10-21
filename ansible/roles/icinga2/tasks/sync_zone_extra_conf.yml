@@ -11,8 +11,6 @@
 #
 # Tham số:
 #   zx_zone     tên Icinga Zone (= tên thư mục con dưới zones.d/)
-#   zx_managed  danh sách tên file do CHÍNH role sinh ra cho zone này — không coi là "thêm ngoài",
-#               vì chúng đã có đường đi riêng qua render_zone_config_item.yml.
 #
 # Chỉ gọi trên ca_host: Ansible chỉ render zones.d ở đó, các node cùng zone nhận nội dung qua chính
 # cluster config-sync của Icinga 2 (mount một source không tồn tại sẽ làm docker_container lỗi).
@@ -29,20 +27,20 @@
   become: false
   register: _zx_src
 
-- name: "Chốt danh sách .conf thêm ngoài của zones.d/{{ zx_zone }}"
+- name: "Chốt danh sách .conf của operator trong zones.d/{{ zx_zone }}"
   ansible.builtin.set_fact:
     _zx_extra: >-
       {{ (_zx_src.files | default([])) | map(attribute='path') | map('basename')
-         | reject('in', zx_managed) | sort | list }}
+          | sort | list }}
 
-- name: "Báo các file .conf thêm ngoài sẽ được đẩy xuống zones.d/{{ zx_zone }}"
+- name: "Báo các file .conf của operator sẽ được đẩy xuống zones.d/{{ zx_zone }}"
   ansible.builtin.debug:
     msg: >-
-      zones.d/{{ zx_zone }}: ngoài file role tự sinh, còn {{ _zx_extra | length }} file do bạn tự
+      zones.d/{{ zx_zone }}: {{ _zx_extra | length }} file do bạn tự
       thêm sẽ được đẩy xuống và mount: {{ _zx_extra | join(', ') }}
   when: _zx_extra | length > 0
 
-- name: "Đẩy file .conf thêm ngoài xuống zones.d/{{ zx_zone }}"
+- name: "Đẩy file .conf của operator xuống zones.d/{{ zx_zone }}"
   ansible.builtin.copy:
     src: "{{ deploy_config_dir }}/icinga2/zones.d/{{ zx_zone }}/{{ item }}"
     dest: "{{ icinga_etc_dir }}/icinga2/zones.d/{{ zx_zone }}/{{ item }}"
@@ -53,7 +51,7 @@
   loop_control: { label: "{{ zx_zone }}/{{ item }}" }
   notify: Reload icinga2
 
-- name: "Gom mount per-file cho .conf thêm ngoài của zones.d/{{ zx_zone }}"
+- name: "Gom mount per-file cho .conf của operator trong zones.d/{{ zx_zone }}"
   ansible.builtin.set_fact:
     _ic_zone_extra_mounts: >-
       {{ (_ic_zone_extra_mounts | default([]))
@@ -77,6 +75,6 @@
     state: absent
   loop: >-
     {{ (_zx_node.files | default([])) | map(attribute='path') | map('basename')
-       | reject('in', zx_managed + _zx_extra) | sort | list }}
+       | reject('in', _zx_extra) | sort | list }}
   loop_control: { label: "{{ zx_zone }}/{{ item }}" }
   notify: Reload icinga2
