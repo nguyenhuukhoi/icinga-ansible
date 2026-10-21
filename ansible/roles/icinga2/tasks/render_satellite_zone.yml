@@ -25,10 +25,11 @@
       zone: "{{ sat_zone.name }}"
       file: hosts.conf
       template: satellite_hosts.conf.j2
+  when: icinga_manage_monitoring_config | bool
 
 # Zone satellite cũng nhận được file .conf tuỳ ý, giống master zone.
 - name: "Đồng bộ file .conf thêm ngoài trong zones.d/{{ sat_zone.name }}"
   ansible.builtin.include_tasks: sync_zone_extra_conf.yml
   vars:
     zx_zone: "{{ sat_zone.name }}"
-    zx_managed: [hosts.conf]
+    zx_managed: "{{ ['hosts.conf'] if icinga_manage_monitoring_config | bool else [] }}"

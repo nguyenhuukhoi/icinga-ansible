@@ -198,6 +198,7 @@
   when:
     - _precheck_use_generated_openstack_services | bool
     - openstack_service_checks | default([]) | length > 0
+    - icinga_manage_monitoring_config | bool
 
 - name: Kiểm tra clouds.yaml thuộc tầng secret chỉ dành cho master
   ansible.builtin.stat:
@@ -209,6 +210,7 @@
   when:
     - _precheck_use_generated_openstack_services | bool
     - openstack_service_checks | default([]) | length > 0
+    - icinga_manage_monitoring_config | bool
 
 - name: Kiểm tra credential OpenStack không nằm ở đường dẫn có thể phát tán ngoài master
   ansible.builtin.stat:
@@ -226,6 +228,7 @@
   when:
     - _precheck_use_generated_openstack_services | bool
     - openstack_service_checks | default([]) | length > 0
+    - icinga_manage_monitoring_config | bool
 
 - name: Chặn credential OpenStack ở tầng global hoặc đường dẫn cũ
   ansible.builtin.assert:
@@ -241,6 +244,7 @@
   when:
     - _precheck_use_generated_openstack_services | bool
     - openstack_service_checks | default([]) | length > 0
+    - icinga_manage_monitoring_config | bool
 
 - name: Bắt buộc có clouds.yaml khi bật OpenStack service status
   ansible.builtin.assert:
@@ -255,6 +259,7 @@
   when:
     - _precheck_use_generated_openstack_services | bool
     - openstack_service_checks | default([]) | length > 0
+    - icinga_manage_monitoring_config | bool
 
 - name: Bắt buộc clouds.yaml có đúng cloud profile đã khai
   ansible.builtin.assert:
@@ -273,6 +278,7 @@
   when:
     - _precheck_use_generated_openstack_services | bool
     - openstack_service_checks | default([]) | length > 0
+    - icinga_manage_monitoring_config | bool
     - _precheck_openstack_clouds_file.stat.exists | default(false)
 
 - name: Tên tài khoản quản trị Icinga Web phải an toàn khi ghi vào SQL

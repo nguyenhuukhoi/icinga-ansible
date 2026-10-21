@@ -94,6 +94,26 @@ ca_host:         "{{ (groups['master'] | default([]))[0] | default('') }}"   # m
 # là [master]; chỉ tên object Zone/path zones.d thay đổi theo biến này.
 icinga_master_zone_name: "master"
 
+# icinga_manage_monitoring_config (2026-10-21, yêu cầu người dùng): phân ranh giới giữa TẦNG CLUSTER
+# và NỘI DUNG MONITORING.
+#
+#   true  (mặc định, hành vi cũ) — tool sinh luôn cả nội dung monitoring: zones.d/<zone>/hosts.conf,
+#         clients.conf, openstack-checks.conf, openstack-services.conf, telegram-notifications.conf,
+#         conf.d/custom-commands.conf, conf.d/ssh-checks.conf, và quản lý object trong Director.
+#
+#   false — tool CHỈ lo tầng cluster: zones.conf, constants.conf (ZoneName/TicketSalt), api-users.conf,
+#         features-available/icingadb.conf, resources.ini, server.cnf, PKI/enrollment, Endpoint/Zone
+#         của Director, mount per-file và lifecycle container. Toàn bộ Host/Service/CheckCommand/
+#         Notification do BẠN tự khai: đặt file .conf của bạn vào
+#         deploy_config_dir/icinga2/zones.d/<zone>/ — tool copy xuống node, mount read-only và dọn
+#         file mồ côi khi bạn xoá nguồn (xem roles/icinga2/tasks/sync_zone_extra_conf.yml).
+#         Role director_config cũng không chạy, và prechecks bỏ phần openstack_service_checks.
+#
+# Hai file conf.d/custom-commands.conf và conf.d/ssh-checks.conf được seed ĐÚNG MỘT LẦN kể cả khi
+# tắt, vì icinga2.conf có dòng "include" tường minh tới chúng — thiếu file là Icinga fail khi load
+# config. Sau lần seed đó tool không đụng nữa, bạn sửa thoải mái.
+icinga_manage_monitoring_config: true
+
 # --- Zone satellite (khai trong globals; rỗng ở P1) ---------------------------
 satellite_zones: []
 

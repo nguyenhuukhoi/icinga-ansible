@@ -108,6 +108,21 @@ enable_icinga2_integration_features: []
 # giữ tên "master" vì đó là vai trò Ansible, không phải tên Icinga Zone.
 icinga_master_zone_name: "master"
 
+# Ranh giới giữa TẦNG CLUSTER và NỘI DUNG MONITORING (2026-10-21).
+#   true  (mặc định) — tool sinh luôn Host/Service/CheckCommand/Notification: zones.d/<zone>/
+#         hosts.conf, clients.conf, openstack-checks.conf, openstack-services.conf,
+#         telegram-notifications.conf, conf.d/custom-commands.conf, conf.d/ssh-checks.conf, và
+#         quản lý object trong Director (director_managed_*).
+#   false — tool CHỈ lo tầng cluster: zones.conf, constants.conf, api-users.conf,
+#         features-available/icingadb.conf, resources.ini, server.cnf, PKI/enrollment,
+#         Endpoint/Zone của Director, mount per-file, lifecycle container. Toàn bộ nội dung
+#         monitoring do BẠN khai: đặt file .conf của bạn vào
+#         config/icinga2/zones.d/<zone>/ — tool copy xuống node, mount read-only, và dọn khi bạn
+#         xoá nguồn. director_config không chạy; prechecks bỏ phần openstack_service_checks.
+#         conf.d/custom-commands.conf và conf.d/ssh-checks.conf vẫn được seed MỘT LẦN vì
+#         icinga2.conf có dòng include tường minh — thiếu file là Icinga fail khi load config.
+icinga_manage_monitoring_config: true
+
 # Master zone — tên lấy từ icinga_master_zone_name, thành viên TỰ SINH từ inventory nhóm
 # [master] (mỗi host -> 1 Endpoint, tất cả gộp vào đúng 1 zone trong zones.conf, xem design.md mục
 # 9.1). Vd inventory có master1+master2 và giữ giá trị mặc định -> zones.conf tự có Zone "master"
