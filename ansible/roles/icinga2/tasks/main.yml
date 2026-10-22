@@ -359,12 +359,32 @@
 
 # Renaming the parent zone of a running cluster is a topology migration, not a normal reconfigure:
 # Director external objects and received zone caches still reference the old name. Permit any valid
-# name on a fresh deployment, but fail before overwriting an already-rendered master identity.
+# name on a fresh deployment, but fail before overwriting an enrolled master identity. A base-image
+# constants.conf alone does not prove enrollment: destroy removes PKI, then deploy seeds that file
+# before node setup. Gate on the node certificate so destroy -> deploy is treated as a new cluster.
+- name: Kiểm tra master đã có identity PKI hay chưa
+  ansible.builtin.stat:
+    path: "{{ ic_data }}/var/lib/icinga2/certs/{{ inventory_hostname }}.crt"
+  register: _ic_existing_master_identity
+  when: inventory_hostname in groups['master']
+
 - name: Kiểm tra ZoneName đã render trên master
   ansible.builtin.stat:
     path: "{{ icinga_etc_dir }}/icinga2/constants.conf"
   register: _ic_existing_master_constants
-  when: inventory_hostname in groups['master']
+  when:
+    - inventory_hostname in groups['master']
+    - _ic_existing_master_identity.stat.exists | default(false)
+
+- name: Validate config hiện tại và tạo cache biến trước khi đọc ZoneName
+  ansible.builtin.command: "{{ ic_run }} icinga2 daemon -C"
+  register: _ic_existing_master_config_check
+  changed_when: false
+  failed_when: false
+  when:
+    - inventory_hostname in groups['master']
+    - _ic_existing_master_identity.stat.exists | default(false)
+    - _ic_existing_master_constants.stat.exists | default(false)
 
 - name: Đọc ZoneName hiệu lực bằng chính Icinga 2 trước khi reconfigure master
   ansible.builtin.command: "{{ ic_run }} icinga2 variable get ZoneName"
@@ -373,23 +393,29 @@
   failed_when: false
   when:
     - inventory_hostname in groups['master']
+    - _ic_existing_master_identity.stat.exists | default(false)
     - _ic_existing_master_constants.stat.exists | default(false)
+    - _ic_existing_master_config_check.rc | default(1) == 0
 
 - name: Chặn đổi tên master zone ngầm trên cluster đang chạy
   ansible.builtin.assert:
     that:
-      - _ic_existing_master_zone_result.rc == 0
-      - _ic_existing_master_zone_result.stdout | trim | length > 0
-      - _ic_existing_master_zone_result.stdout | trim == icinga_master_zone_name
+      - _ic_existing_master_config_check.rc | default(1) == 0
+      - _ic_existing_master_zone_result.rc | default(1) == 0
+      - _ic_existing_master_zone_result.stdout | default('') | trim | length > 0
+      - _ic_existing_master_zone_result.stdout | default('') | trim == icinga_master_zone_name
     fail_msg: >-
       Master này có ZoneName
       {{ (_ic_existing_master_zone_result.stdout | default('') | trim)
-         or ('<không đọc được: ' ~ (_ic_existing_master_zone_result.stderr | default('') | trim) ~ '>') }},
+         or ('<không đọc được: ' ~
+             ((_ic_existing_master_config_check.stderr | default('') | trim)
+              or (_ic_existing_master_zone_result.stderr | default('') | trim)) ~ '>') }},
       khác giá trị yêu cầu '{{ icinga_master_zone_name }}'. Hãy chạy qua tools/icinga-ansible để nạp
       /etc/icinga-ansible/globals.yml và giữ nguyên tên zone hiện tại; không đổi
       icinga_master_zone_name bằng reconfigure. Đổi tên cần quy trình migration topology riêng.
   when:
     - inventory_hostname in groups['master']
+    - _ic_existing_master_identity.stat.exists | default(false)
     - _ic_existing_master_constants.stat.exists | default(false)
 
 # ---------- Bootstrap master (chỉ ca_host, chỉ lần đầu) ----------
