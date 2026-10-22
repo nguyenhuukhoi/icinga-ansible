@@ -15,8 +15,8 @@
     ic_etc: "{{ icinga_base_dir }}/icinga2/data/etc/icinga2"
     # Đây là cây config chính thức trên host; container mount nguyên thư mục RW.
     ic_config_dir: "{{ icinga_etc_dir }}/icinga2"
-    # Credential local của master; không đọc/copy từ deployment node.
-    ic_master_secrets_dir: "{{ icinga_etc_dir }}/config/icinga2/secrets"
+    # Credential local nằm ngay trong cây config chính thức đã được mount nguyên thư mục.
+    ic_master_secrets_dir: "{{ icinga_etc_dir }}/icinga2/secrets"
 
 # Mọi lệnh bootstrap/verify bên dưới đều chạy bằng image đích. Nếu image chưa có
 # và registry tạm lỗi, `docker run` trả rc=125; tuyệt đối không được hiểu đó là
@@ -182,8 +182,8 @@
       - conf.d/ssh-checks.conf
       # Legacy role-authored monitoring files are deliberately never mounted.
       - conf.d/openstack-checks.conf
-      # Đường credential cũ. clouds.yaml hiện đi qua secret/master và được mount tại
-      # /etc/icinga-ansible/icinga2/clouds.yaml, không còn nằm dưới conf.d.
+      # Đường credential cũ. clouds.yaml hiện nằm tại secrets/clouds.yaml trong cây config chính thức,
+      # tương ứng /data/etc/icinga2/secrets/clouds.yaml trong container.
       - conf.d/clouds.yaml
       # Artifact top-level của cơ chế credential cũ. Task migration phía dưới xóa file này sau bước
       # scan, nên phải exclude ngay tại đây để danh sách mount không giữ một source vừa bị xóa.
@@ -1103,13 +1103,6 @@
     _ic_dynamic_volumes: >-
       {{ _ic_dynamic_volumes +
          [ic_config_dir + '/custom-plugins:/usr/lib/nagios/custom-plugins:rw'] }}
-
-- name: "Mount trực tiếp credential local của master vào container Icinga 2"
-  ansible.builtin.set_fact:
-    _ic_dynamic_volumes: >-
-      {{ _ic_dynamic_volumes +
-         [ic_master_secrets_dir + ':/etc/icinga-ansible/icinga2:rw'] }}
-  when: inventory_hostname in groups['master']
 
 - name: Bật các feature khai báo (idempotent)
   # Satellite KHÔNG có Redis cục bộ (chỉ master mới chạy icingadb-redis) -> loại 'icingadb' khỏi

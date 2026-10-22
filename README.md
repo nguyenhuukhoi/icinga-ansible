@@ -21,8 +21,8 @@ Icinga tự config-sync sang master peer. Đây là đồng bộ nội bộ củ
 ghi đè `zones.d`.
 
 Credential của plugin chạy trên master được operator đặt trực tiếp trên từng master tại
-`/etc/icinga-ansible/config/icinga2/secrets/`. Role chỉ tạo và bind-mount nguyên thư mục local này
-vào container; không đọc hoặc sao chép secret từ deployment node.
+`/etc/icinga-ansible/icinga2/secrets/`. Thư mục này nằm sẵn trong cây config chính thức đang được
+bind-mount RW vào `/data/etc/icinga2`, nên không có volume riêng và không sao chép secret qua node khác.
 
 ## Cấu trúc
 

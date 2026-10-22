@@ -131,8 +131,9 @@ trong `zones.d`. Đặc biệt, `/etc/icinga-ansible/config/icinga2/zones.d` tr�
 còn là nguồn cấu hình và nội dung đặt tại đó sẽ bị bỏ qua. Operator phải dùng quy trình triển khai
 riêng nếu không dùng Director.
 
-Credential API không đi qua deployment node. Trên mỗi master, role tạo và mount trực tiếp thư mục local
-`/etc/icinga-ansible/config/icinga2/secrets/`; Ansible không đọc, copy, merge hoặc xoá file bên trong.
+Credential API là local trên từng master. Role tạo thư mục
+`/etc/icinga-ansible/icinga2/secrets/` ngay trong cây config chính thức đã được mount RW vào container;
+không cần volume riêng và Ansible không đọc, copy, merge hoặc xoá file bên trong.
 
 ### Monitor Nova/Cinder/Neutron bằng static file, thực thi HA từ hai master
 
@@ -141,10 +142,10 @@ Luồng này không dùng Director. Deployment node không đọc hoặc đồng
 `clouds.yaml` trực tiếp vào thư mục local:
 
 ```bash
-sudo install -d -o 5665 -g 5665 -m 0700 /etc/icinga-ansible/config/icinga2/secrets
+sudo install -d -o 5665 -g 5665 -m 0700 /etc/icinga-ansible/icinga2/secrets
 sudo install -o 5665 -g 5665 -m 0600 /path/to/clouds.yaml \
-  /etc/icinga-ansible/config/icinga2/secrets/clouds.yaml
-docker exec icinga2 test -r /etc/icinga-ansible/icinga2/clouds.yaml
+  /etc/icinga-ansible/icinga2/secrets/clouds.yaml
+docker exec icinga2 test -r /data/etc/icinga2/secrets/clouds.yaml
 ```
 
 Bind mount là RW và trực tiếp: sửa file trên master được thấy ngay trong container, không cần chạy
@@ -156,7 +157,7 @@ install -m 0755 examples/openstack-file-monitoring/check_openstack_service.py \
   /etc/icinga-ansible/config/icinga2/custom-plugins/check_openstack_service.py
 ```
 
-Plugin đọc file local trong container tại `/etc/icinga-ansible/icinga2/clouds.yaml`; vì vậy khi một
+Plugin đọc file local trong container tại `/data/etc/icinga2/secrets/clouds.yaml`; vì vậy khi một
 controller hỏng, check vẫn chạy nếu OpenStack API/VIP còn hoạt động. Từ deployment node, thực hiện
 một lần các lệnh operator sau để đặt file vào đúng zone trên `master1` (không copy lên master2 và không
 được `reconfigure` quản lý lại):

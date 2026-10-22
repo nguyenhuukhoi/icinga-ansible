@@ -11,7 +11,7 @@ OK = 0
 WARNING = 1
 CRITICAL = 2
 UNKNOWN = 3
-DEFAULT_CONFIG = "/etc/icinga-ansible/icinga2/clouds.yaml"
+DEFAULT_CONFIG = "/data/etc/icinga2/secrets/clouds.yaml"
 SERVICE_ALIASES = {
     "nova": "compute",
     "cinder": "volume",

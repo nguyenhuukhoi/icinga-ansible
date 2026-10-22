@@ -90,9 +90,9 @@ deployment node ghi đè monitoring config. Cây config được mount nguyên t
 ### 9.4. SSH và secret
 
 SSH key và plugin hiện vẫn dùng kênh operator hiện hữu. Riêng credential API trên master hoàn toàn
-local: role tạo `/etc/icinga-ansible/config/icinga2/secrets` trên từng master và bind-mount RW vào
-`/etc/icinga-ansible/icinga2` trong container. Role không đọc, copy, merge hoặc xoá file trong thư mục
-này; sửa file trên host được container thấy ngay.
+local: role tạo `/etc/icinga-ansible/icinga2/secrets` trên từng master. Thư mục này thuộc cây config
+đã bind-mount RW nguyên khối vào `/data/etc/icinga2`, nên không cần mount riêng. Role không đọc, copy,
+merge hoặc xoá file trong thư mục này; sửa file trên host được container thấy ngay.
 
 ### 9.6. Custom image
 
