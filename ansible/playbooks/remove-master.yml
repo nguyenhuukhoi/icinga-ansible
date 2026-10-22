@@ -84,7 +84,7 @@
       ansible.builtin.file:
         path: "{{ icinga_etc_dir }}/{{ item }}"
         state: absent
-      loop: [icinga2, icingadb, icingaweb2]
+      loop: [icinga2, icingadb-redis, icingadb, icingaweb2]
 
 - name: Nhắc việc còn lại (đọc kỹ trước khi coi remove-master đã xong)
   hosts: localhost

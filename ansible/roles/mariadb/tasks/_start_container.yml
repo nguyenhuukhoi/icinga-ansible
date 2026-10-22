@@ -58,8 +58,12 @@
       MARIADB_AUTO_UPGRADE: "1"
     stop_timeout: 60
     volumes:
-      - "{{ mariadb_data }}:/var/lib/mysql"
-      - "{{ mariadb_etc }}/server.cnf:/etc/mysql/mariadb.conf.d/99-icinga.cnf:rw"
+      - "{{ mariadb_data }}:/var/lib/mysql:rw"
+      # Mount nguyên cây do operator quản lý vào conf.d; giữ nguyên defaults baked trong
+      # /etc/mysql/mariadb.conf.d của image và để mọi file *.cnf mới tự được nạp.
+      - "{{ mariadb_etc }}:/etc/mysql/conf.d:rw"
+    comparisons:
+      volumes: strict
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s

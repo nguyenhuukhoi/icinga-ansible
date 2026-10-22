@@ -2,22 +2,24 @@
 # Role icingaweb2: Apache2 + Icinga Web 2, module Icinga DB Web + admin.
 # Xử lý module theo 3 loại A/B/C (module_catalog). P1 tập trung icingadb (B).
 #
-# MÔ HÌNH IMAGE (icinga/icingaweb2): state dưới /data (/etc/icingaweb2 -> /data/etc/icingaweb2),
-#   container chạy uid 33 (www-data). => mount host /data, config dưới /data/etc/icingaweb2 sở hữu 33.
+# MÔ HÌNH IMAGE (icinga/icingaweb2): runtime dưới /data; cây config chính thức trên host được mount
+#   lồng vào /data/etc/icingaweb2 với RW và sở hữu uid 33 (www-data).
 #   entrypoint là binary compiled => lệnh one-off phải override entrypoint (icingacli/cat).
 
 - name: Hằng số đường dẫn web + uid
   ansible.builtin.set_fact:
     web_base: "{{ icinga_base_dir }}/icingaweb2"
     web_data: "{{ icinga_base_dir }}/icingaweb2/data"
-    web_etc: "{{ icinga_base_dir }}/icingaweb2/data/etc/icingaweb2"
+    web_legacy_etc: "{{ icinga_base_dir }}/icingaweb2/data/etc/icingaweb2"
+    web_etc: "{{ icinga_etc_dir }}/icingaweb2"
     web_uid: "33"        # www-data trong image
-    # Chỉ mount /data — ĐỦ cho "module enable" (chỉ tạo symlink enabledModules/, không đọc config
-    # resource nào). KHÔNG dùng biến này cho lệnh cần đọc config thật (vd director migration) — xem
-    # "web_run_full" riêng trong module-director.yml, lý do ở comment tại đó.
-    web_run: "docker run --rm -v {{ icinga_base_dir }}/icingaweb2/data:/data --entrypoint icingacli {{ images.icingaweb2 }}"
+    web_run: >-
+      docker run --rm
+      -v {{ icinga_base_dir }}/icingaweb2/data:/data:rw
+      -v {{ icinga_etc_dir }}/icingaweb2:/data/etc/icingaweb2:rw
+      --entrypoint icingacli {{ images.icingaweb2 }}
 
-- name: Tạo cây thư mục /data/etc/icingaweb2 (sở hữu www-data)
+- name: Tạo cây config Icinga Web 2 chính thức trên host
   ansible.builtin.file:
     path: "{{ web_etc }}/{{ item }}"
     state: directory
@@ -25,6 +27,25 @@
     group: "{{ web_uid }}"
     mode: "0770"
   loop: ["", "modules/icingadb", "enabledModules"]
+
+- name: Kiểm tra đã migrate cây config Web cũ trong /data chưa
+  ansible.builtin.stat:
+    path: "{{ web_base }}/.whole-config-tree-v1"
+  register: _web_whole_config_migrated
+
+# Existing files in /etc/icinga-ansible win. Files created previously by the UI or icingacli
+# (including enabledModules symlinks) are copied only when the destination does not exist.
+- name: Migrate một lần config Icinga Web 2 cũ sang cây config chính thức
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if [ -d {{ web_legacy_etc | quote }} ]; then
+      cp -a -n {{ web_legacy_etc | quote }}/. {{ web_etc | quote }}/
+    fi
+    chown -R {{ web_uid }}:{{ web_uid }} {{ web_etc | quote }}
+    touch {{ (web_base + '/.whole-config-tree-v1') | quote }}
+  args:
+    executable: /bin/bash
+  when: not _web_whole_config_migrated.stat.exists
 
 - name: Tạo /data/var/lib/icingaweb2 (runtime của app)
   ansible.builtin.file:
@@ -354,39 +375,14 @@
   ansible.builtin.include_tasks: module-director.yml
   when: "'director' in (enable_icingaweb2_modules | default([]))"
 
-# ---------- Xây danh sách mount per-file (thêm module-director nếu bật) ----------
-# MOUNT RW — CỐ Ý, đi cùng cơ chế "seed 1 lần"
-# ở render_config_item.yml (2026-07-22): Icinga Web (chạy trong container) cần tự ghi được vào các
-# file này khi người dùng thao tác qua UI (vd thêm Resource, đổi Role) mà không bị mất khi container
-# bị xoá/tạo lại — vì đây là bind-mount tới file THẬT trên host (icinga_etc_dir), ghi từ container
-# tức là ghi thẳng ra host, độc lập vòng đời container. Ansible sẽ KHÔNG re-render các file này sau
-# lần deploy đầu (xem "force: false" ở render_config_item.yml) — đổi mật khẩu DB qua globals.yml sau
-# đó sẽ KHÔNG tự áp dụng vào đây nữa.
-- name: "Xây list mount per-file: khởi tạo với các file config cố định"
+# ---------- Mount nguyên cây config RW ----------
+# Mọi file UI/icingacli tạo thêm đều xuất hiện ngay dưới /etc/icinga-ansible/icingaweb2 trên host.
+# Các template vẫn seed một lần (force:false), nên lần reconfigure sau không ghi đè chỉnh sửa từ UI.
+- name: Xây danh sách volume Icinga Web 2
   ansible.builtin.set_fact:
     _web_volumes:
-      - "{{ web_data }}:/data"    # data (enabledModules symlink, session, cache) — rw, KHÔNG đổi
-      # config — mount TỪNG FILE riêng (rw, xem comment trên), giống kolla /etc/kolla/<svc> nhưng
-      # cho phép container tự ghi. KHÔNG mount đè cả /data/etc/icingaweb2 (sẽ che mất enabledModules/
-      # do `icingacli module enable` ghi trực tiếp vào data mount — xem render_config_item.yml).
-      - "{{ icinga_etc_dir }}/icingaweb2/resources.ini:/data/etc/icingaweb2/resources.ini"
-      - "{{ icinga_etc_dir }}/icingaweb2/config.ini:/data/etc/icingaweb2/config.ini"
-      - "{{ icinga_etc_dir }}/icingaweb2/authentication.ini:/data/etc/icingaweb2/authentication.ini"
-      - "{{ icinga_etc_dir }}/icingaweb2/roles.ini:/data/etc/icingaweb2/roles.ini"
-      - "{{ icinga_etc_dir }}/icingaweb2/modules/icingadb/config.ini:/data/etc/icingaweb2/modules/icingadb/config.ini"
-      - "{{ icinga_etc_dir }}/icingaweb2/modules/icingadb/redis.ini:/data/etc/icingaweb2/modules/icingadb/redis.ini"
-      - "{{ icinga_etc_dir }}/icingaweb2/modules/icingadb/commandtransports.ini:/data/etc/icingaweb2/modules/icingadb/commandtransports.ini"
-
-# module-director/config.ini chỉ THẬT SỰ tồn tại trên icinga_etc_dir khi module "director" được bật
-# (module-director.yml chỉ render khi đó) -> mount CHỈ khi bật, nếu không nguồn không tồn tại sẽ
-# làm docker_container lỗi/tạo nhầm thư mục rỗng (cùng bài học zones.d ở role icinga2). RW cùng lý
-# do các file trên.
-- name: "Thêm mount config.ini của Director (chỉ khi module director bật)"
-  ansible.builtin.set_fact:
-    _web_volumes: >-
-      {{ _web_volumes +
-         [icinga_etc_dir + '/icingaweb2/modules/director/config.ini:/data/etc/icingaweb2/modules/director/config.ini'] }}
-  when: "'director' in (enable_icingaweb2_modules | default([]))"
+      - "{{ web_data }}:/data:rw"
+      - "{{ web_etc }}:/data/etc/icingaweb2:rw"
 
 # ---------- Chạy Apache2 + Icinga Web 2 ----------
 # Image serve Apache trên 8080 (không phải 80). Host network -> bind 8080 trên host.

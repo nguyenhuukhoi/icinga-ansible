@@ -33,6 +33,11 @@ tools/validate           syntax-check toàn bộ playbook
 Repo chứa code. Cấu hình thật nằm riêng tại `/etc/icinga-ansible` (có thể đổi bằng
 `ICINGA_ANSIBLE_CONFIG_DIR`) và không nên commit vào Git.
 
+Trên managed node, mỗi service dùng một cây config bind-mount nguyên thư mục với `rw`:
+`icinga2/`, `icingaweb2/`, `icingadb/`, `icingadb-redis/` và `mariadb/`. Ví dụ
+`/etc/icinga-ansible/icingaweb2` được mount vào `/data/etc/icingaweb2`; file tạo hoặc sửa từ Web UI
+được lưu trực tiếp trên host và không mất khi container được tạo lại.
+
 ## Khởi tạo nhanh
 
 Yêu cầu: deployment node Linux, Python venv có Ansible, managed node Ubuntu có SSH/sudo.

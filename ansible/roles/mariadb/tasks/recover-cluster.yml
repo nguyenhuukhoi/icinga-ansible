@@ -53,9 +53,9 @@
       - --network
       - "{{ docker_network_name }}"
       - -v
-      - "{{ mariadb_data }}:/var/lib/mysql"
+      - "{{ mariadb_data }}:/var/lib/mysql:rw"
       - -v
-      - "{{ mariadb_etc }}/server.cnf:/etc/mysql/mariadb.conf.d/99-icinga.cnf:rw"
+      - "{{ mariadb_etc }}:/etc/mysql/conf.d:rw"
       - "{{ images.mariadb }}"
       - mariadbd
       - --wsrep-recover

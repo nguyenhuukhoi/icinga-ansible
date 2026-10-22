@@ -91,6 +91,28 @@ Web mặc định tại `http://<master>:8080/authentication/login`. User và pa
 
 Sau deploy, nên chạy lại `reconfigure` một lần để kiểm tra idempotency và `check` lần nữa.
 
+### 4.1. Cây config trên từng managed node
+
+Role mount nguyên thư mục config với `rw`; không mount rời từng file:
+
+| Service | Host | Container |
+|---|---|---|
+| Icinga 2 | `/etc/icinga-ansible/icinga2/` | `/data/etc/icinga2/` |
+| Icinga Web 2/Director | `/etc/icinga-ansible/icingaweb2/` | `/data/etc/icingaweb2/` |
+| Icinga DB | `/etc/icinga-ansible/icingadb/` | `/etc/icingadb/` |
+| Redis | `/etc/icinga-ansible/icingadb-redis/` | `/usr/local/etc/redis/` |
+| MariaDB/Galera | `/etc/icinga-ansible/mariadb/` | `/etc/mysql/conf.d/` |
+
+Ví dụ, khi tạo hoặc sửa Resource trên Icinga Web UI, `resources.ini` được ghi thẳng tại
+`/etc/icinga-ansible/icingaweb2/resources.ini` của đúng master đang phục vụ request. HA Web hiện không
+đồng bộ filesystem giữa hai master; nếu truy cập trực tiếp từng master thì phải giữ config hai phía
+nhất quán hoặc dùng VIP/stickiness phù hợp. Template Web chỉ seed khi file chưa tồn tại nên
+`reconfigure` không ghi đè thay đổi từ UI.
+
+`/var/lib/icinga-ansible` vẫn chỉ chứa runtime/data. Lần deploy đầu sau khi nâng cấp thiết kế này sẽ
+migrate file còn thiếu từ cây config cũ trong `/var/lib` sang `/etc`, giữ file đang có trong `/etc` làm
+bản ưu tiên.
+
 ## 5. Nội dung monitoring do operator quản lý
 
 Ansible không sinh và không vận chuyển object monitoring. Chọn Director hoặc một quy trình static

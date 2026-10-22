@@ -2,10 +2,49 @@
 # Role redis: icingadb-redis (Redis bản Icinga). Chỉ chạy trên master.
 # Icinga 2 (feature icingadb) ghi runtime vào đây; icingadb daemon đọc ra.
 
+- name: Tạo thư mục data và cây config Redis chính thức
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    # Official Redis image chạy daemon bằng uid/gid 999 sau entrypoint.
+    owner: "999"
+    group: "999"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ icinga_base_dir }}/icingadb-redis", mode: "0750" }
+    - { path: "{{ icinga_etc_dir }}/icingadb-redis", mode: "0750" }
+
 - name: Đọc cấu hình Redis container hiện tại trước secret rotation
   community.docker.docker_container_info:
     name: icingadb-redis
   register: _redis_current
+  no_log: true
+
+- name: Render Redis config
+  ansible.builtin.template:
+    src: redis.conf.j2
+    dest: "{{ icinga_etc_dir }}/icingadb-redis/redis.conf"
+    owner: "999"
+    group: "999"
+    mode: "0600"
+  no_log: true
+
+- name: Tính checksum Redis config
+  ansible.builtin.stat:
+    path: "{{ icinga_etc_dir }}/icingadb-redis/redis.conf"
+    checksum_algorithm: sha256
+  register: _redis_config_stat
+  no_log: true
+
+# Container cũ truyền password bằng command; container mới dùng fingerprint của file config.
+# Chấp nhận cả hai dạng để lần migrate đầu không dừng đồng thời consumer không cần thiết.
+- name: Xác định Redis hiện tại có tương thích config đích không
+  ansible.builtin.set_fact:
+    _redis_config_compatible: >-
+      {{ (not (_redis_current.exists | default(false))) or
+         (icingadb_redis_password in (_redis_current.container.Config.Cmd | default([]))) or
+         (('ICINGA_ANSIBLE_CONFIG_FINGERPRINT=' ~ _redis_config_stat.stat.checksum) in
+          (_redis_current.container.Config.Env | default([]))) }}
   no_log: true
 
 - name: Dừng consumer Redis trước khi rotate credential
@@ -16,7 +55,7 @@
   failed_when: false
   when:
     - _redis_current.exists | default(false)
-    - icingadb_redis_password not in (_redis_current.container.Config.Cmd | default([]))
+    - not _redis_config_compatible
 
 - name: Khởi động container icingadb-redis (host network)
   community.docker.docker_container:
@@ -32,18 +71,16 @@
     state: started
     restart_policy: unless-stopped
     network_mode: host
-    # Dạng LIST (không phải chuỗi "command: >-") — tránh Docker/module tự shlex-split chuỗi, làm vỡ
-    # --requirepass nếu password sinh ra (hoặc đặt tay) chứa khoảng trắng/ký tự đặc biệt.
     command:
       - redis-server
-      - "--port"
-      - "{{ icingadb_redis_port | string }}"
-      - "--requirepass"
-      - "{{ icingadb_redis_password }}"
-      - "--appendonly"
-      - "yes"
+      - /usr/local/etc/redis/redis.conf
     volumes:
-      - "{{ icinga_base_dir }}/icingadb-redis:/data"
+      - "{{ icinga_base_dir }}/icingadb-redis:/data:rw"
+      - "{{ icinga_etc_dir }}/icingadb-redis:/usr/local/etc/redis:rw"
+    env:
+      ICINGA_ANSIBLE_CONFIG_FINGERPRINT: "{{ _redis_config_stat.stat.checksum }}"
+    comparisons:
+      volumes: strict
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "{{ icingadb_redis_port | string }}", "-a", "{{ icingadb_redis_password }}", "ping"]
       interval: 10s

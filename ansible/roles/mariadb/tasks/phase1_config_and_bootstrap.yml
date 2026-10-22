@@ -34,7 +34,8 @@
   ansible.builtin.file:
     path: "{{ mariadb_etc }}"
     state: directory
-    mode: "0750"
+    # Entrypoint hạ quyền sang user mysql trước khi kiểm tra config trong thư mục bind-mount.
+    mode: "0755"
 
 - name: Xác định nguồn config server.cnf (override per-host > per-group > per-service > template)
   ansible.builtin.set_fact:

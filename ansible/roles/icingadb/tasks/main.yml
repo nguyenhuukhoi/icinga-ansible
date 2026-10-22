@@ -144,7 +144,9 @@
     restart_policy: unless-stopped
     network_mode: host
     volumes:
-      - "{{ icinga_etc_dir }}/icingadb/config.yml:/etc/icingadb/config.yml:rw"
+      - "{{ icinga_etc_dir }}/icingadb:/etc/icingadb:rw"
+    comparisons:
+      volumes: strict
     healthcheck:
       test: ["CMD", "icingadb", "--version"]
       interval: 30s

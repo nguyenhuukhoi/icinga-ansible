@@ -1,0 +1,5 @@
+# Managed by icinga-ansible. The whole parent directory is mounted read-write.
+port {{ icingadb_redis_port }}
+requirepass {{ icingadb_redis_password | to_json }}
+appendonly yes
+dir /data

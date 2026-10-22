@@ -106,7 +106,7 @@
   tasks:
     - name: Verify the temporary deployment data tree exists
       ansible.builtin.stat:
-        path: "{{ icinga_base_dir }}/icinga2/data/etc/icinga2/icinga2.conf"
+        path: "{{ icinga_etc_dir }}/icinga2/icinga2.conf"
       register: _db_only_data_tree
 
     - name: Refuse to recover before the temporary deploy has initialized each master

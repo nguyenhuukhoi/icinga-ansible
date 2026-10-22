@@ -3,12 +3,11 @@
 # Kickstart và toàn bộ object Director thuộc quyền quản lý của operator.
 #
 # BUG THẬT ĐÃ GẶP (2026-07-22, tự phát hiện khi rà lại cho nhất quán — chưa từng gây sự cố thật vì
-# bắt được trước khi ai đụng vào): trước đây file này ghi TRỰC TIẾP vào web_etc (đường dẫn DATA,
-# /data/etc/icingaweb2/modules/director/config.ini), KHÔNG qua render_config_item.yml như
-# resources.ini/config.ini/... — không có override, không mount riêng từng file (chỉ "an toàn" nhờ tình
-# cờ nằm trong /data đã mount rw sẵn). Đổi sang render_config_item.yml cho NHẤT QUÁN với mọi file
+# bắt được trước khi ai đụng vào): trước đây file này ghi TRỰC TIẾP vào cây DATA và KHÔNG qua
+# render_config_item.yml như resources.ini/config.ini/... nên không có override. Đổi sang
+# render_config_item.yml cho NHẤT QUÁN với mọi file
 # config khác của role: override-aware (per-host > per-service > template), ghi vào icinga_etc_dir,
-# mount rw per-file (xem task "Khởi động container icingaweb2" — chỉ mount khi module director bật).
+# và nằm trong cây config RW chung (xem task "Khởi động container icingaweb2").
 - name: Render config Director (resource DB + endpoint API, override-aware)
   ansible.builtin.include_tasks: render_config_item.yml
   vars:
@@ -20,27 +19,10 @@
     state: absent
   no_log: true
 
-# BUG THẬT ĐÃ GẶP (2026-07-22): "director migration run" chạy qua {{ web_run }}, container one-off
-# CHỈ mount {{ web_data }}:/data — từ khi resources.ini/config.ini/... chuyển sang mount per-file từ
-# icinga_etc_dir (KHÔNG còn nằm trong /data nữa), container one-off này KHÔNG thấy resources.ini
-# (chứa resource "director_db") lẫn modules/director/config.ini vừa render ở trên -> "director
-# migration run" lỗi "Director is not configured correctly". KHÔNG sửa {{ web_run }} dùng chung (task
-# "Enable module" gọi nó SỚM hơn, lúc modules/icingadb/*.ini và modules/director/config.ini CHƯA
-# render xong — mount thêm ở đó sẽ lỗi "no such file"). Thay vào đó định nghĩa wrapper RIÊNG cho lệnh
-# này, nơi mọi file cần đã chắc chắn tồn tại (config lõi + module icingadb + director đều render
-# trước khi tới đây trong thứ tự task).
-- name: "Helper one-off ĐẦY ĐỦ config (chỉ dùng cho migration — mọi file cần đã render xong)"
+# web_run luôn mount nguyên cây config, nên lệnh one-off nhìn đúng cùng nội dung với Apache/daemon.
+- name: Helper one-off cho Director migration
   ansible.builtin.set_fact:
-    web_run_full: >-
-      docker run --rm -v {{ web_data }}:/data
-      -v {{ icinga_etc_dir }}/icingaweb2/resources.ini:/data/etc/icingaweb2/resources.ini:rw
-      -v {{ icinga_etc_dir }}/icingaweb2/config.ini:/data/etc/icingaweb2/config.ini:rw
-      -v {{ icinga_etc_dir }}/icingaweb2/authentication.ini:/data/etc/icingaweb2/authentication.ini:rw
-      -v {{ icinga_etc_dir }}/icingaweb2/roles.ini:/data/etc/icingaweb2/roles.ini:rw
-      -v {{ icinga_etc_dir }}/icingaweb2/modules/icingadb/config.ini:/data/etc/icingaweb2/modules/icingadb/config.ini:rw
-      -v {{ icinga_etc_dir }}/icingaweb2/modules/icingadb/redis.ini:/data/etc/icingaweb2/modules/icingadb/redis.ini:rw
-      -v {{ icinga_etc_dir }}/icingaweb2/modules/director/config.ini:/data/etc/icingaweb2/modules/director/config.ini:rw
-      --entrypoint icingacli {{ images.icingaweb2 }}
+    web_run_full: "{{ web_run }}"
 
 - name: Chạy Director schema migration (idempotent)
   ansible.builtin.command: "{{ web_run_full }} director migration run"

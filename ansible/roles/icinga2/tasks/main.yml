@@ -11,7 +11,10 @@
   ansible.builtin.set_fact:
     ic_data: "{{ icinga_base_dir }}/icinga2/data"
     ic_uid: "5665"          # uid/gid 'icinga' trong image
+    # Cây cũ nằm bên trong /data chỉ còn dùng làm nguồn skeleton/migration.
     ic_etc: "{{ icinga_base_dir }}/icinga2/data/etc/icinga2"
+    # Đây là cây config chính thức trên host; container mount nguyên thư mục RW.
+    ic_config_dir: "{{ icinga_etc_dir }}/icinga2"
 
 # Mọi lệnh bootstrap/verify bên dưới đều chạy bằng image đích. Nếu image chưa có
 # và registry tạm lỗi, `docker run` trả rc=125; tuyệt đối không được hiểu đó là
@@ -89,9 +92,38 @@
     line: 'const TicketSalt = {{ (icinga2_ticket_salt if inventory_hostname in groups["master"] else "") | to_json }}'
   when: not data_init.stat.exists
 
-- name: Helper one-off (mount /data)
+- name: Tạo cây config Icinga 2 chính thức trên host
+  ansible.builtin.file:
+    path: "{{ ic_config_dir }}"
+    state: directory
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0750"
+
+- name: Kiểm tra đã migrate cây config cũ trong /data chưa
+  ansible.builtin.stat:
+    path: "{{ icinga_base_dir }}/icinga2/.whole-config-tree-v1"
+  register: _ic_whole_config_migrated
+
+# Không ghi đè file đang có trong /etc/icinga-ansible. Cách này giữ mọi chỉnh sửa hiện hữu,
+# đồng thời mang sang features-enabled, conf.d/operator và các file do node setup từng tạo.
+- name: Migrate một lần config Icinga 2 cũ sang cây config chính thức
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cp -a -n {{ ic_etc | quote }}/. {{ ic_config_dir | quote }}/
+    chown -R {{ ic_uid }}:{{ ic_uid }} {{ ic_config_dir | quote }}
+    touch {{ (icinga_base_dir + '/icinga2/.whole-config-tree-v1') | quote }}
+  args:
+    executable: /bin/bash
+  when: not _ic_whole_config_migrated.stat.exists
+
+- name: Helper one-off (mount data + nguyên cây config RW)
   ansible.builtin.set_fact:
-    ic_run: "docker run --rm -v {{ ic_data }}:/data {{ images.icinga2 }}"
+    ic_run: >-
+      docker run --rm
+      -v {{ ic_data }}:/data:rw
+      -v {{ ic_config_dir }}:/data/etc/icinga2:rw
+      {{ images.icinga2 }}
 
 # These are operator-owned inputs, not Icinga DSL. Merge in deterministic order: global, node role,
 # host. Later sources override the same relative path from earlier sources. A topology node belongs
@@ -272,8 +304,8 @@
 # ---------- Base config skeleton (toàn bộ /etc/icinga2 image ship kèm) — seed 1 LẦN ra node ---------
 # Mục tiêu (theo yêu cầu người dùng — giống hệt kolla /etc/kolla/<svc>, KHÔNG lồng thêm thư mục con
 # nào kiểu "base/"): MỌI file trong /etc/icinga2 đều là file THẬT nằm PHẲNG ngay dưới
-# {{ icinga_etc_dir }}/icinga2/ (cùng cấp constants.conf/zones.conf/conf.d/... đã có), mount
-# per-file vào container — không "giấu" trong volume /data. Trừ 3 thứ có cơ chế RIÊNG (không seed
+# {{ icinga_etc_dir }}/icinga2/ (cùng cấp constants.conf/zones.conf/conf.d/... đã có), rồi mount
+# nguyên cây này RW vào container. Trừ 3 thứ có cơ chế RIÊNG (không seed
 # qua đây): `features-enabled/` (runtime, do `icinga2 feature enable` ghi), `zones.d/` (Icinga/operator
 # tự quản lý), `ssh/` — và trừ `custom-plugins/` (KHÁC "scripts/" thật của image — xem giải thích BUG
 # #2 bên dưới). Sửa tay trực tiếp trên node rồi `docker restart icinga2` là áp dụng ngay (bind-mount
@@ -284,19 +316,15 @@
 # BUG THẬT ĐÃ GẶP (2026-07-24, phát hiện khi verify monitor qua zone satellite — config KHÔNG sync
 # xuống satellite dù log ApiListener báo "Finished sending config file updates"): loại trừ thêm
 # "features-available/api.conf" — file này KHÔNG phải static, do "icinga2 node setup
-# --accept-config --accept-commands" tự sinh (ghi vào ic_data qua container one-off "{{ ic_run }}"),
+# --accept-config --accept-commands" tự sinh (ghi vào cây config chính thức qua container one-off),
 # nhưng seed base-config-skeleton ở block này chạy TRƯỚC "node setup" trong thứ tự task (seed nằm
 # ngay đầu file, node setup của master2/satellite/client nằm xa phía dưới) → seed nhặt NHẦM bản mặc
 # định của IMAGE (accept_config/accept_commands bị comment = false) từ ic_data ra
 # icinga_etc_dir (nơi THẬT SỰ mount vào container chạy) TRƯỚC KHI "node setup" kịp sửa đúng nội
-# dung trong ic_data — do seed dùng "force: false" (chỉ ghi 1 lần) nên bản SAI này tồn tại vĩnh viễn
+# dung đích — do seed dùng "force: false" (chỉ ghi 1 lần) nên bản SAI này từng tồn tại vĩnh viễn
 # dù ic_data đã đúng sau đó. Hậu quả: node không "accept_config" thật (dù task node setup có đúng cờ
-# --accept-config), ApiListener âm thầm bỏ qua mọi config sync từ zone cha ("Ignoring config update.
-# 'api' does not accept config." trong log) — satellite/master2/client "connected: true" bình
-# thường (kết nối TCP/TLS vẫn OK) nhưng KHÔNG BAO GIỜ nhận được nội dung zones.d thật, dù không có
-# lỗi rõ ràng nào ở nơi khác. Fix: loại api.conf khỏi seed chung, đồng bộ lại NGAY SAU mỗi task
-# "node setup" (xem 3 task "Đồng bộ lại api.conf sau node setup" ở master2/satellite/client bên dưới)
-# — ic_data lúc đó đã có bản ĐÚNG do chính node setup vừa ghi, copy thẳng sang icinga_etc_dir.
+# --accept-config). Thiết kế mới tránh hai bản file: node setup và daemon cùng ghi trực tiếp vào
+# {{ icinga_etc_dir }}/icinga2 qua mount nguyên thư mục.
 - name: "Danh sách loại trừ dùng chung cho seed + mount base config (cơ chế riêng hoặc render riêng)"
   ansible.builtin.set_fact:
     # conf.d and scripts are monitoring content shipped as image examples. The role mounts only its
@@ -371,10 +399,7 @@
   register: _ic_base_find
   when: _ic_base_seed_needed | bool
 
-# BUG THẬT ĐÃ GẶP: đường dẫn host thật đằng sau /data/etc/icinga2/ssh có sẵn id_monitor/known_hosts
-# từ trước (không phải do cơ chế seed này ghi) — không loại trừ "ssh/" thì scan nhặt luôn, seed ra
-# rồi mount TRÙNG đích /data/etc/icinga2/ssh/id_monitor với mount per-file CHÍNH THỨC của ssh/ (mục
-# 9.4) -> docker_container lỗi "appears twice in volumes option".
+# Các nhánh động được migrate nguyên cây riêng, không seed từ skeleton ở block này.
 - name: Danh sách relpath cần seed từ skeleton (loại trừ theo _ic_base_exclude_*)
   ansible.builtin.set_fact:
     _ic_base_relpaths: >-
@@ -424,28 +449,6 @@
     mode: "0640"
   when: _ic_base_seed_needed | bool
 
-# Không dùng lại _ic_base_relpaths (đó là danh sách trong SKELETON /data) — ở đây cần danh sách
-# THẬT đang có trên node, kể cả file đã seed từ lần chạy trước hoặc bạn tự thêm tay sau này. Loại
-# trừ CÙNG danh sách _ic_base_exclude_* — nếu không sẽ quét luôn constants.conf/custom-plugins/ssh/
-# zones.d/ (đều đã có mount riêng) -> mount trùng đích y hệt bug đã gặp ở trên.
-- name: Dò danh sách file base ĐÃ CÓ trên node (để mount per-file)
-  ansible.builtin.find:
-    paths: "{{ icinga_etc_dir }}/icinga2"
-    recurse: true
-    file_type: file
-  register: _ic_base_node_find
-
-- name: Danh sách relpath base hiện có trên node (dùng để mount per-file bên dưới)
-  ansible.builtin.set_fact:
-    _ic_base_relpaths_node: >-
-      {{ _ic_base_node_find.files
-         | map(attribute='path')
-         | map('regex_replace', '^' ~ ((icinga_etc_dir ~ '/icinga2/') | regex_escape), '')
-         | reject('in', _ic_base_exclude_relpaths)
-         | list
-         | select('match', '^(?!' ~ (_ic_base_exclude_prefixes | join('|')) ~ ').*$')
-         | list }}
-
 # Image icinga2 đóng gói sẵn demo config (conf.d/hosts.conf: host "NodeName" tự check ping tới
 # 127.0.0.1) — check này FAIL trong container (không đủ quyền tạo raw ICMP socket) và gây
 # "Overdue" giả trên dashboard sau khi thiếu check_interval nhiều lần (vd container hay restart).
@@ -477,10 +480,9 @@
 # nội dung thư mục này từ deployment node, và tuyệt đối không dùng zones.d.
 - name: Đảm bảo điểm include config operator tồn tại trên từng Icinga node
   ansible.builtin.file:
-    # This directory must live inside the persistent /data tree. Config files outside /data are
-    # mounted per-file, so creating only the host-side skeleton directory would remain invisible
-    # to include_recursive inside the container.
-    path: "{{ ic_etc }}/conf.d/operator"
+    # The whole host config tree is mounted into /data/etc/icinga2, so this directory is visible
+    # immediately and remains operator-owned across container recreation.
+    path: "{{ ic_config_dir }}/conf.d/operator"
     state: directory
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
@@ -583,7 +585,7 @@
 
 - name: Kiểm tra ApiListener config của ca_host đã được tạo chưa
   ansible.builtin.stat:
-    path: "{{ ic_etc }}/features-available/api.conf"
+    path: "{{ ic_config_dir }}/features-available/api.conf"
   register: ca_host_api_stat
   when: inventory_hostname == ca_host
 
@@ -660,7 +662,7 @@
 
 - name: (master2) Kiểm tra api.conf đã được node setup hoàn tất chưa
   ansible.builtin.stat:
-    path: "{{ ic_etc }}/features-available/api.conf"
+    path: "{{ ic_config_dir }}/features-available/api.conf"
   register: master2_api_stat
   when:
     - is_ha_master | bool
@@ -697,7 +699,7 @@
 
 - name: (master2) Đọc api.conf để xác minh cờ nhận config/command
   ansible.builtin.slurp:
-    src: "{{ ic_etc }}/features-available/api.conf"
+    src: "{{ ic_config_dir }}/features-available/api.conf"
   register: master2_api_conf
   when:
     - is_ha_master | bool
@@ -820,21 +822,6 @@
     - inventory_hostname != ca_host
     - not _master2_enrollment_complete
 
-- name: "(master2) Đồng bộ lại api.conf sau node setup (ic_data mới đúng — ghi đè seed cũ nếu có)"
-  ansible.builtin.copy:
-    src: "{{ ic_etc }}/features-available/api.conf"
-    dest: "{{ icinga_etc_dir }}/icinga2/features-available/api.conf"
-    remote_src: true
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: preserve
-  when:
-    - is_ha_master | bool
-    - inventory_hostname in groups['master']
-    - inventory_hostname != ca_host
-    - not _master2_enrollment_complete
-  notify: Reload icinga2
-
 # ---------- CA nhân bản sang master2 (bỏ SPOF ký cert — design 9.2) ----------
 # Sau khi master2 đã tự có cert của MÌNH ở trên, copy thêm CHÍNH CA (ca.crt+ca.key) sang master2
 # để cả 2 master đều ký được cert cho node mới (satellite/master thêm sau) kể cả khi ca_host chết.
@@ -912,7 +899,7 @@
 
 - name: (satellite) Kiểm tra api.conf đã được node setup hoàn tất chưa
   ansible.builtin.stat:
-    path: "{{ ic_etc }}/features-available/api.conf"
+    path: "{{ ic_config_dir }}/features-available/api.conf"
   register: sat_api_stat
   when: inventory_hostname in groups['satellite']
 
@@ -942,7 +929,7 @@
 
 - name: (satellite) Đọc api.conf để xác minh cờ nhận config/command
   ansible.builtin.slurp:
-    src: "{{ ic_etc }}/features-available/api.conf"
+    src: "{{ ic_config_dir }}/features-available/api.conf"
   register: sat_api_conf
   when:
     - inventory_hostname in groups['satellite']
@@ -1046,19 +1033,6 @@
     - inventory_hostname in groups['satellite']
     - not _sat_enrollment_complete
 
-- name: "(satellite) Đồng bộ lại api.conf sau node setup (ic_data mới đúng — ghi đè seed cũ nếu có)"
-  ansible.builtin.copy:
-    src: "{{ ic_etc }}/features-available/api.conf"
-    dest: "{{ icinga_etc_dir }}/icinga2/features-available/api.conf"
-    remote_src: true
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: preserve
-  when:
-    - inventory_hostname in groups['satellite']
-    - not _sat_enrollment_complete
-  notify: Reload icinga2
-
 # ---------- Client (command endpoint, zone riêng 1 node — Icinga2 "Client" chuẩn) ----------
 # Khác satellite: zone của client CHỈ có 1 endpoint (chính nó), không phải zone con chia sẻ.
 # Host/Service dùng command_endpoint do operator tự định nghĩa ngoài role này; role chỉ quản lý
@@ -1148,19 +1122,6 @@
     - inventory_hostname in groups['client'] | default([])
     - not client_cert_stat.stat.exists
 
-- name: "(client) Đồng bộ lại api.conf sau node setup (ic_data mới đúng — ghi đè seed cũ nếu có)"
-  ansible.builtin.copy:
-    src: "{{ ic_etc }}/features-available/api.conf"
-    dest: "{{ icinga_etc_dir }}/icinga2/features-available/api.conf"
-    remote_src: true
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: preserve
-  when:
-    - inventory_hostname in groups['client'] | default([])
-    - not client_cert_stat.stat.exists
-  notify: Reload icinga2
-
 # ---------- Config có kiểm soát, override-aware (deploy node -> target node, design.md 4.1) --------
 - name: Render config icinga2 (constants/zones/feature/api-users)
   ansible.builtin.include_tasks: render_config_item.yml
@@ -1172,9 +1133,8 @@
   loop_control:
     loop_var: cfg
 
-# ---------- SSH key cho check ra host ngoài cluster (per-file, design.md 9.4) ----------
-# 2 tên file CỐ ĐỊNH (không phải tập tuỳ ý như scripts/ dưới) -> sync + mount per-file được, không
-# cần dò động. Chạy trên MỌI node icinga2 (check có thể thực thi từ satellite lẫn master).
+# ---------- SSH key cho check ra host ngoài cluster (design.md 9.4) ----------
+# Chạy trên MỌI node icinga2 (check có thể thực thi từ satellite lẫn master).
 - name: Đảm bảo thư mục nguồn SSH của operator tồn tại trên deployment node
   ansible.builtin.file:
     path: "{{ deploy_config_dir }}/icinga2/ssh"
@@ -1212,7 +1172,7 @@
   when: item.stat.exists
   notify: Reload icinga2
 
-- name: Danh sách file SSH thật sự có (dùng để mount per-file bên dưới)
+- name: Danh sách file SSH thật sự có
   ansible.builtin.set_fact:
     _ic_ssh_names: "{{ _ic_ssh_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}"
 
@@ -1234,15 +1194,13 @@
     state: absent
   notify: Reload icinga2
 
-# ---------- Script check tuỳ biến (per-file, dò động — design.md 14.5) ----------
+# ---------- Script check tuỳ biến (design.md 14.5) ----------
 # Thư mục đặt tên "custom-plugins/" (KHÔNG phải "scripts/") — cố ý tránh trùng tên với "scripts/"
 # THẬT của image (chứa mail-host-notification.sh..., seed qua cơ chế base config skeleton ở trên,
 # mount về ĐÚNG /data/etc/icinga2/scripts/) — 2 thứ này mount về 2 ĐÍCH hoàn toàn khác nhau
 # (/usr/lib/nagios/custom-plugins/ vs /data/etc/icinga2/scripts/), gộp chung 1 tên thư mục sẽ vỡ.
-# Khác ssh/ ở trên: đây là TẬP file tuỳ ý người dùng tự thêm, tên/số lượng không cố định trước ->
-# phải dò danh sách file THẬT trên deploy node lúc chạy (find) rồi mount từng file theo tên tìm
-# được. Đánh đổi: thêm script mới phải chạy lại `reconfigure` (không tự xuất hiện như mount cả
-# thư mục trước đây) — đổi lấy tính nhất quán per-file toàn bộ stack (design.md mục "mount per-file").
+# Đây là TẬP file tuỳ ý người dùng tự thêm. Role đồng bộ chúng vào cây config host rồi mount nguyên
+# custom-plugins thêm một lần vào đường dẫn plugin chuẩn của container.
 - name: Đảm bảo thư mục nguồn custom-plugins của operator tồn tại trên deployment node
   ansible.builtin.file:
     path: "{{ deploy_config_dir }}/icinga2/custom-plugins"
@@ -1298,36 +1256,19 @@
   when: (item | basename) not in _ic_script_names
   notify: Reload icinga2
 
-# ---------- Xây danh sách mount per-file ĐỘNG cho docker_container ----------
-# script tuỳ biến / SSH key có SỐ LƯỢNG file thay đổi theo cấu hình (globals.yml, deploy_config_dir)
-# nên không khai được tĩnh trong volumes: như constants.conf/zones.conf — build
-# list trước, nối vào lúc tạo container (task "Khởi động container icinga2" bên dưới).
-- name: "Xây list mount per-file: khởi tạo với các file config tĩnh (không đổi tên/số lượng)"
+# ---------- Mount nguyên cây config chính thức ----------
+- name: Xây danh sách volume Icinga 2
   ansible.builtin.set_fact:
     _ic_dynamic_volumes:
-      - "{{ ic_data }}:/data"    # data (PKI/features-enabled/api-zones-cache — Icinga2 tự ghi lúc chạy) — rw, KHÔNG per-file được
-      - "{{ icinga_etc_dir }}/icinga2/constants.conf:/data/etc/icinga2/constants.conf:rw"
-      - "{{ icinga_etc_dir }}/icinga2/zones.conf:/data/etc/icinga2/zones.conf:rw"
-      - "{{ icinga_etc_dir }}/icinga2/features-available/icingadb.conf:/data/etc/icinga2/features-available/icingadb.conf:rw"
-      - "{{ icinga_etc_dir }}/icinga2/conf.d/api-users.conf:/data/etc/icinga2/conf.d/api-users.conf:rw"
+      - "{{ ic_data }}:/data:rw"
+      - "{{ ic_config_dir }}:/data/etc/icinga2:rw"
 
-- name: "Xây list mount per-file: base config skeleton đã seed (mọi node)"
+# Plugin phải xuất hiện thêm ở đường dẫn plugin chuẩn, ngoài cây /data/etc/icinga2.
+- name: Mount nguyên thư mục custom plugin vào đường dẫn thực thi
   ansible.builtin.set_fact:
-    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/' + item + ':/data/etc/icinga2/' + item + ':rw'] }}"
-  loop: "{{ _ic_base_relpaths_node }}"
-  loop_control: { label: "{{ item }}" }
-
-- name: "Xây list mount per-file: script tuỳ biến (mọi node)"
-  ansible.builtin.set_fact:
-    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/custom-plugins/' + item + ':/usr/lib/nagios/custom-plugins/' + item + ':rw'] }}"
-  loop: "{{ _ic_script_names }}"
-  loop_control: { label: "{{ item }}" }
-
-- name: "Xây list mount per-file: SSH key monitor (mọi node)"
-  ansible.builtin.set_fact:
-    _ic_dynamic_volumes: "{{ _ic_dynamic_volumes + [icinga_etc_dir + '/icinga2/ssh/' + item + ':/data/etc/icinga2/ssh/' + item + ':rw'] }}"
-  loop: "{{ _ic_ssh_names }}"
-  loop_control: { label: "{{ item }}" }
+    _ic_dynamic_volumes: >-
+      {{ _ic_dynamic_volumes +
+         [ic_config_dir + '/custom-plugins:/usr/lib/nagios/custom-plugins:rw'] }}
 
 - name: "Mount thư mục secret operator vào container Icinga 2"
   ansible.builtin.set_fact:
@@ -1433,14 +1374,8 @@
     # Cluster API phải phản hồi; nội dung Host/Service là ngoài phạm vi health-check hạ tầng.
     capabilities:
       - NET_RAW
-    # "/data" là ngoại lệ DUY NHẤT còn mount cả thư mục (rw) — đây là STATE RUNTIME thật (PKI ký
-    # lúc node setup, features-enabled/ do `icinga2 feature enable` ghi trực tiếp, /var/lib/icinga2/
-    # api/zones/ do chính Icinga2 cluster config-sync ghi khi NHẬN config từ zone cha), không phải
-    # "cấu hình" Ansible sở hữu nên không per-file được — và không nên, vì Icinga2 cần tự ghi tự do.
-    # MỌI file Ansible thực sự sở hữu nội dung (config tĩnh + base config skeleton seed 1 lần từ
-    # image + script tuỳ biến + SSH key) đều mount RW PER-FILE theo yêu cầu operator.
-    # — list build sẵn ở block "Xây danh sách mount per-file ĐỘNG" phía trên (giống triết lý kolla
-    # /etc/kolla/<svc>).
+    # /data giữ runtime/PKI; /data/etc/icinga2 bị mount lồng bằng nguyên cây config chính thức RW.
+    # Nhờ vậy file do operator hoặc Icinga tự tạo trong cây config đều tồn tại trực tiếp trên host.
     volumes: "{{ _ic_dynamic_volumes }}"
     # Proxy ra Internet cho plugin/operator integration chạy trong container —
     # mạng lab bắt buộc qua proxy công ty cho MỌI traffic ra ngoài, kể cả container (đã xác nhận:

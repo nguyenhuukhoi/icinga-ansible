@@ -1,16 +1,14 @@
 ---
 # Include dùng lại cho từng file config icingaweb2 — override-aware (design.md mục 4.1).
 # Tham số: cfg.relpath (đường dẫn tương đối dưới icingaweb2/), cfg.template (file .j2 nguồn).
-# CHỈ mount TỪNG FILE riêng (không mount đè cả thư mục /data/etc/icingaweb2) — vì thư mục đó còn
-# chứa enabledModules/ (symlink do `icingacli module enable` ghi trực tiếp vào DATA mount lúc
-# chạy) — mount đè cả thư mục sẽ làm running container thấy khác chỗ với lệnh module-enable one-off,
-# gãy hoàn toàn việc bật module. Xem bài học tương tự ở role icinga2 (zones.d).
+# Toàn bộ cây đích được mount RW vào /data/etc/icingaweb2. Vì vậy file seed tại đây, symlink
+# enabledModules do icingacli tạo và file mới do UI tạo đều dùng chung đúng một cây trên host.
 #
 # SEED 1 LẦN, không đè lại (2026-07-22, theo yêu cầu người dùng: "sửa trên web UI mà không bị mất").
 # Khác mọi role khác trong dự án (nơi override/template LUÔN re-render mỗi `reconfigure`) — ở đây
 # `force: false` khiến 2 task copy/template bên dưới CHỈ ghi nếu đích CHƯA tồn tại. Kết hợp với việc
-# mount RW (không phải `ro`, xem "Khởi động container icingaweb2" trong main.yml — khác hẳn mọi file
-# per-file khác trong dự án), Icinga Web (chạy trong container, uid `web_uid`) tự ghi trực tiếp được
+# mount nguyên thư mục RW (không phải `ro`, xem "Khởi động container icingaweb2" trong main.yml),
+# Icinga Web (chạy trong container, uid `web_uid`) tự ghi trực tiếp được
 # vào các file này khi người dùng thao tác qua UI (vd Configuration > Resources > New Resource) — và
 # KHÔNG bị Ansible ghi đè lại ở lần `reconfigure` sau.
 # ĐÁNH ĐỔI THẬT: đổi mật khẩu DB trong globals.yml/passwords.yml rồi `reconfigure` sẽ KHÔNG tự áp

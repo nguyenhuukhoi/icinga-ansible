@@ -24,9 +24,21 @@ từ `satellite_zones`; client có zone một endpoint.
 
 Repo chứa logic. `/etc/icinga-ansible` trên deployment node chứa `globals.yml`, `passwords.yml` và
 nguồn override/operator. Node đích nhận config tại `/etc/icinga-ansible`; state ghi được nằm dưới
-`/var/lib/icinga-ansible`. Các volume/file cấu hình do role đưa vào container được bind-mount
-read-write (`rw`) để runtime có thể cập nhật khi cần; input archive chỉ dùng để restore vẫn giữ
-read-only theo nguyên tắc tối thiểu quyền.
+`/var/lib/icinga-ansible`. Mỗi service mount **nguyên thư mục config** read-write (`rw`), không mount
+từng file. Vì vậy UI/daemon tạo file mới hoặc thay file bằng atomic rename vẫn ghi bền vững về host.
+Input archive chỉ dùng để restore vẫn giữ read-only theo nguyên tắc tối thiểu quyền.
+
+| Service | Cây config trên host | Đích trong container |
+|---|---|---|
+| Icinga 2 | `/etc/icinga-ansible/icinga2` | `/data/etc/icinga2` |
+| Icinga Web 2 + Director | `/etc/icinga-ansible/icingaweb2` | `/data/etc/icingaweb2` |
+| Icinga DB | `/etc/icinga-ansible/icingadb` | `/etc/icingadb` |
+| Redis của Icinga DB | `/etc/icinga-ansible/icingadb-redis` | `/usr/local/etc/redis` |
+| MariaDB/Galera | `/etc/icinga-ansible/mariadb` | `/etc/mysql/conf.d` |
+
+`/data` hoặc datadir vẫn là mount runtime riêng. Với Icinga 2/Web, mount config lồng bên trong `/data`
+cố ý che cây config cũ. Deploy đầu tiên sau nâng cấp chỉ migrate file còn thiếu từ cây cũ, không ghi
+đè file đã có dưới `/etc/icinga-ansible`.
 
 Role không đọc, copy, mount hoặc xoá `zones.d`. Cấu hình hạ tầng mới do role sở hữu được kiểm tra
 bằng `icinga2 daemon -C` với đúng tập mount trước khi container phục vụ bị thay đổi.
@@ -67,10 +79,11 @@ accept-commands; không tạo Host/Service cho các node này.
 CA private key được sao sang master peer để còn khả năng ký certificate khi CA host chính lỗi. Backup
 PKI vẫn bắt buộc trước mọi thay đổi phá huỷ.
 
-### 9.3. Config sync
+### 9.3. Config monitoring
 
-Chỉ CA host giữ file authoritative trong master/global/satellite zone. Peer nhận qua Icinga cluster
-config-sync; không mount local zone file lên peer vì sẽ làm zone thành authoritative sai.
+Role không quản lý hay đồng bộ `zones.d`. Operator tự triển khai static DSL trực tiếp bằng pipeline
+riêng hoặc quản lý object qua Director. Cây config được mount nguyên thư mục chỉ bảo đảm nội dung đã
+có trên từng node tồn tại bền vững; nó không biến deployment node thành nguồn monitoring config.
 
 ### 9.4. SSH và secret
 
