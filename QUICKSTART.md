@@ -131,8 +131,48 @@ trong `zones.d`. Đặc biệt, `/etc/icinga-ansible/config/icinga2/zones.d` tr�
 còn là nguồn cấu hình và nội dung đặt tại đó sẽ bị bỏ qua. Operator phải dùng quy trình triển khai
 riêng nếu không dùng Director.
 
-Script riêng đặt trong `custom-plugins`; credential không nhúng vào DSL/script mà đặt dưới một tầng
-`secret/` phù hợp. Những thư mục này chỉ là kênh vận chuyển an toàn, không phải object generator.
+Script riêng đặt trong `custom-plugins`; credential dùng chung cho mọi Icinga node đặt trong `secret/`,
+còn `/etc/icinga-ansible/config/icinga2/secrets/` chỉ được chuyển tới master. Credential theo role/host
+đặt dưới tầng `secret/` tương ứng. Những thư mục này chỉ là kênh vận chuyển an toàn, không phải object
+generator.
+
+### Monitor Nova/Cinder/Neutron bằng static file, thực thi HA từ hai master
+
+Luồng này không dùng Director. Deployment node không đọc hoặc đồng bộ `zones.d`; operator đặt object trên
+`master1` và để cơ chế config-sync gốc của Icinga chuyển sang `master2`. Đặt credential OpenStack trên
+deployment node:
+
+```bash
+install -d -m 0700 /etc/icinga-ansible/config/icinga2/secrets
+install -m 0600 ~/.config/openstack/clouds.yaml \
+  /etc/icinga-ansible/config/icinga2/secrets/clouds.yaml
+install -d -m 0750 /etc/icinga-ansible/config/icinga2/custom-plugins
+install -m 0755 examples/openstack-file-monitoring/check_openstack_service.py \
+  /etc/icinga-ansible/config/icinga2/custom-plugins/check_openstack_service.py
+```
+
+Role trộn secret và đưa `clouds.yaml` vào cả hai container master tại
+`/etc/icinga-ansible/icinga2/clouds.yaml`. Plugin gọi API qua endpoint trong `clouds.yaml`; vì vậy khi
+một controller hỏng, check vẫn chạy nếu OpenStack API/VIP còn hoạt động. Từ deployment node, thực hiện
+một lần các lệnh operator sau để đặt file vào đúng zone trên `master1` (không copy lên master2 và không
+được `reconfigure` quản lý lại):
+
+```bash
+INV=ansible/inventory/my-cluster
+ZONE=csoc-monitoring  # phải bằng icinga_master_zone_name/ZoneName của cụm
+ansible -i "$INV" master1 -b -m file \
+  -a "path=/etc/icinga-ansible/icinga2/zones.d/$ZONE state=directory owner=5665 group=5665 mode=0750"
+ansible -i "$INV" master1 -b -m copy \
+  -a "src=examples/openstack-file-monitoring/openstack-nodes.conf dest=/etc/icinga-ansible/icinga2/zones.d/$ZONE/openstack-nodes.conf owner=5665 group=5665 mode=0640"
+ansible -i "$INV" master1 -b -m copy \
+  -a "src=examples/openstack-file-monitoring/openstack-services.conf dest=/etc/icinga-ansible/icinga2/zones.d/$ZONE/openstack-services.conf owner=5665 group=5665 mode=0640"
+ansible -i "$INV" master1 -b -m command -a 'docker exec icinga2 icinga2 daemon -C'
+ansible -i "$INV" master1 -b -m command -a 'docker kill --signal=HUP icinga2'
+```
+
+Icinga đồng bộ nội dung zone sang master peer; hai endpoint trong cùng `ZoneName` phối hợp HA và tự chọn
+endpoint thực thi. Không đặt `command_endpoint` trỏ tới controller. File nguồn trên deployment node dưới
+`config/icinga2/zones.d` vẫn bị bỏ qua; đây là chủ ý để tool không ghi đè monitoring DSL.
 
 ## 6. Thêm, sửa và xoá node
 

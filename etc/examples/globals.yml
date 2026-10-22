@@ -163,6 +163,7 @@ enable_icingaweb2_modules:
 
 # File nhạy cảm dành cho nội dung operator tự quản lý đặt tại:
 #   config/icinga2/secret/                         (mọi Icinga node)
+#   config/icinga2/secrets/                        (chỉ master; API credentials như clouds.yaml)
 #   config/icinga2/group_master/secret/                  (chỉ master)
 #   config/icinga2/group_satellite/secret/               (chỉ satellite)
 #   config/icinga2/group_client/secret/                  (chỉ client)
@@ -174,6 +175,7 @@ enable_icingaweb2_modules:
 # Có thể override đường dẫn global và đường dẫn trong container nếu cần. Các tầng role/host luôn nằm
 # dưới deploy_config_dir để cấu trúc override nhất quán với phần config Icinga 2 còn lại.
 icinga2_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secret"
+icinga2_master_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secrets"
 icinga2_secret_container_dir: "/etc/icinga-ansible/icinga2"
 
 # (nâng cao) version module web đi THEO image icingaweb2 (module build sẵn trong image) — thường

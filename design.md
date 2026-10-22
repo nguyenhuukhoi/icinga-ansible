@@ -81,14 +81,20 @@ PKI vẫn bắt buộc trước mọi thay đổi phá huỷ.
 
 ### 9.3. Config monitoring
 
-Role không quản lý hay đồng bộ `zones.d`. Operator tự triển khai static DSL trực tiếp bằng pipeline
-riêng hoặc quản lý object qua Director. Cây config được mount nguyên thư mục chỉ bảo đảm nội dung đã
-có trên từng node tồn tại bền vững; nó không biến deployment node thành nguồn monitoring config.
+Role không quản lý hay đồng bộ `zones.d`. Operator tự triển khai static DSL trực tiếp lên master đầu
+tiên bằng pipeline riêng hoặc quản lý object qua Director. Với static HA, config đặt trong
+`zones.d/<ZoneName>` trên master đầu tiên được **Icinga** config-sync sang master peer; đây không phải
+deployment node ghi đè monitoring config. Cây config được mount nguyên thư mục chỉ bảo đảm nội dung
+đã có trên node tồn tại bền vững.
 
 ### 9.4. SSH và secret
 
 SSH key, plugin và credential chỉ là kênh vận chuyển operator-owned. Chúng không kích hoạt object nào
 nếu operator chưa tự định nghĩa CheckCommand/Host/Service.
+
+Tầng `config/icinga2/secrets` chỉ được phân phối tới master, dành cho API credential như
+`clouds.yaml`; tầng `config/icinga2/secret` vẫn là global cho mọi Icinga node. Runtime secret được
+mount tại `/etc/icinga-ansible/icinga2` trong container và không được ghi vào monitoring DSL.
 
 ### 9.6. Custom image
 

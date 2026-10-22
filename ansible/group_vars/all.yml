@@ -108,9 +108,10 @@ icingaweb2_timezone: "Asia/Ho_Chi_Minh"
 # Secret file tùy ý cho plugin chạy trong container Icinga 2. Nguồn nằm trên deployment node;
 # role đồng bộ sang từng Icinga node rồi mount read-write vào đường dẫn container bên dưới.
 # Ví dụ: credential API hoặc private key riêng của plugin. Không commit thư mục nguồn vào Git.
-# Đây là tầng global. Role tự trộn thêm <role>/secret và <inventory_hostname>/secret theo thứ
-# tự global -> role -> host; file cùng đường dẫn tương đối ở tầng sau ghi đè tầng trước.
+# Tầng global áp dụng cho mọi Icinga node. Tầng `secrets` riêng bên dưới chỉ áp dụng cho master,
+# dùng cho credential API (ví dụ clouds.yaml) của check thực thi trực tiếp từ master.
 icinga2_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secret"
+icinga2_master_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secrets"
 icinga2_secret_container_dir: "/etc/icinga-ansible/icinga2"
 
 # --- Proxy (globals override; mặc định dùng /etc/environment của managed node) -
