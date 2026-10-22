@@ -366,19 +366,11 @@
   register: _ic_existing_master_constants
   when: inventory_hostname in groups['master']
 
-- name: Đọc ZoneName hiện tại trước khi reconfigure master
-  ansible.builtin.slurp:
-    src: "{{ icinga_etc_dir }}/icinga2/constants.conf"
-  register: _ic_existing_master_constants_content
-  when:
-    - inventory_hostname in groups['master']
-    - _ic_existing_master_constants.stat.exists | default(false)
-
-- name: Trích ZoneName hiện tại từ constants.conf của master
-  ansible.builtin.set_fact:
-    _ic_existing_master_zone_names: >-
-      {{ (_ic_existing_master_constants_content.content | b64decode)
-         | regex_findall('(?m)^\s*const\s+ZoneName\s*=\s*"([^"]+)"\s*$') }}
+- name: Đọc ZoneName hiệu lực bằng chính Icinga 2 trước khi reconfigure master
+  ansible.builtin.command: "{{ ic_run }} icinga2 variable get ZoneName"
+  register: _ic_existing_master_zone_result
+  changed_when: false
+  failed_when: false
   when:
     - inventory_hostname in groups['master']
     - _ic_existing_master_constants.stat.exists | default(false)
@@ -386,13 +378,16 @@
 - name: Chặn đổi tên master zone ngầm trên cluster đang chạy
   ansible.builtin.assert:
     that:
-      - _ic_existing_master_zone_names | length == 1
-      - _ic_existing_master_zone_names[0] == icinga_master_zone_name
+      - _ic_existing_master_zone_result.rc == 0
+      - _ic_existing_master_zone_result.stdout | trim | length > 0
+      - _ic_existing_master_zone_result.stdout | trim == icinga_master_zone_name
     fail_msg: >-
-      Master này có ZoneName {{ _ic_existing_master_zone_names | default([]) | join(', ') | default('<không đọc được>', true) }},
-      khác giá trị yêu cầu '{{ icinga_master_zone_name }}'. Không đổi icinga_master_zone_name bằng
-      reconfigure; hãy giữ tên cũ hoặc dùng quy trình migration topology riêng. Tên tùy chọn được
-      hỗ trợ ngay từ lần deploy đầu.
+      Master này có ZoneName
+      {{ (_ic_existing_master_zone_result.stdout | default('') | trim)
+         or ('<không đọc được: ' ~ (_ic_existing_master_zone_result.stderr | default('') | trim) ~ '>') }},
+      khác giá trị yêu cầu '{{ icinga_master_zone_name }}'. Hãy chạy qua tools/icinga-ansible để nạp
+      /etc/icinga-ansible/globals.yml và giữ nguyên tên zone hiện tại; không đổi
+      icinga_master_zone_name bằng reconfigure. Đổi tên cần quy trình migration topology riêng.
   when:
     - inventory_hostname in groups['master']
     - _ic_existing_master_constants.stat.exists | default(false)
