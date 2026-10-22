@@ -1,8 +1,0 @@
-; {{ ansible_managed }}
-; Dùng bởi icingacli director kickstart trên ca_host, không phải credential Web API.
-[config]
-endpoint = "{{ ca_host }}"
-host = "{{ hostvars[ca_host].ansible_host | default(ca_host) }}"
-port = "{{ icinga2_api_port }}"
-username = "director"
-password = {{ icinga2_director_api_user_password | to_json }}

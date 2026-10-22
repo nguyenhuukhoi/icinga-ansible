@@ -1,8 +1,7 @@
 # Inventory thật — 2 master (HA) + 2 satellite (1 zone con) + 3 node Galera cluster thật.
 # Deployment node TÁCH RIÊNG (10.10.10.151, không nằm trong inventory này).
-# client1/client2 (10.10.10.159/160) KHÔNG nằm trong inventory — không phải node icinga2, monitor
-# qua SSH check (client1 qua zone "master", client2 qua zone satellite "dc-main") — xem
-# deploy_config_dir/icinga2/zones.d/{master,dc-main}/hosts.conf.
+# Inventory này chỉ khai node hạ tầng do tool quản lý. Host/Service monitoring được operator quản lý
+# độc lập và không đặt trong inventory này.
 
 [all_hosts]
 m1   ansible_host=10.10.10.152

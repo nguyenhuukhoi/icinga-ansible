@@ -55,7 +55,7 @@
       - -v
       - "{{ mariadb_data }}:/var/lib/mysql"
       - -v
-      - "{{ mariadb_etc }}/server.cnf:/etc/mysql/mariadb.conf.d/99-icinga.cnf:ro"
+      - "{{ mariadb_etc }}/server.cnf:/etc/mysql/mariadb.conf.d/99-icinga.cnf:rw"
       - "{{ images.mariadb }}"
       - mariadbd
       - --wsrep-recover

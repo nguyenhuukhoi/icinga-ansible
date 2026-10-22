@@ -193,13 +193,15 @@
         fail_msg: >-
           Icinga DB có lỗi nghiêm trọng trong 5 phút gần đây; xem `docker logs --since 5m icingadb`.
 
-    - name: Kiểm tra Director còn chờ người dùng Kickstart không
+    # `kickstart required` phụ thuộc vào kickstart.ini. Khi operator kickstart thủ công rồi xóa
+    # credential tạm (cách an toàn), lệnh đó trả rc=2 "not configured" dù endpoint đã tồn tại trong
+    # Director DB. Endpoint external của CA host mới là dấu hiệu bền vững rằng kickstart đã hoàn tất.
+    - name: Kiểm tra Director đã có endpoint CA do operator Kickstart chưa
       ansible.builtin.command:
-        argv: [docker, exec, icingaweb2, icingacli, director, kickstart, required]
-      register: _director_kickstart_required
+        argv: [docker, exec, icingaweb2, icingacli, director, endpoint, show, "{{ ca_host }}", --json]
+      register: _director_endpoint_show
       changed_when: false
-      # rc=2: chưa cấu hình; rc=0: đã cấu hình nhưng cần chạy; rc=1: đã hoàn tất.
-      failed_when: _director_kickstart_required.rc not in [0, 1, 2]
+      failed_when: false
       when:
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
@@ -212,14 +214,14 @@
       when:
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
-        - _director_kickstart_required.rc in [0, 2]
+        - _director_endpoint_show.rc != 0
 
     - name: Kết thúc kiểm tra sâu trên CA host khi Director chưa Kickstart
       ansible.builtin.meta: end_host
       when:
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
-        - _director_kickstart_required.rc in [0, 2]
+        - _director_endpoint_show.rc != 0
 
     - name: Director CLI phải báo healthy sau Kickstart
       ansible.builtin.command:
@@ -229,50 +231,9 @@
         - inventory_hostname == ca_host
         - "'director' in (enable_icingaweb2_modules | default([]))"
 
-    - name: Tính chính xác endpoint và zone Director phải import từ topology hiện tại
-      ansible.builtin.set_fact:
-        _director_expected_endpoints: >-
-          {{ ((groups['master'] | default([]))
-              + (groups['satellite'] | default([]))
-              + (groups['client'] | default([]))) | unique | sort | join(',') }}
-        _director_expected_zones: >-
-          {{ (['director-global', 'global-templates', icinga_master_zone_name]
-              + (satellite_zones | default([]) | map(attribute='name') | list)
-              + (groups['client'] | default([]))) | unique | sort | join(',') }}
-      when:
-        - inventory_hostname == ca_host
-        - "'director' in (enable_icingaweb2_modules | default([]))"
-
-    - name: Director phải đã import chính xác endpoint và zone của topology hiện tại
-      ansible.builtin.command: >-
-        docker run --rm --network host -e MYSQL_PWD {{ images.mariadb }}
-        mariadb {{ _mariadb_ssl_flag }} -h {{ db_host }} -P {{ db_port }}
-        -udirector -N director
-        -e "SELECT GROUP_CONCAT(object_name ORDER BY object_name SEPARATOR ',')
-            FROM icinga_endpoint WHERE object_type='external_object';
-            SELECT GROUP_CONCAT(object_name ORDER BY object_name SEPARATOR ',')
-            FROM icinga_zone WHERE object_type='external_object';"
-      environment:
-        MYSQL_PWD: "{{ director_db_password }}"
-      register: _director_topology
-      changed_when: false
-      no_log: true
-      when:
-        - inventory_hostname == ca_host
-        - "'director' in (enable_icingaweb2_modules | default([]))"
-
-    - name: Xác nhận topology Director khớp inventory
-      ansible.builtin.assert:
-        that:
-          - _director_topology.stdout_lines | length == 2
-          - _director_topology.stdout_lines[0] == _director_expected_endpoints
-          - _director_topology.stdout_lines[1] == _director_expected_zones
-        fail_msg: >-
-          Endpoint/zone external_object của Director không khớp chính xác topology hiện tại;
-          có thể còn object của node đã xóa hoặc thiếu node vừa thêm.
-      when:
-        - inventory_hostname == ca_host
-        - "'director' in (enable_icingaweb2_modules | default([]))"
+    # Monitoring objects are operator-owned file configuration. Director may remain enabled for
+    # its UI/module, but its imported endpoint/zone objects are not the infrastructure source of
+    # truth and must not make add/remove-node health checks fail.
 
 - name: Check managed MariaDB/Galera
   hosts: galera

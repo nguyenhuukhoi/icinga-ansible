@@ -12,6 +12,81 @@
     fail_msg: "Chỉ hỗ trợ Ubuntu 24.04 / 26.04 (đang: {{ ansible_distribution }} {{ ansible_distribution_version }})"
   tags: [bootstrap]
 
+# Ansible gathers facts through a non-login shell, so ansible_facts.env does not reliably contain
+# values that PAM would load from /etc/environment for an interactive SSH session. Read the file
+# explicitly before the first network operation; this keeps the documented fallback working on a
+# completely fresh node where direct Internet access is unavailable.
+- name: (bootstrap) Đọc proxy hiện có trực tiếp từ /etc/environment
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import json, pathlib;
+        keys={'http_proxy','https_proxy','no_proxy','HTTP_PROXY','HTTPS_PROXY','NO_PROXY'};
+        lines=pathlib.Path('/etc/environment').read_text().splitlines()
+        if pathlib.Path('/etc/environment').exists() else [];
+        pairs=(line.split('=',1) for line in lines if '=' in line and not line.lstrip().startswith('#'));
+        print(json.dumps({k:v.strip().strip('"').strip("'") for k,v in pairs if k.strip() in keys}))
+  register: _managed_environment_file_result
+  changed_when: false
+  no_log: true
+  tags: [bootstrap]
+
+- name: (bootstrap) Dùng proxy /etc/environment làm fallback cho task mạng
+  ansible.builtin.set_fact:
+    _managed_host_environment_file: "{{ _managed_environment_file_result.stdout | from_json }}"
+  no_log: true
+  tags: [bootstrap]
+
+# Materialize this as a host fact. Variables from group_vars may already have been templated while
+# loading the role, before the remote environment file was read.
+- name: (bootstrap) Chốt environment proxy trước tác vụ APT và download
+  ansible.builtin.set_fact:
+    proxy_environment: >-
+      {{ {'http_proxy': (proxy_http_effective
+                         if (proxy_http_effective | default('')) | length > 0
+                         else (_managed_host_environment_file.get('http_proxy', '') or
+                               _managed_host_environment_file.get('HTTP_PROXY', ''))),
+          'https_proxy': (proxy_https_effective
+                          if (proxy_https_effective | default('')) | length > 0
+                          else (_managed_host_environment_file.get('https_proxy', '') or
+                                _managed_host_environment_file.get('HTTPS_PROXY', ''))),
+          'no_proxy': (proxy_no_proxy_effective
+                       if (proxy_http_effective | default('')) | length > 0
+                       else (_managed_host_environment_file.get('no_proxy', '') or
+                             _managed_host_environment_file.get('NO_PROXY', '')))} }}
+  no_log: true
+  tags: [bootstrap]
+
+- name: (bootstrap) Cấu hình APT dùng proxy với timeout hữu hạn
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/90icinga-ansible-proxy
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      Acquire::http::Proxy "{{ proxy_environment.http_proxy }}";
+      Acquire::https::Proxy "{{ proxy_environment.https_proxy }}";
+      Acquire::Retries "3";
+      Acquire::http::Timeout "30";
+      Acquire::https::Timeout "30";
+      Acquire::ForceIPv4 "true";
+  no_log: true
+  when:
+    - (proxy_environment.http_proxy | default('')) | length > 0
+    - (proxy_environment.https_proxy | default('')) | length > 0
+  tags: [bootstrap]
+
+- name: (bootstrap) Gỡ cấu hình proxy APT khi node không dùng proxy
+  ansible.builtin.file:
+    path: /etc/apt/apt.conf.d/90icinga-ansible-proxy
+    state: absent
+  when:
+    - (proxy_environment.http_proxy | default('')) | length == 0
+    - (proxy_environment.https_proxy | default('')) | length == 0
+  tags: [bootstrap]
+
 # *_effective (group_vars/all.yml): áp dụng proxy_group_overrides theo đúng nhóm vai trò của HOST
 # NÀY (master/satellite/galera/client) — rơi về proxy_http/https/no_proxy global nếu nhóm không có
 # override riêng. Dùng *_effective ở đây (thay vì proxy_http thẳng) để 1 host thuộc nhóm có override
@@ -92,59 +167,6 @@
   retries: 8
   delay: 10
   until: _bootstrap_base_packages_result is succeeded
-  tags: [bootstrap]
-
-# Plugin nằm trên host bị monitor; Icinga master chỉ gọi executable qua check_by_ssh. Dùng repo
-# DEB đã ký của Linuxfabrik thay vì curl|bash để Ansible quản lý trạng thái và nâng cấp rõ ràng.
-- name: (bootstrap) Chuẩn bị keyring cho Linuxfabrik monitoring plugins
-  ansible.builtin.file:
-    path: /etc/apt/keyrings
-    state: directory
-    mode: "0755"
-  when: enable_check_by_ssh_target_plugins | default(false) | bool
-  tags: [bootstrap]
-
-- name: (bootstrap) Tải khoá ký Linuxfabrik monitoring plugins
-  ansible.builtin.get_url:
-    url: https://repo.linuxfabrik.ch/linuxfabrik.key
-    dest: /etc/apt/keyrings/linuxfabrik.asc
-    mode: "0644"
-  environment: "{{ proxy_environment }}"
-  register: _bootstrap_linuxfabrik_key_result
-  retries: 8
-  delay: 10
-  until: _bootstrap_linuxfabrik_key_result is succeeded
-  when: enable_check_by_ssh_target_plugins | default(false) | bool
-  tags: [bootstrap]
-
-- name: (bootstrap) Khai báo repo Linuxfabrik monitoring plugins
-  ansible.builtin.apt_repository:
-    repo: >-
-      deb [signed-by=/etc/apt/keyrings/linuxfabrik.asc]
-      https://repo.linuxfabrik.ch/monitoring-plugins/ubuntu/
-      {{ ansible_distribution_release }}-release main
-    filename: linuxfabrik-monitoring-plugins
-    state: present
-  environment: "{{ proxy_environment }}"
-  register: _bootstrap_linuxfabrik_repo_result
-  retries: 8
-  delay: 10
-  until: _bootstrap_linuxfabrik_repo_result is succeeded
-  when: enable_check_by_ssh_target_plugins | default(false) | bool
-  tags: [bootstrap]
-
-- name: (bootstrap) Cài Linuxfabrik monitoring plugins cho check_by_ssh
-  ansible.builtin.apt:
-    name: linuxfabrik-monitoring-plugins
-    update_cache: true
-    lock_timeout: 300
-    state: present
-  environment: "{{ proxy_environment }}"
-  register: _bootstrap_linuxfabrik_packages_result
-  retries: 8
-  delay: 10
-  until: _bootstrap_linuxfabrik_packages_result is succeeded
-  when: enable_check_by_ssh_target_plugins | default(false) | bool
   tags: [bootstrap]
 
 - name: (bootstrap) Bật & khởi động chrony (đồng bộ giờ — bắt buộc)

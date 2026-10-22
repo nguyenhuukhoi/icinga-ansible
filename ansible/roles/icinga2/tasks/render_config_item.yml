@@ -1,14 +1,8 @@
 ---
 # Include dùng lại cho từng file config icinga2 — override-aware (design.md mục 4.1).
 # Tham số: cfg.relpath (đường dẫn tương đối dưới icinga2/), cfg.template (file .j2 nguồn).
-# CHỈ dùng cho file KHÔNG bị tiến trình khác ghi lúc chạy (constants.conf, zones.conf,
-# features-available/icingadb.conf, conf.d/*). zones.d/master/clients.conf và zones.d/<zone>/
-# hosts.conf KHÔNG qua đây — chỉ render 1 lần trên ca_host (không phải mọi node), không có cơ chế
-# override per-host, và đích ghi là zones.d/ (path Icinga2 tự quét, không include tường minh) — xem
-# render_satellite_zone.yml + task render zones.d/master trong main.yml. Dù vậy 2 loại file này VẪN
-# mount RO per-file vào container CHỈ trên ca_host — xem block "Xây danh sách mount per-file ĐỘNG"
-# trong main.yml (đã verify: các node khác không có file này cục bộ, nhận nội dung qua chính cluster
-# config-sync của Icinga2 vào /var/lib/icinga2/api/zones/..., không qua bind-mount này).
+# CHỈ dùng cho config hạ tầng do role sở hữu: constants.conf, zones.conf,
+# features-available/icingadb.conf và conf.d/api-users.conf. Role không đọc hoặc đồng bộ zones.d.
 #
 # Tầng "theo nhóm" (2026-07-23, theo yêu cầu người dùng) — chèn GIỮA per-host và global: override
 # tại config/icinga2/group_<tên_nhóm_inventory>/<relpath> áp dụng cho MỌI host thuộc nhóm đó (vd

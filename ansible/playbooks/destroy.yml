@@ -134,7 +134,7 @@
       when: _etc_dir_stat.stat.exists
 
     # BUG THẬT phát hiện qua chính dry-run (--check) khi verify fix "external không đụng DB" ở trên —
-    # task này xoá CẢ config đã render (icinga_etc_dir/mariadb/server.cnf, mount :ro vào container)
+    # task này xoá CẢ config đã render (icinga_etc_dir/mariadb/server.cnf, mount :rw vào container)
     # KHÔNG hề xét icinga_database_type, dù đã loại "mariadb" khỏi 2 chỗ data/container ở trên. Xoá
     # mất file config này không giết container đang chạy ngay (container đã mở file, không tự đọc
     # lại), nhưng lần restart/reboot host TIẾP THEO container sẽ cố bind-mount 1 file không còn tồn

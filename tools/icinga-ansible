@@ -74,7 +74,6 @@ Vòng đời (2026-07-22: "deploy" KHÔNG còn tự chạy kèm "bootstrap-serve
 (2026-07-22, sửa lại) KHÔNG còn xoá docker network/cấu trúc thư mục nữa (giữ nguyên, giống
 kolla-ansible), nên sau "destroy" chỉ cần "deploy" thẳng, KHÔNG cần "bootstrap-servers" lại):
   bootstrap-servers   Cài Docker, chrony, tạo thư mục/mạng — chỉ cần 1 lần trên host mới
-  prepare-check-by-ssh Tạo key monitoring riêng, authorize trên target và pin known_hosts
   prechecks           Kiểm tra tiền deploy (topology, version, cổng)
   pull                Kéo image về host
   deploy              Triển khai toàn bộ stack (giả định host ĐÃ bootstrap ít nhất 1 lần)
@@ -265,7 +264,7 @@ init_config() {
   RESTORE_MEMBERS="$(mktemp)"
   RESTORE_STAGE="$(mktemp -d)"
   trap 'rm -f "$RESTORE_MEMBERS"; sudo rm -rf "$RESTORE_STAGE"' EXIT
-  sudo tar -tzf "$CONFIG_BACKUP" > "$RESTORE_MEMBERS"
+  sudo tar -tzf "$CONFIG_BACKUP" | tee "$RESTORE_MEMBERS" >/dev/null
   if grep -Eq '(^|/)\.\.(/|$)|^/' "$RESTORE_MEMBERS"; then
     echo "Backup chứa đường dẫn không an toàn; từ chối restore." >&2
     exit 1
@@ -305,7 +304,7 @@ init_config() {
   echo "Đã restore cấu hình vào $CONFIG_DIR_REAL."
   echo "Tiếp theo: kiểm tra lại $GLOBALS (đổi IP/hostname nếu hạ tầng mới khác hạ tầng cũ), rồi"
   echo "  bootstrap-servers -> (tuỳ chọn) restore-pki -> deploy -> mariadb-recovery -> recover-db-only"
-  echo "  -> restore-web -> deploy -> check. Xem QUICKSTART.md mục 7.1 để dùng đúng timestamp/confirm."
+  echo "  -> restore-web -> deploy -> check. Xem QUICKSTART.md mục 7.2 để dùng đúng timestamp/confirm."
   exit 0
 }
 
@@ -347,12 +346,6 @@ run() {   # run <ansible extra args...>
 
 case "$COMMAND" in
   bootstrap-servers) set_default_tags bootstrap; run "${TAG_ARGS[@]}" ;;
-  prepare-check-by-ssh)
-    cd "$ANSIBLE_DIR"
-    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/prepare-check-by-ssh.yml" \
-      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
-      "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
-    ;;
   prechecks)         set_default_tags prechecks; run "${TAG_ARGS[@]}" ;;
   deploy)            set_default_tags deploy; run "${TAG_ARGS[@]}" ;;
   reconfigure)       set_default_tags deploy; run "${TAG_ARGS[@]}" -e icinga_action=reconfigure ;;

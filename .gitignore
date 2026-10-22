@@ -36,12 +36,13 @@ ansible/inventory/multinode
 # generic, không được nhắc trong yêu cầu gốc nhưng rõ ràng không nên lên public repo.
 /.tmp/
 
-# Toàn bộ .md ở top-level, TRỪ README/QUICKSTART/DEPLOY-STEP-BY-STEP (theo yêu cầu người dùng) —
-# các file .md khác (design.md, TODO.md, ICINGA-LAB-*.md...) là nhật ký làm việc/lab cụ thể, không
-# phải tài liệu generic của tool. README.md trong thư mục con (vd examples/openstack-rbac/README.md)
-# KHÔNG bị ảnh hưởng vì pattern có "/" ở đầu (chỉ khớp top-level).
+# Chỉ track bộ tài liệu generic của tool ở top-level; các nhật ký/audit lab khác không được commit.
+# README.md trong thư mục con không bị ảnh hưởng vì pattern có "/" ở đầu (chỉ khớp top-level).
 /*.md
 !/README.md
 !/QUICKSTART.md
+!/QUICKSTART-LEGACY.md
 !/DEPLOY-STEP-BY-STEP.md
 !/OPERATIONS-RUNBOOK-VI.md
+!/design.md
+!/TODO.md

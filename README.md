@@ -1,199 +1,142 @@
 # icinga-ansible
 
-Deploy & operate stack Icinga (Icinga 2 + Icinga DB + Icinga Web 2 + MariaDB) bằng
-Ansible + Docker, phong cách kolla-ansible. Thiết kế đầy đủ: [`design.md`](design.md).
+Ansible project để triển khai và vận hành **hạ tầng Icinga** trên Docker:
 
-> 🆕 **Mới bắt đầu?** Đọc [`QUICKSTART.md`](QUICKSTART.md) — hướng dẫn từng bước, đầy đủ và dễ tiếp
-> cận hơn README này (giải thích khái niệm, sự cố thường gặp, ví dụ chạy thật).
+- Icinga 2 master/satellite/client topology, PKI và API;
+- Icinga DB, Redis và Icinga Web 2;
+- MariaDB standalone hoặc Galera 3+ node;
+- Director module/schema (tuỳ chọn), backup/restore và rolling upgrade;
+- vòng đời node: thêm, cấu hình lại và xoá master/satellite.
 
-> Checklist go-live và regression mới nhất: [`PRODUCTION_READINESS.md`](PRODUCTION_READINESS.md).
+## Ranh giới quản lý
 
-> **Trạng thái: P1, P2 (HA N-master, KHÔNG VIP), P3 (satellite), Galera cluster thật (≥3 node), kiến
-> trúc config kiểu kolla-ansible (`/etc/icinga-ansible/<svc>` trên từng node + override) — ĐÃ VERIFY
-> chạy thật**, bao gồm cả `add-master`/`remove-master`/`add-node`/`remove-node` (P5), trên host thật
-> (Ubuntu 24.04). P1: all-in-one, destroy→deploy sạch, login+dashboard OK. P2/P3: verify trên 7 host
-> thật — **2 master + 2 satellite + 3 node Galera cluster thật** (`wsrep_cluster_size=3`, `Primary`,
-> `wsrep_ready=ON`) — cluster zone HA thật sự kết nối (xác nhận qua Icinga2 API, không chỉ log),
-> icingadb leader election, CA HA. Đã test full round-trip: xoá + thêm lại 1 master và 1 satellite
-> đang chạy, cluster phục hồi hoàn toàn cả 2 lần. Kiến trúc config: mount per-file (không mount cả
-> thư mục — tránh phá `zones.d`/`enabledModules` do runtime tự ghi), override thật đã test 2 chiều
-> (đặt override → ăn đúng host → xoá override → tự revert template). **Client (command endpoint)** —
-> tính năng mới ngoài roadmap gốc — cũng đã verify: Host/Service thật (check `ssh`) chạy qua command
-> endpoint, `state: 0` (OK) thật. Chi tiết + bug đã gặp/đã fix: xem [`TODO.md`](TODO.md).
->
-> **P4 (DB backup/recovery):** backup có nhãn + `mariadb-recovery restore-backup` ĐÃ VERIFY thật;
-> trường hợp chỉ còn DB backup có thêm `recover-db-only` để phục hồi Icinga DB environment ID lên
-> mọi master và xoá Redis state tạm. Identity/Redis recovery smoke drill trên cụm 2 master + 3
-> Galera đã PASS; full drill mất trắng filesystem hai master vẫn còn cần chạy.
-> `recover-cluster` (cứu cụm chết) đã code, smoke-test còn dở. **Version model ĐỔI (2026-07-22):** bỏ
-> `version-matrix.yml`, khai thẳng `icinga_image_versions` trong `globals.yml`. **P5 (upgrade/rollback):**
-> ĐÃ verify end-to-end trên standalone và Galera 3 node đến ngày 2026-09-06: backup pre-upgrade,
-> failure drill 11.8.9→12.0.2 dừng đúng và rollback giữ nguyên data; sau đó rolling LTS chính thức
-> **11.8.9→12.3.3 thành công đủ ba node**, replication/deep check PASS. Đổi MariaDB series bị chặn
-> mặc định và Galera provider không được downgrade; path đã review cần opt-in tường minh. Load balancer (VIP web) chưa triển khai và role
-> sẽ fail cứng; xem ranh giới hỗ trợ trong [`PRODUCTION_READINESS.md`](PRODUCTION_READINESS.md).
->
-> 👉 **Người làm tiếp đọc [`TODO.md`](TODO.md)** — trạng thái, bug đã fix (bài học), roadmap P4–P6.
+Project này **không tạo, đọc, đồng bộ hoặc xoá nội dung monitoring**. Ansible không quản lý
+`Host`, `Service`, `CheckCommand`, `Notification`, apply rule hoặc bất kỳ file nào trong `zones.d`.
+Operator tự quản lý object bằng Icinga Director/Web UI hoặc một quy trình static DSL độc lập ngoài
+project này. Đặt file dưới `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node không có
+tác dụng và `reconfigure` không vận chuyển chúng xuống node.
 
-## Thành phần (mục tiêu Icinga DB — KHÔNG dùng IDO/PDO)
-`icinga2` · `icingadb` (daemon) · `icingadb-redis` · `icingaweb2` (Apache2) · `mariadb`
+Script riêng đặt tại
+`/etc/icinga-ansible/config/icinga2/custom-plugins/`; secret của script có thể đặt tại các tầng
+`config/icinga2/secret`, `group_master/secret`, `group_satellite/secret`, `group_client/secret`
+hoặc `<inventory_hostname>/secret`.
 
 ## Cấu trúc
+
+```text
+ansible/                 playbook, inventory mẫu, roles và playbook vận hành
+etc/examples/            template globals.yml và passwords.yml
+tools/icinga-ansible     CLI chính
+tools/validate           syntax-check toàn bộ playbook
 ```
-ansible/          playbook, inventory, group_vars, roles/, playbooks/ (destroy, upgrade, rollback, mariadb-recovery...)
-etc/examples/     TEMPLATE mặc định (globals.yml, passwords.yml.example) — KHÔNG sửa trực tiếp
-tools/icinga-ansible  CLI wrapper
-```
 
-**Repo và config KHÔNG chung chỗ — giống kolla-ansible (`/etc/kolla`).** Repo (code) có thể clone/
-move ở bất cứ đâu, không ảnh hưởng gì. Config **thật** (`globals.yml`, `passwords.yml`) luôn nằm ở
-đường dẫn OS cố định **`/etc/icinga-ansible/`**, tách biệt hoàn toàn với repo — sống sót qua mọi lần
-di chuyển/deploy lại code. Override đường dẫn này bằng biến môi trường `ICINGA_ANSIBLE_CONFIG_DIR`
-nếu cần (vd nhiều bộ config trên cùng máy).
+Repo chứa code. Cấu hình thật nằm riêng tại `/etc/icinga-ansible` (có thể đổi bằng
+`ICINGA_ANSIBLE_CONFIG_DIR`) và không nên commit vào Git.
 
-## Quickstart (all-in-one, đã verify trên Ubuntu 24.04/26.04)
+## Khởi tạo nhanh
 
-Clone/copy repo lên node cần deploy (đường dẫn tuỳ ý, ví dụ `/opt/icinga-ansible`), rồi:
+Yêu cầu: deployment node Linux, Python venv có Ansible, managed node Ubuntu có SSH/sudo.
 
 ```bash
-cd /opt/icinga-ansible
-
-# 1. Tạo và activate venv do operator quản lý, rồi cài Ansible bằng pip
-sudo apt update
-sudo apt install -y python3-venv
-sudo install -d -o "$(id -un)" -g "$(id -gn)" /path/to/venv
-sudo chown -R "$(id -un):$(id -gn)" /path/to/venv
 python3 -m venv /path/to/venv
 source /path/to/venv/bin/activate
-python -m pip install -U pip
-python -m pip install ansible
+python -m pip install -U pip ansible
 ansible-galaxy collection install -r ansible/requirements.yml
 
-# 2. Khởi tạo /etc/icinga-ansible từ template + sinh secrets ngẫu nhiên
-./tools/icinga-ansible init-config      # tạo /etc/icinga-ansible (cần sudo, chỉ 1 lần)
-./tools/icinga-ansible genpwd           # sinh /etc/icinga-ansible/passwords.yml
-#   Muốn đặt tay 1 giá trị cụ thể (vd mật khẩu admin web), sửa trực tiếp
-#   /etc/icinga-ansible/passwords.yml sau khi genpwd — không cần chạy lại genpwd.
-#   (tuỳ chọn) ansible-vault encrypt /etc/icinga-ansible/passwords.yml
+./tools/icinga-ansible init-config
+./tools/icinga-ansible genpwd
+$EDITOR /etc/icinga-ansible/globals.yml
+$EDITOR ansible/inventory/my-cluster
 
-# 3. Chỉnh cấu hình (mặc định đã chạy được ngay, không bắt buộc sửa)
-$EDITOR /etc/icinga-ansible/globals.yml       # icinga_image_versions (tag image), module, DB...
-
-# Nếu Harbor/registry dùng CA riêng hoặc certificate tự ký, lưu CA trên deployment node rồi khai:
-# docker_registry_ca_file: "/etc/icinga-ansible/harbor-ca.crt"
-# bootstrap-servers sẽ cài CA này vào trust store Docker trên mọi managed node.
-
-# 4. Bootstrap host (Docker Engine, chrony) — bỏ qua nếu host đã có sẵn
-./tools/icinga-ansible bootstrap-servers -i ansible/inventory/all-in-one
-
-# 5. Kiểm tra tiền deploy + triển khai
-./tools/icinga-ansible prechecks -i ansible/inventory/all-in-one
-./tools/icinga-ansible deploy    -i ansible/inventory/all-in-one
-
-# 6. Thông tin truy cập
-./tools/icinga-ansible post-deploy -i ansible/inventory/all-in-one
+./tools/icinga-ansible bootstrap-servers -i ansible/inventory/my-cluster
+./tools/icinga-ansible prechecks         -i ansible/inventory/my-cluster
+./tools/icinga-ansible deploy            -i ansible/inventory/my-cluster
+./tools/icinga-ansible check             -i ansible/inventory/my-cluster
 ```
 
-Mỗi phiên shell mới phải chạy lại `source /path/to/venv/bin/activate` trước các lệnh
-vận hành. Venv này chỉ chạy Ansible trên deployment node. Không đặt
-`ansible_python_interpreter=/path/to/venv/bin/python...` trong inventory; managed node Ubuntu dùng
-Python của chính nó (thường là `/usr/bin/python3`).
+Không chạy CLI bằng `sudo`; playbook tự `become` khi cần. Mỗi shell mới cần activate lại venv.
 
-Web: `http://<host>:8080/authentication/login` (Apache lắng nghe port **8080** trên host,
-không phải 80 — xem `icingaweb2_http_port` trong `globals.yml`).
-User: `admin` (biến `icingaweb2_admin_user`), mật khẩu: `icingaweb2_admin_password` trong `passwords.yml`.
+Ví dụ inventory 2 master + 3 Galera:
 
-### Làm lại từ đầu (destroy)
-```bash
-./tools/icinga-ansible destroy -i ansible/inventory/all-in-one -e confirm=yes-i-really-really-mean-it
-```
-Xoá **toàn bộ**: container, dữ liệu (DB, PKI ở `icinga_base_dir`) và cấu hình render trên từng host
-(`icinga_etc_dir` = `/etc/icinga-ansible`: mọi override, config từng service) — KHÔNG đụng
-Docker/chrony đã cài lẫn docker network (giữ nguyên, giống `kolla-ansible destroy`).
-**`globals.yml` + `passwords.yml` trên deployment node (control node) được GIỮ LẠI** — theo thiết kế
-(2026-07-23), vì đây là secrets/định danh cụm (mật khẩu DB, API user, admin web...); mất đi thì
-`deploy` lại sẽ tạo mật khẩu MỚI hoàn toàn, không "y hệt cụm cũ" được nữa dù đã mất data theo destroy
-rồi. Nhờ vậy sau `destroy`, chạy `deploy` **thẳng luôn** là được — không cần `init-config`/`genpwd`
-lại. Muốn xoá cả 2 file này thì tự tay `rm /etc/icinga-ansible/{globals.yml,passwords.yml}` sau khi
-destroy.
-Playbook có **2 play**: play 1 xoá dữ liệu+cấu hình trên từng host trong inventory; play 2 xoá riêng
-phần còn lại của `/etc/icinga-ansible` **trên chính máy chạy CLI** (`hosts: localhost`) — cần thiết
-vì control node **không nhất thiết** là 1 host trong inventory (vd chạy CLI từ máy vận hành/CI, SSH
-ra các node, không phải setup kiểu lab `ansible_connection=local` trùng với master). Nếu control
-node trùng với 1 host trong inventory thì play 2 chỉ xoá lại đúng chỗ play 1 đã xoá — vô hại.
-Cụm xác nhận `-e confirm=yes-i-really-really-mean-it` phải gõ **đúng nguyên văn** (giống
-`kolla-ansible destroy --yes-i-really-really-mean-it`) — thiếu hoặc gõ khác đi thì playbook tự chặn,
-không xoá gì (cố ý khó gõ nhầm/copy-paste nhầm cho 1 lệnh không hồi phục được).
-Vẫn **không cần** `bootstrap-servers` lại (Docker/chrony/thư mục base/network giữ nguyên).
+```ini
+[all_hosts]
+master1 ansible_host=10.0.0.11 ansible_user=ubuntu
+master2 ansible_host=10.0.0.12 ansible_user=ubuntu
+db1     ansible_host=10.0.0.21 ansible_user=ubuntu
+db2     ansible_host=10.0.0.22 ansible_user=ubuntu
+db3     ansible_host=10.0.0.23 ansible_user=ubuntu
 
-### Đổi mật khẩu admin web sau khi đã deploy
-Sửa `icingaweb2_admin_password` trong `/etc/icinga-ansible/passwords.yml` rồi chạy `reconfigure` —
-task tạo/update admin sẽ tự hash lại và ghi đè (không cần destroy):
-```bash
-./tools/icinga-ansible reconfigure -i ansible/inventory/all-in-one
+[master]
+master1
+master2
+
+[satellite]
+
+[client]
+
+[galera]
+db1
+db2
+db3
+
+[loadbalancer]
+
+[icinga:children]
+master
+satellite
 ```
 
-## Chọn version
-Khai THẲNG tag từng thành phần trong `/etc/icinga-ansible/globals.yml` → `icinga_image_versions`
-(icinga2/icingadb/icingadb_redis/icingaweb2/mariadb). **KHÔNG còn "bộ phiên bản"/version-matrix.yml** —
-Icinga phát hành từng thành phần độc lập, không có bundle chính thức. Dò latest-stable trên Docker Hub
-(`hub.docker.com/r/icinga/…/tags`); mariadb/redis là image official. Nâng cấp: sửa tag rồi
-`icinga-ansible upgrade` (tự backup pre-upgrade, `rollback` được — xem design.md mục 13).
+Đặt `icinga_master_zone_name` trong `globals.yml` trước lần deploy đầu. Với `managed_db`, group
+`galera` phải có đúng 1 node hoặc số lẻ từ 3 node trở lên.
 
-## Lệnh chính
-| Lệnh | Việc |
+## Lệnh vận hành
+
+| Lệnh | Chức năng |
 |---|---|
-| `init-config` | Tạo `/etc/icinga-ansible` từ template (chỉ 1 lần, không ghi đè nếu đã có) |
-| `genpwd` | Sinh `passwords.yml` với giá trị ngẫu nhiên mạnh |
-| `bootstrap-servers` | Cài Docker/chrony, tạo thư mục/mạng — **chỉ cần chạy trên host hoàn toàn mới** (chưa từng cài Docker); `deploy` không tự chạy kèm, nhưng `destroy` cũng không còn xoá thư mục/network nên KHÔNG cần chạy lại sau `destroy` |
-| `prechecks` | Kiểm tra topology, version, loại DB và credential external DB |
-| `pull` | Chỉ pull/refresh digest image cần thiết, không deploy/recreate container |
-| `deploy` | Triển khai toàn bộ (giả định host đã `bootstrap-servers` ít nhất 1 lần) |
-| `reconfigure` | Render lại config + reload (cũng dùng để đổi mật khẩu admin) |
-| `mariadb-backup` | Backup DB + snapshot CA/PKI |
-| `post-deploy` | In thông tin truy cập |
-| `check` | Health-check runtime: container, Icinga API/config, Redis, Web, DB heartbeat và Galera |
-| `destroy` | Xoá toàn bộ container + dữ liệu + cấu hình render (`/etc/icinga-ansible`, GIỮ LẠI `globals.yml`+`passwords.yml` trên deployment node) (cần `-e confirm=yes-i-really-really-mean-it`, đúng nguyên văn — giống kolla-ansible) — giữ nguyên Docker/chrony/docker network, `deploy` lại thẳng được, không cần `bootstrap-servers`/`init-config`/`genpwd` |
-| `add-master` / `add-node` | Thêm master/satellite mới (host đã có trong inventory) — chạy `deploy`; chỉ cần `bootstrap-servers` trước nếu host đó HOÀN TOÀN MỚI (chưa từng cài Docker) |
-| `remove-master` / `remove-node` | Xoá master/satellite khỏi cluster (`-e target_host=<host> -e confirm=yes`, cần tự sửa inventory + `reconfigure` sau đó — xem TODO.md) |
+| `bootstrap-servers` | Cài Docker/chrony trên node hoàn toàn mới |
+| `prechecks` | Kiểm tra inventory, topology, version và DB |
+| `deploy` / `reconfigure` | Triển khai hoặc áp dụng lại cấu hình hạ tầng |
+| `check` | Kiểm tra container, API, Web, Icinga DB, Redis và Galera |
+| `add-master` / `add-node` | Thêm master hoặc satellite đã có trong inventory |
+| `remove-master` / `remove-node` | Xoá runtime của node được chỉ định |
+| `backup-full` | Backup config, database, PKI và Web |
+| `upgrade-plan` / `upgrade` / `rollback` | Lập kế hoạch, nâng cấp và rollback |
+| `destroy` | Xoá container/data/config runtime, giữ config/secrets trên deployment node |
 
-Khi thêm hoặc xoá `director` trong `enable_icingaweb2_modules`, lần `reconfigure`
-đầu tiên sẽ **recreate container `icingaweb2`**. Đây là hành vi bắt buộc vì Docker
-không thể thêm hoặc gỡ bind mount `modules/director/config.ini` trên một container
-đang chạy. Dữ liệu Web và Director không mất:
-chúng nằm trong bind mount `/data` và MariaDB. Với nhiều master, playbook thực
-hiện rolling từng master (`serial: 1`) để tránh dừng đồng thời toàn bộ Web/API.
-Container `icingaweb2-director-daemon` được tạo mới khi bật Director và bị xóa khi
-tắt Director. Việc chỉ bật Director không được phép làm MariaDB, Icinga 2, Icinga DB
-hoặc Redis bị restart/recreate. Khi tạo DB Director lần đầu, role chỉ dừng daemon
-Director cũ nếu nó đang tồn tại; không dừng các consumer của DB khác.
+Thêm node: thêm host vào inventory, bootstrap host nếu cần, rồi chạy `add-master` hoặc `add-node`.
 
-Mặc định `director_auto_kickstart: false`: Ansible enable module, tạo database với
-charset `utf8` và chạy schema migration, nhưng không import Endpoint/Zone hoặc chạy
-Kickstart. Người vận hành đăng nhập Web UI và tự hoàn tất Director Kickstart. Chỉ đặt
-`director_auto_kickstart: true` khi muốn Ansible render `kickstart.ini` và tự reconcile
-topology từ Icinga API. Object management qua `director_managed_*` được bỏ qua an toàn
-cho tới khi Kickstart đã hoàn tất.
+Xoá node:
 
-Với chế độ mặc định, vào **Icinga Director → Configuration → Kickstart Wizard** và khai:
+```bash
+./tools/icinga-ansible remove-master -i ansible/inventory/my-cluster \
+  -e target_host=master2 -e confirm=yes
+# Sau khi lệnh thành công: xoá host khỏi inventory rồi đồng bộ topology còn lại.
+./tools/icinga-ansible reconfigure -i ansible/inventory/my-cluster -t icinga2
+./tools/icinga-ansible check       -i ansible/inventory/my-cluster
+```
 
-- Endpoint/host: master Icinga API mà người vận hành chọn, cổng mặc định `5665`.
-- API username: `director`.
-- API password: giá trị `icinga2_director_api_user_password` trong `passwords.yml`.
+Không xoá CA host (`master[0]`) trước khi có kế hoạch chuyển CA/PKI. Với Galera, thay đổi membership
+cần runbook DB riêng; các lệnh node ở trên dành cho endpoint Icinga.
 
-Sau khi hoàn tất wizard, chạy lại `icinga-ansible reconfigure` để áp dụng các object
-`director_managed_*` (nếu có), rồi chạy `icinga-ansible check`. MariaDB 12.x hiển thị
-charset database `utf8` bằng tên chuẩn `utf8mb3`; đây là cùng encoding, không phải lỗi.
-| `upgrade-plan` / `upgrade` / `rollback` | Đã có cho `managed_db`; external DB phải theo change/backup plan của DBA |
+`destroy` là thao tác không phục hồi:
 
-## Ghi chú kiến trúc quan trọng
-- **Repo (code) và config (`/etc/icinga-ansible`) tách biệt** — giống kolla-ansible. Move/xoá/deploy
-  lại repo không ảnh hưởng config. `destroy` xoá container, data và config render/override; chỉ giữ
-  `globals.yml` + `passwords.yml` trên deployment node để có thể deploy lại cùng định danh/secrets.
-- `icinga2` / `mariadb` / `icingadb-redis` / web dùng **Docker host network** (endpoint = IP host).
-- **KHÔNG** đặt VIP/LB trước cổng cluster 5665. VIP chỉ cho web 443 (sticky session).
-- Session Icinga Web 2 là **PHP file-session** → HA cần sticky ở HAProxy.
-- P1 chạy MariaDB **đơn node**; Galera cluster bật ở P2/P4 (config đã cắm sẵn, đang tắt).
-- Web Icinga DB (module `icingadb`) đọc config **DB resource** từ `modules/icingadb/config.ini`
-  và config **Redis** từ file **riêng** `modules/icingadb/redis.ini` — hai file khác nhau, đừng gộp
-  (xem TODO.md, bug đã gặp).
+```bash
+./tools/icinga-ansible destroy -i ansible/inventory/my-cluster \
+  -e confirm=yes-i-really-really-mean-it
+```
+
+Luôn chạy `backup-full`, kiểm tra `LATEST_COMPLETE`/manifest và copy cả bundle ra storage độc lập
+trước thao tác phá huỷ. Inventory trong repo và nội dung `conf.d/operator` không thuộc bundle này;
+phải backup bằng SCM/pipeline operator riêng.
+
+## Tự quản lý Host/Service/Check
+
+Khuyến nghị dùng Director. Project chỉ enable module và migrate schema; operator tự Kickstart và
+quản lý object trong UI. Ansible không import hoặc reconcile object Director.
+
+Nếu dùng static DSL, hãy quản lý và triển khai bằng quy trình riêng của operator. Project cố ý không
+đọc, validate, copy, mount hoặc xoá `zones.d`; sửa file monitoring không yêu cầu chạy `reconfigure`.
+
+Xem mục 6–7 trong [QUICKSTART.md](QUICKSTART.md) để làm theo từng lệnh thêm/xóa node và dựng lại cụm
+từ full backup; [OPERATIONS-RUNBOOK-VI.md](OPERATIONS-RUNBOOK-VI.md) là runbook vận hành/sự cố đầy
+đủ. Ranh giới kỹ thuật nằm ở [design.md](design.md); giới hạn còn lại được ghi tại [TODO.md](TODO.md).

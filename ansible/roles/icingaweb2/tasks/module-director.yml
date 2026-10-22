@@ -1,36 +1,24 @@
 ---
-# Module Director (loại C): DB đã tạo ở role mariadb. Ở đây luôn cấu hình resource + migration;
-# Kickstart là opt-in vì nó import/reconcile topology và phải do người vận hành chủ động quyết định.
+# Module Director (loại C): DB đã tạo ở role mariadb. Ở đây chỉ cấu hình resource + migration.
+# Kickstart và toàn bộ object Director thuộc quyền quản lý của operator.
 #
 # BUG THẬT ĐÃ GẶP (2026-07-22, tự phát hiện khi rà lại cho nhất quán — chưa từng gây sự cố thật vì
 # bắt được trước khi ai đụng vào): trước đây file này ghi TRỰC TIẾP vào web_etc (đường dẫn DATA,
 # /data/etc/icingaweb2/modules/director/config.ini), KHÔNG qua render_config_item.yml như
-# resources.ini/config.ini/... — không có override, không mount ro per-file (chỉ "an toàn" nhờ tình
+# resources.ini/config.ini/... — không có override, không mount riêng từng file (chỉ "an toàn" nhờ tình
 # cờ nằm trong /data đã mount rw sẵn). Đổi sang render_config_item.yml cho NHẤT QUÁN với mọi file
 # config khác của role: override-aware (per-host > per-service > template), ghi vào icinga_etc_dir,
-# mount ro per-file (xem task "Khởi động container icingaweb2" — chỉ mount khi module director bật).
+# mount rw per-file (xem task "Khởi động container icingaweb2" — chỉ mount khi module director bật).
 - name: Render config Director (resource DB + endpoint API, override-aware)
   ansible.builtin.include_tasks: render_config_item.yml
   vars:
     cfg: { relpath: "modules/director/config.ini", template: "module-director.ini.j2" }
 
-- name: Render Director kickstart.ini (Icinga API endpoint riêng)
-  ansible.builtin.template:
-    src: module-director-kickstart.ini.j2
-    dest: "{{ icinga_etc_dir }}/icingaweb2/modules/director/kickstart.ini"
-    # icingacli trong image chạy uid 33 (www-data); 0600 vẫn giữ secret chỉ đọc bởi đúng service.
-    owner: "{{ web_uid }}"
-    group: "{{ web_uid }}"
-    mode: "0600"
-  no_log: true
-  when: director_auto_kickstart | bool
-
-- name: Xoá kickstart.ini do Ansible quản lý khi chọn Kickstart thủ công
+- name: Xoá kickstart.ini cũ do các phiên bản Ansible trước quản lý
   ansible.builtin.file:
     path: "{{ icinga_etc_dir }}/icingaweb2/modules/director/kickstart.ini"
     state: absent
   no_log: true
-  when: not (director_auto_kickstart | bool)
 
 # BUG THẬT ĐÃ GẶP (2026-07-22): "director migration run" chạy qua {{ web_run }}, container one-off
 # CHỈ mount {{ web_data }}:/data — từ khi resources.ini/config.ini/... chuyển sang mount per-file từ
@@ -45,16 +33,13 @@
   ansible.builtin.set_fact:
     web_run_full: >-
       docker run --rm -v {{ web_data }}:/data
-      -v {{ icinga_etc_dir }}/icingaweb2/resources.ini:/data/etc/icingaweb2/resources.ini:ro
-      -v {{ icinga_etc_dir }}/icingaweb2/config.ini:/data/etc/icingaweb2/config.ini:ro
-      -v {{ icinga_etc_dir }}/icingaweb2/authentication.ini:/data/etc/icingaweb2/authentication.ini:ro
-      -v {{ icinga_etc_dir }}/icingaweb2/roles.ini:/data/etc/icingaweb2/roles.ini:ro
-      -v {{ icinga_etc_dir }}/icingaweb2/modules/icingadb/config.ini:/data/etc/icingaweb2/modules/icingadb/config.ini:ro
-      -v {{ icinga_etc_dir }}/icingaweb2/modules/icingadb/redis.ini:/data/etc/icingaweb2/modules/icingadb/redis.ini:ro
-      -v {{ icinga_etc_dir }}/icingaweb2/modules/director/config.ini:/data/etc/icingaweb2/modules/director/config.ini:ro
-      {% if director_auto_kickstart | bool %}
-      -v {{ icinga_etc_dir }}/icingaweb2/modules/director/kickstart.ini:/data/etc/icingaweb2/modules/director/kickstart.ini:ro
-      {% endif %}
+      -v {{ icinga_etc_dir }}/icingaweb2/resources.ini:/data/etc/icingaweb2/resources.ini:rw
+      -v {{ icinga_etc_dir }}/icingaweb2/config.ini:/data/etc/icingaweb2/config.ini:rw
+      -v {{ icinga_etc_dir }}/icingaweb2/authentication.ini:/data/etc/icingaweb2/authentication.ini:rw
+      -v {{ icinga_etc_dir }}/icingaweb2/roles.ini:/data/etc/icingaweb2/roles.ini:rw
+      -v {{ icinga_etc_dir }}/icingaweb2/modules/icingadb/config.ini:/data/etc/icingaweb2/modules/icingadb/config.ini:rw
+      -v {{ icinga_etc_dir }}/icingaweb2/modules/icingadb/redis.ini:/data/etc/icingaweb2/modules/icingadb/redis.ini:rw
+      -v {{ icinga_etc_dir }}/icingaweb2/modules/director/config.ini:/data/etc/icingaweb2/modules/director/config.ini:rw
       --entrypoint icingacli {{ images.icingaweb2 }}
 
 - name: Chạy Director schema migration (idempotent)
@@ -67,14 +52,3 @@
     - "'nothing to do' not in (dir_mig.stdout | default('') | lower)"
   failed_when: dir_mig.rc != 0 and 'up to date' not in (dir_mig.stdout | default('') | lower)
   when: inventory_hostname == ca_host
-
-- name: Đồng bộ Director với Endpoint/Zone/CheckCommand hiện tại từ Icinga API
-  ansible.builtin.command: "{{ web_run_full }} director kickstart run"
-  # `director kickstart required` chỉ cho biết Director đã được khởi tạo hay chưa; nó không phát hiện
-  # topology drift. Vì vậy dùng nó làm điều kiện khiến endpoint/zone của node đã xóa tồn tại mãi trong
-  # Director. `kickstart run` là phép reconcile idempotent và cũng xóa object import không còn trong API.
-  changed_when: false
-  no_log: true
-  when:
-    - inventory_hostname == ca_host
-    - director_auto_kickstart | bool

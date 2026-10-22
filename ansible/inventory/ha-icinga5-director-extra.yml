@@ -7,6 +7,3 @@ proxy_no_proxy: "localhost,127.0.0.1,::1,172.28.82.0/24"
 enable_icingaweb2_modules:
   - icingadb
   - director
-
-# Cài bộ plugin CPU/RAM/disk trên host đích để Director gọi qua check_by_ssh.
-enable_check_by_ssh_target_plugins: true

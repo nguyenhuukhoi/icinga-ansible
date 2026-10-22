@@ -350,12 +350,12 @@
   no_log: true
   notify: Reload icingaweb2
 
-- name: (loại C) Director — migration và Kickstart opt-in nếu bật
+- name: (loại C) Director — chỉ cấu hình kết nối và migrate schema
   ansible.builtin.include_tasks: module-director.yml
   when: "'director' in (enable_icingaweb2_modules | default([]))"
 
 # ---------- Xây danh sách mount per-file (thêm module-director nếu bật) ----------
-# MOUNT RW (không phải :ro như mọi per-file khác trong dự án) — CỐ Ý, đi cùng cơ chế "seed 1 lần"
+# MOUNT RW — CỐ Ý, đi cùng cơ chế "seed 1 lần"
 # ở render_config_item.yml (2026-07-22): Icinga Web (chạy trong container) cần tự ghi được vào các
 # file này khi người dùng thao tác qua UI (vd thêm Resource, đổi Role) mà không bị mất khi container
 # bị xoá/tạo lại — vì đây là bind-mount tới file THẬT trên host (icinga_etc_dir), ghi từ container
@@ -387,15 +387,6 @@
       {{ _web_volumes +
          [icinga_etc_dir + '/icingaweb2/modules/director/config.ini:/data/etc/icingaweb2/modules/director/config.ini'] }}
   when: "'director' in (enable_icingaweb2_modules | default([]))"
-
-- name: Thêm mount kickstart.ini khi người vận hành bật Kickstart tự động
-  ansible.builtin.set_fact:
-    _web_volumes: >-
-      {{ _web_volumes +
-         [icinga_etc_dir + '/icingaweb2/modules/director/kickstart.ini:/data/etc/icingaweb2/modules/director/kickstart.ini:ro'] }}
-  when:
-    - "'director' in (enable_icingaweb2_modules | default([]))"
-    - director_auto_kickstart | bool
 
 # ---------- Chạy Apache2 + Icinga Web 2 ----------
 # Image serve Apache trên 8080 (không phải 80). Host network -> bind 8080 trên host.

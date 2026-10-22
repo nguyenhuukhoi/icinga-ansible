@@ -103,14 +103,11 @@ satellite_zones: []
 # Default cho user Việt Nam — override trong globals.yml nếu cần múi giờ khác.
 icingaweb2_timezone: "Asia/Ho_Chi_Minh"
 
-# Bật module Director chỉ chuẩn bị DB/schema/module. Mặc định không tự import endpoint/zone từ
-# Icinga API; người vận hành tự quyết định và hoàn tất Kickstart trong Web UI. Chỉ bật true cho
-# môi trường muốn Ansible tự chạy `icingacli director kickstart run`.
-director_auto_kickstart: false
+# Bật module Director chỉ chuẩn bị DB/schema/module. Người vận hành tự Kickstart và quản lý object.
 
 # Secret file tùy ý cho plugin chạy trong container Icinga 2. Nguồn nằm trên deployment node;
-# role đồng bộ sang từng Icinga node rồi mount read-only vào đường dẫn container bên dưới.
-# Ví dụ: clouds.yaml, private key riêng của check script. Không commit thư mục nguồn vào Git.
+# role đồng bộ sang từng Icinga node rồi mount read-write vào đường dẫn container bên dưới.
+# Ví dụ: credential API hoặc private key riêng của plugin. Không commit thư mục nguồn vào Git.
 # Đây là tầng global. Role tự trộn thêm <role>/secret và <inventory_hostname>/secret theo thứ
 # tự global -> role -> host; file cùng đường dẫn tương đối ở tầng sau ghi đè tầng trước.
 icinga2_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secret"
@@ -152,7 +149,9 @@ proxy_no_proxy_effective: >-
 # giá trị explicit (kể cả proxy_group_overrides) vẫn ưu tiên và common role ghi nó vào
 # /etc/environment. Không lấy no_proxy mặc định của globals khi đang fallback, vì làm vậy sẽ trộn
 # hai nguồn và có thể làm mất NO_PROXY thực tế của host.
-_managed_host_environment: "{{ ansible_facts.env | default({}) }}"
+_managed_host_environment: >-
+  {{ _managed_host_environment_file
+     | default(ansible_facts.env | default({})) }}
 proxy_http_runtime: >-
   {{ proxy_http_effective
      if (proxy_http_effective | default('')) | length > 0
@@ -169,7 +168,7 @@ proxy_no_proxy_runtime: >-
      else (_managed_host_environment.get('no_proxy', '') or
            _managed_host_environment.get('NO_PROXY', '')) }}
 
-# Dùng cho task apt/get_url và env container icinga2 (Telegram/webhook). Biến được đánh giá lazy
+# Dùng cho task apt/get_url và env container icinga2. Biến được đánh giá lazy
 # sau gather_facts nên facts.env đã có proxy từ /etc/environment; lúc fact gathering chưa xong,
 # dictionary rỗng {} không ghi đè môi trường mà PAM của SSH/sudo đã nạp.
 proxy_environment: >-

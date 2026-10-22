@@ -59,7 +59,7 @@
     stop_timeout: 60
     volumes:
       - "{{ mariadb_data }}:/var/lib/mysql"
-      - "{{ mariadb_etc }}/server.cnf:/etc/mysql/mariadb.conf.d/99-icinga.cnf:ro"
+      - "{{ mariadb_etc }}/server.cnf:/etc/mysql/mariadb.conf.d/99-icinga.cnf:rw"
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s

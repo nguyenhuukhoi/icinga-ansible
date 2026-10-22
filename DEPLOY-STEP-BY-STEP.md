@@ -219,6 +219,7 @@ cả `write_files`, cần thêm 10-40s sau khi VM báo `ACTIVE`.
 
 ## 9. Bước tiếp theo (không nằm trong hướng dẫn deploy cơ bản)
 
-- Thêm Host/Service monitor cho hạ tầng OpenStack/Ceph thật — xem `monitoring/README.md`.
+- Host/Service/CheckCommand do operator tự quản lý bằng Director hoặc quy trình static DSL độc lập;
+  Ansible không đồng bộ `zones.d`, xem `README.md`.
 - Business Process / Dependency demo — xem `ICINGA-LAB-2026-09-12.md` mục 4 (đợt build trước, dùng
   inventory `my-cluster` thay vì `multinode`, cùng quy trình).

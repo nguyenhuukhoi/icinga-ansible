@@ -57,7 +57,7 @@ icinga_image_versions:
 # uses a physical pre-upgrade backup.
 mariadb_allow_rolling_series_upgrade: false
 
-# --- Image tuỳ biến (vd icinga2 thêm python3/openstacksdk cho check OpenStack — design.md mục 9.6) --
+# --- Image tuỳ biến (plugin/package bổ sung do operator tự quản lý) -------------------------------
 # icinga-ansible KHÔNG tự build image — tự build/push bằng cách nào cũng được (Dockerfile tự viết,
 # CI riêng...), lên 1 registry RIÊNG của bạn (Harbor tự dựng hoặc registry khác), rồi khai 2 biến dưới
 # để cụm PULL đúng image đó thay vì image gốc.
@@ -69,7 +69,7 @@ custom_image_registry: ""            # vd "10.10.10.151:8081/icinga" (host:port 
 #   icinga2: "icinga2:2.16.5-custom"
 #
 # Ví dụ dùng đủ năm image do icinga-image-builder push lên Harbor:
-# custom_image_registry: "172.28.81.109/openstack.kolla/icinga"
+# custom_image_registry: "registry.example.net/monitoring/icinga"
 # custom_image_overrides:
 #   icinga2: "icinga2:2.16.5"
 #   icingadb: "icingadb:1.5.1"
@@ -159,11 +159,9 @@ enable_icingaweb2_modules:
   - "icingadb"                                   # BẮT BUỘC
   # - "director"                                 # bật sau khi verify core (cần DB + migration)
 
-# false: Ansible chỉ enable/migrate Director; người dùng tự Kickstart trong Web UI.
-# true: Ansible render kickstart.ini và tự import/reconcile endpoint/zone từ Icinga API.
-director_auto_kickstart: false
+# Ansible chỉ enable/migrate Director. Operator tự Kickstart và quản lý object trong Web UI.
 
-# File nhạy cảm dành cho check script đặt tại:
+# File nhạy cảm dành cho nội dung operator tự quản lý đặt tại:
 #   config/icinga2/secret/                         (mọi Icinga node)
 #   config/icinga2/group_master/secret/                  (chỉ master)
 #   config/icinga2/group_satellite/secret/               (chỉ satellite)
@@ -171,17 +169,12 @@ director_auto_kickstart: false
 #   config/icinga2/<inventory_hostname>/secret/    (chỉ một node)
 # Thứ tự trộn: global -> loại node -> host. Tầng sau ghi đè file cùng đường dẫn ở tầng trước;
 # những file khác vẫn được giữ. Xem QUICKSTART.md mục 3 để biết ví dụ đầy đủ.
-# Ansible đồng bộ và mount read-only vào container Icinga 2 tại:
+# Ansible đồng bộ và mount read-write vào container Icinga 2 tại:
 #   /etc/icinga-ansible/icinga2/
 # Có thể override đường dẫn global và đường dẫn trong container nếu cần. Các tầng role/host luôn nằm
 # dưới deploy_config_dir để cấu trúc override nhất quán với phần config Icinga 2 còn lại.
 icinga2_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secret"
 icinga2_secret_container_dir: "/etc/icinga-ansible/icinga2"
-
-# Cài Linuxfabrik monitoring plugins trên các host trong [all_hosts] để CPU/RAM/disk có thể được
-# gọi từ Icinga master qua check_by_ssh. Opt-in để không thay đổi host của deployment hiện hữu.
-enable_check_by_ssh_target_plugins: false
-
 
 # (nâng cao) version module web đi THEO image icingaweb2 (module build sẵn trong image) — thường
 # để trống. Chỉ khai nếu muốn nạp chồng 1 module bản khác image (P6, chưa hiện thực).

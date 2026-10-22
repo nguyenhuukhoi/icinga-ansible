@@ -51,16 +51,14 @@
 
 # BUG đã gặp thật (2026-07-22, xem _bootstrap_and_join.yml bản cũ): SST xoá nguyên datadir của node
 # join, kể cả .my-healthcheck.cnf đã ghi trước khi start container -> phải ghi lại SAU KHI SST xong.
-- name: (cluster) Ghi lại .my-healthcheck.cnf trong container (sống sót SST — cho healthcheck.sh)
-  ansible.builtin.shell: |
-    docker exec -i mariadb bash -c 'umask 077; cat > /var/lib/mysql/.my-healthcheck.cnf' <<'HCEOF'
-    [client]
-    user = root
-    password = {{ mariadb_root_password | to_json }}
-    HCEOF
-  args:
-    executable: /bin/bash
-  changed_when: true
+- name: (cluster) Ghi lại .my-healthcheck.cnf sau SST (idempotent)
+  ansible.builtin.copy:
+    content: |
+      [client]
+      user = root
+      password = {{ mariadb_root_password | to_json }}
+    dest: "{{ mariadb_data }}/.my-healthcheck.cnf"
+    mode: "0600"
   no_log: true
   when:
     - mariadb_cluster_mode | bool

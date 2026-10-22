@@ -104,39 +104,6 @@
       không âm thầm bỏ sót secret.
   run_once: true
 
-# Đổi icinga_master_zone_name (hoặc đổi satellite_zones[].name) làm thư mục zone CŨ dưới
-# deploy_config_dir thành mồ côi: role chỉ đọc/ghi zones.d/<tên hiện tại>, nên file trong thư mục cũ
-# không còn tác dụng — đã tái hiện thật 2026-10-18 khi test rename zone, và nó diễn ra IM LẶNG.
-- name: Liệt kê thư mục zone trên deployment node
-  ansible.builtin.find:
-    paths: "{{ deploy_config_dir }}/icinga2/zones.d"
-    file_type: directory
-    recurse: false
-  delegate_to: localhost
-  become: false
-  run_once: true
-  register: _precheck_zone_dirs
-
-- name: Chặn thư mục zone mồ côi dưới deploy_config_dir/icinga2/zones.d
-  ansible.builtin.assert:
-    that:
-      - >-
-        (_precheck_zone_dirs.files | default([]) | map(attribute='path') | map('basename') | list
-         | difference([icinga_master_zone_name, 'global-templates', 'director-global']
-                      + (satellite_zones | default([]) | map(attribute='name') | list)
-                      + (groups['client'] | default([])))) | length == 0
-    fail_msg: >-
-      {{ deploy_config_dir }}/icinga2/zones.d còn thư mục không khớp zone nào đang dùng:
-      {{ (_precheck_zone_dirs.files | default([]) | map(attribute='path') | map('basename') | list
-          | difference([icinga_master_zone_name, 'global-templates', 'director-global']
-                       + (satellite_zones | default([]) | map(attribute='name') | list)
-                       + (groups['client'] | default([])))) | join(', ') }}.
-      Zone hiện tại: master={{ icinga_master_zone_name }},
-      satellite={{ satellite_zones | default([]) | map(attribute='name') | list | join(', ') | default('(không)', true) }}.
-      File trong thư mục đó KHÔNG còn được dùng. Hãy di chuyển nội dung sang thư mục zone đúng tên
-      rồi xoá thư mục cũ (thường gặp sau khi đổi icinga_master_zone_name hoặc đổi tên satellite zone).
-  run_once: true
-
 - name: Tên tài khoản quản trị Icinga Web phải an toàn khi ghi vào SQL
   ansible.builtin.assert:
     that:
