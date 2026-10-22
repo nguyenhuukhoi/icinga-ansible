@@ -28,7 +28,6 @@ chmod 600 /etc/icinga-ansible/passwords.yml
 
 Sửa `/etc/icinga-ansible/globals.yml`, tối thiểu kiểm tra:
 
-- `network_interface`;
 - `icinga_image_versions`;
 - `icinga_master_zone_name` (chỉ đổi trước deploy đầu tiên);
 - `icinga_database_type` và `managed_db`/`external_db`;
@@ -63,8 +62,6 @@ master2
 galera1
 galera2
 galera3
-
-[loadbalancer]
 
 [icinga:children]
 master
@@ -136,50 +133,6 @@ riêng nếu không dùng Director.
 Credential API là local trên từng master. Role tạo thư mục
 `/etc/icinga-ansible/icinga2/secrets/` ngay trong cây config chính thức đã được mount RW vào container;
 không cần volume riêng và Ansible không đọc, copy, merge hoặc xoá file bên trong.
-
-### Monitor Nova/Cinder/Neutron bằng static file, thực thi HA từ hai master
-
-Luồng này không dùng Director. Deployment node không đọc hoặc đồng bộ `zones.d`; operator đặt object trên
-`master1` và để cơ chế config-sync gốc của Icinga chuyển sang `master2`. Trên **từng master**, đặt
-`clouds.yaml` trực tiếp vào thư mục local:
-
-```bash
-sudo install -d -o 5665 -g 5665 -m 0700 /etc/icinga-ansible/icinga2/secrets
-sudo install -o 5665 -g 5665 -m 0600 /path/to/clouds.yaml \
-  /etc/icinga-ansible/icinga2/secrets/clouds.yaml
-docker exec icinga2 test -r /data/etc/icinga2/secrets/clouds.yaml
-```
-
-Bind mount là RW và trực tiếp: sửa file trên master được thấy ngay trong container, không cần chạy
-`reconfigure`. Plugin vẫn được đặt bằng kênh `custom-plugins` hiện hữu:
-
-```bash
-install -d -m 0750 /etc/icinga-ansible/config/icinga2/custom-plugins
-install -m 0755 examples/openstack-file-monitoring/check_openstack_service.py \
-  /etc/icinga-ansible/config/icinga2/custom-plugins/check_openstack_service.py
-```
-
-Plugin đọc file local trong container tại `/data/etc/icinga2/secrets/clouds.yaml`; vì vậy khi một
-controller hỏng, check vẫn chạy nếu OpenStack API/VIP còn hoạt động. Từ deployment node, thực hiện
-một lần các lệnh operator sau để đặt file vào đúng zone trên `master1` (không copy lên master2 và không
-được `reconfigure` quản lý lại):
-
-```bash
-INV=ansible/inventory/my-cluster
-ZONE=csoc-monitoring  # phải bằng icinga_master_zone_name/ZoneName của cụm
-ansible -i "$INV" master1 -b -m file \
-  -a "path=/etc/icinga-ansible/icinga2/zones.d/$ZONE state=directory owner=5665 group=5665 mode=0750"
-ansible -i "$INV" master1 -b -m copy \
-  -a "src=examples/openstack-file-monitoring/openstack-nodes.conf dest=/etc/icinga-ansible/icinga2/zones.d/$ZONE/openstack-nodes.conf owner=5665 group=5665 mode=0640"
-ansible -i "$INV" master1 -b -m copy \
-  -a "src=examples/openstack-file-monitoring/openstack-services.conf dest=/etc/icinga-ansible/icinga2/zones.d/$ZONE/openstack-services.conf owner=5665 group=5665 mode=0640"
-ansible -i "$INV" master1 -b -m command -a 'docker exec icinga2 icinga2 daemon -C'
-ansible -i "$INV" master1 -b -m command -a 'docker kill --signal=HUP icinga2'
-```
-
-Icinga đồng bộ nội dung zone sang master peer; hai endpoint trong cùng `ZoneName` phối hợp HA và tự chọn
-endpoint thực thi. Không đặt `command_endpoint` trỏ tới controller. File nguồn trên deployment node dưới
-`config/icinga2/zones.d` vẫn bị bỏ qua; đây là chủ ý để tool không ghi đè monitoring DSL.
 
 ## 6. Thêm, sửa và xoá node
 
@@ -274,8 +227,8 @@ ansible -i "$INV" 'satellite1:satellite2' -m ping
 ./tools/icinga-ansible check             -i "$INV"
 ```
 
-`add-node` phải dùng inventory đầy đủ. Role chỉ tạo thư mục `conf.d/operator` rỗng trên node mới;
-nội dung monitoring phải được operator triển khai bằng pipeline riêng sau khi hạ tầng đã PASS.
+`add-node` phải dùng inventory đầy đủ. Nội dung monitoring phải được operator triển khai bằng pipeline
+riêng sau khi hạ tầng đã PASS.
 
 ### 6.3. Xoá satellite
 
@@ -381,9 +334,9 @@ Copy **cả cây thư mục**, không chỉ file DB, sang storage ngoài deploym
 trong repo nên không thuộc `config-*.tar.gz`; phải lưu inventory/host vars cùng phiên bản code ở SCM
 hoặc backup riêng. Với external DB, DBA phải backup/restore database bằng quy trình riêng.
 
-`backup-full` không backup object monitoring do operator đặt trực tiếp trong
-`conf.d/operator`, package triển khai static hoặc credential nằm ngoài `/etc/icinga-ansible`. Hãy lưu
-những phần đó trong Git/vault/storage riêng. Project không backup và không restore `zones.d`.
+`backup-full` không backup package monitoring static hoặc credential nằm ngoài
+`/etc/icinga-ansible`. Hãy lưu những phần đó trong Git/vault/storage riêng. Project không backup và
+không restore `zones.d`.
 
 Ví dụ copy off-site không xóa generation cũ ở đích:
 
@@ -477,9 +430,9 @@ Dựng runtime tạm, restore physical database, khôi phục environment ID r�
 so với thời điểm backup, không đổi tên archive để ép restore; hãy bỏ qua bước này, dựng Web config
 mới rồi chuyển thủ công phần cần giữ sau khi review.
 
-Cuối cùng, triển khai lại `conf.d/operator`, plugin/credential và object monitoring bằng pipeline
-riêng của operator, validate `icinga2 daemon -C`, reload Icinga 2 rồi chạy `check` lại. Không chép
-monitoring config qua `zones.d` và không trông chờ `deploy` đồng bộ nội dung operator.
+Cuối cùng, triển khai lại `zones.d`, plugin/credential và object monitoring bằng pipeline riêng của
+operator, validate `icinga2 daemon -C`, reload Icinga 2 rồi chạy `check` lại. Không trông chờ
+`deploy` đồng bộ nội dung operator.
 
 ### 7.3. Kiểm tra sau restore
 

@@ -12,8 +12,6 @@ localhost
 [galera]
 localhost
 
-[loadbalancer]
-
 [icinga:children]
 master
 satellite

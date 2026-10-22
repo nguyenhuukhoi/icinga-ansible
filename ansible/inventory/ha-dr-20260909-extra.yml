@@ -1,8 +1,0 @@
----
-# Lab-only: build the OpenStack-check image locally on both new masters.
-# Proxy endpoint is intentionally not committed; keep it in
-# /etc/icinga-ansible/globals.yml (preferably encrypted with Ansible Vault).
-proxy_no_proxy: "localhost,127.0.0.1,::1,172.28.81.0/24,172.28.82.0/24"
-custom_image_registry: "local"
-custom_image_overrides:
-  icinga2: "icinga2:2.16.5-openstack-verify"

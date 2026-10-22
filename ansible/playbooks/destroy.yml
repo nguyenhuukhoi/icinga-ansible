@@ -33,7 +33,7 @@
   become: true
   gather_facts: false
   # File này nằm trong playbooks/ (không cùng cấp ansible/icinga-ansible.yml) nên
-  # group_vars/all.yml không tự nạp -> khai rõ để có icinga_base_dir/docker_network_name.
+  # group_vars/all.yml không tự nạp -> khai rõ để có icinga_base_dir và các biến topology.
   vars_files:
     - "{{ playbook_dir }}/../group_vars/all.yml"
   vars:
@@ -169,10 +169,6 @@
       loop: >-
         {{ ['icinga2/etc', 'icinga2/var', 'icinga2/pki', 'icingadb-redis', 'icingadb', 'icingaweb2']
            + (['mariadb'] if icinga_database_type == 'managed_db' else []) }}
-
-    # KHÔNG xoá docker network "{{ docker_network_name }}" nữa (trước đây có) — network do
-    # bootstrap-servers tạo, không chứa dữ liệu cần "dọn sạch", xoá đi chỉ buộc phải bootstrap lại
-    # mà không có lợi ích gì (deploy sẽ tạo lại container mới nối vào network cũ bình thường).
 
 # -----------------------------------------------------------------------------
 # Play 2 — xoá $CONFIG_DIR TRÊN CHÍNH MÁY CHẠY ansible-playbook (control node), bất kể máy đó có

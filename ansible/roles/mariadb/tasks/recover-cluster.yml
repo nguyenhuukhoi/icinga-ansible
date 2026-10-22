@@ -51,7 +51,7 @@
       - --user
       - mysql
       - --network
-      - "{{ docker_network_name }}"
+      - host
       - -v
       - "{{ mariadb_data }}:/var/lib/mysql:rw"
       - -v

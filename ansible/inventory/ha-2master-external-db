@@ -26,9 +26,6 @@ sat02
 # ===== Database — RỖNG CỐ Ý: external DB (Galera thủ công trên .155/.156/.157), không qua tool =====
 [galera]
 
-# ===== Load balancer / VIP — để trống, chưa dùng ở đợt này =====
-[loadbalancer]
-
 [icinga:children]
 master
 satellite

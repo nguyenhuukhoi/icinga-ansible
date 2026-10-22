@@ -41,8 +41,6 @@ ansible/inventory/multinode
 /*.md
 !/README.md
 !/QUICKSTART.md
-!/QUICKSTART-LEGACY.md
-!/DEPLOY-STEP-BY-STEP.md
 !/OPERATIONS-RUNBOOK-VI.md
 !/design.md
 !/TODO.md

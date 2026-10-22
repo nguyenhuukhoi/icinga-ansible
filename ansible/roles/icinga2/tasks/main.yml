@@ -108,7 +108,7 @@
   register: _ic_whole_config_migrated
 
 # Không ghi đè file đang có trong /etc/icinga-ansible. Cách này giữ mọi chỉnh sửa hiện hữu,
-# đồng thời mang sang features-enabled, conf.d/operator và các file do node setup từng tạo.
+# đồng thời mang sang features-enabled và các file do node setup từng tạo.
 - name: Migrate một lần config Icinga 2 cũ sang cây config chính thức
   ansible.builtin.shell: |
     set -euo pipefail
@@ -178,29 +178,6 @@
       - features-available/icingadb.conf
       - features-available/api.conf
       - conf.d/api-users.conf
-      - conf.d/custom-commands.conf
-      - conf.d/ssh-checks.conf
-      # Legacy role-authored monitoring files are deliberately never mounted.
-      - conf.d/openstack-checks.conf
-      # Đường credential cũ. clouds.yaml hiện nằm tại secrets/clouds.yaml trong cây config chính thức,
-      # tương ứng /data/etc/icinga2/secrets/clouds.yaml trong container.
-      - conf.d/clouds.yaml
-      # Artifact top-level của cơ chế credential cũ. Task migration phía dưới xóa file này sau bước
-      # scan, nên phải exclude ngay tại đây để danh sách mount không giữ một source vừa bị xóa.
-      - openstack-clouds.yaml
-      # conf.d/telegram-notifications.conf: KHÔNG còn render ở đây (đã chuyển sang
-      # zones.d/global-templates/, xem block "BUG THẬT ĐÃ GẶP 2026-07-24" phía dưới) — vẫn phải giữ
-      # trong exclude_relpaths (dù không render nữa) để file MỒ CÔI (còn sót từ bản deploy cũ, task
-      # dọn nằm phía dưới trong file này chưa kịp chạy tới lúc quét) không bị "Dò danh sách file base
-      # ĐÃ CÓ trên node" nhặt nhầm rồi mount lại — đã gặp lỗi thật: "OCI runtime create failed ...
-      # not a directory" lúc container icinga2 khởi động vì mount trùng đích cũ.
-      - conf.d/telegram-notifications.conf
-      - telegram-host-notification.sh
-      - telegram-service-notification.sh
-      # Script này được mount riêng vào /usr/lib/nagios/custom-plugins. Nếu không loại trừ, lượt
-      # deploy thứ hai quét nhầm file đã seed ở top-level thành base config, thêm một mount /data
-      # không cần thiết và làm fingerprint đổi khiến cả hai container Icinga 2 bị recreate một lần.
-      - check_openstack_service.py
 
 # Seed base config là việc MỘT LẦN theo đúng nghĩa: "copy" dùng force:false nên từ lần chạy thứ hai
 # trở đi cả hai loop bên dưới chỉ quét ~100 file để kết luận "không có gì đổi". Đo thật bằng
@@ -308,40 +285,13 @@
     insertafter: '^// include_recursive "conf\.d"'
   notify: Reload icinga2
 
-# Host/Service/CheckCommand là nội dung do operator sở hữu, không phải hạ tầng do role
-# sinh ra. Role chỉ cung cấp một điểm include ổn định; operator có thể đặt file trực
-# tiếp trên từng Icinga master trong conf.d/operator/. Không đọc, copy, đồng bộ hay xoá
-# nội dung thư mục này từ deployment node, và tuyệt đối không dùng zones.d.
-- name: Đảm bảo điểm include config operator tồn tại trên từng Icinga node
-  ansible.builtin.file:
-    # The whole host config tree is mounted into /data/etc/icinga2, so this directory is visible
-    # immediately and remains operator-owned across container recreation.
-    path: "{{ ic_config_dir }}/conf.d/operator"
-    state: directory
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0750"
-
-- name: Include thư mục config do operator tự quản lý
+# Bản cũ từng ép operator dùng conf.d/operator. Hạ tầng chỉ cần nạp ApiUser; monitoring content
+# phải đi qua cơ chế zones.d chuẩn của Icinga và do operator quản lý trực tiếp trên master CA.
+- name: Dọn include conf.d/operator do phiên bản cũ từng thêm
   ansible.builtin.lineinfile:
     path: "{{ icinga_etc_dir }}/icinga2/icinga2.conf"
-    line: 'include_recursive "conf.d/operator"'
-    insertafter: '^include "conf\.d/api-users\.conf"'
-  notify: Reload icinga2
-
-# Monitoring content is operator-owned.  Keep old role-authored files on disk during an in-place
-# upgrade, but make sure Icinga never loads them.  Fresh deployments do not create these files.
-- name: Không include monitoring content cũ do role từng sinh
-  ansible.builtin.lineinfile:
-    path: "{{ icinga_etc_dir }}/icinga2/icinga2.conf"
-    regexp: '^include "conf\.d/{{ item | regex_escape }}"'
+    regexp: '^include_recursive "conf\.d/operator"'
     state: absent
-  loop:
-    - templates.conf
-    - custom-commands.conf
-    - ssh-checks.conf
-    - openstack-checks.conf
-    - telegram-notifications.conf
   notify: Reload icinga2
 
 # LƯU Ý (đã gặp bug thật, ĐỪNG thêm lại): zones.d KHÔNG cần include tường minh trong icinga2.conf.
@@ -988,128 +938,15 @@
   loop_control:
     loop_var: cfg
 
-# ---------- SSH key cho check ra host ngoài cluster (design.md 9.4) ----------
-# Chạy trên MỌI node icinga2 (check có thể thực thi từ satellite lẫn master).
-- name: Đảm bảo thư mục nguồn SSH của operator tồn tại trên deployment node
-  ansible.builtin.file:
-    path: "{{ deploy_config_dir }}/icinga2/ssh"
-    state: directory
-    mode: "0700"
-  delegate_to: localhost
-  become: false
-  run_once: true
-
-- name: Đảm bảo thư mục SSH key monitor tồn tại
-  ansible.builtin.file:
-    path: "{{ icinga_etc_dir }}/icinga2/ssh"
-    state: directory
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0700"
-
-- name: Kiểm tra từng file SSH monitor trên deploy node
-  ansible.builtin.stat:
-    path: "{{ deploy_config_dir }}/icinga2/ssh/{{ item }}"
-  delegate_to: localhost
-  become: false
-  loop: [id_monitor, known_hosts]
-  register: _ic_ssh_stat
-
-- name: Đồng bộ từng file SSH monitor từ deploy node ra target node (nếu có)
-  ansible.builtin.copy:
-    src: "{{ deploy_config_dir }}/icinga2/ssh/{{ item.item }}"
-    dest: "{{ icinga_etc_dir }}/icinga2/ssh/{{ item.item }}"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0600"
-  loop: "{{ _ic_ssh_stat.results }}"
-  loop_control: { label: "{{ item.item }}" }
-  when: item.stat.exists
-  notify: Reload icinga2
-
-- name: Danh sách file SSH thật sự có
-  ansible.builtin.set_fact:
-    _ic_ssh_names: "{{ _ic_ssh_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}"
-
-# Xoá file mồ côi trên target nếu đã bị xoá khỏi deploy node — QUAN TRỌNG với private key: nếu
-# không dọn, key đã "xoá" ở nguồn (vd rotate/revoke) vẫn nằm lại + được mount trong container mọi
-# node icinga2 vĩnh viễn (copy chỉ CỘNG THÊM, không tự xoá phần thiếu).
-- name: Xoá từng file SSH monitor mồ côi trên target
-  ansible.builtin.file:
-    path: "{{ icinga_etc_dir }}/icinga2/ssh/{{ item }}"
-    state: absent
-  loop: [id_monitor, known_hosts]
-  when: item not in _ic_ssh_names
-  notify: Reload icinga2
-
-# Dọn artifact credential per-file của phiên bản cũ trên mọi node khi nâng cấp tại chỗ.
-- name: "Xóa artifact credential runtime theo cơ chế cũ"
-  ansible.builtin.file:
-    path: "{{ icinga_etc_dir }}/icinga2/openstack-clouds.yaml"
-    state: absent
-  notify: Reload icinga2
-
-# ---------- Script check tuỳ biến (design.md 14.5) ----------
-# Thư mục đặt tên "custom-plugins/" (KHÔNG phải "scripts/") — cố ý tránh trùng tên với "scripts/"
-# THẬT của image (chứa mail-host-notification.sh..., seed qua cơ chế base config skeleton ở trên,
-# mount về ĐÚNG /data/etc/icinga2/scripts/) — 2 thứ này mount về 2 ĐÍCH hoàn toàn khác nhau
-# (/usr/lib/nagios/custom-plugins/ vs /data/etc/icinga2/scripts/), gộp chung 1 tên thư mục sẽ vỡ.
-# Đây là TẬP file tuỳ ý người dùng tự thêm. Role đồng bộ chúng vào cây config host rồi mount nguyên
-# custom-plugins thêm một lần vào đường dẫn plugin chuẩn của container.
-- name: Đảm bảo thư mục nguồn custom-plugins của operator tồn tại trên deployment node
-  ansible.builtin.file:
-    path: "{{ deploy_config_dir }}/icinga2/custom-plugins"
-    state: directory
-    mode: "0750"
-  delegate_to: localhost
-  become: false
-  run_once: true
-
-- name: Đảm bảo thư mục custom-plugins (script check tuỳ biến) tồn tại
+# custom-plugins là điểm mount hạ tầng, không phải kênh phân phối monitoring content. Role chỉ tạo
+# source directory cục bộ trên từng Icinga node; operator tự đặt script trên mỗi executor.
+- name: Đảm bảo điểm mount custom plugin cục bộ tồn tại
   ansible.builtin.file:
     path: "{{ icinga_etc_dir }}/icinga2/custom-plugins"
     state: directory
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
     mode: "0750"
-
-- name: Dò danh sách file script tuỳ biến trên deploy node
-  ansible.builtin.find:
-    paths: "{{ deploy_config_dir }}/icinga2/custom-plugins"
-    file_type: file
-  delegate_to: localhost
-  become: false
-  register: _ic_script_find
-  ignore_errors: true   # thư mục có thể chưa tồn tại nếu chưa ai thêm script nào
-
-- name: Danh sách tên file script (rỗng nếu chưa ai thêm gì)
-  ansible.builtin.set_fact:
-    _ic_script_names: "{{ (_ic_script_find.files | default([])) | map(attribute='path') | map('basename') | sort | list }}"
-
-- name: "Đồng bộ từng file script sang target (per-file)"
-  ansible.builtin.copy:
-    src: "{{ deploy_config_dir }}/icinga2/custom-plugins/{{ item }}"
-    dest: "{{ icinga_etc_dir }}/icinga2/custom-plugins/{{ item }}"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0755"
-  loop: "{{ _ic_script_names }}"
-  notify: Reload icinga2
-
-- name: Dò danh sách file script ĐÃ CÓ trên target (để xoá file mồ côi không còn ở nguồn)
-  ansible.builtin.find:
-    paths: "{{ icinga_etc_dir }}/icinga2/custom-plugins"
-    file_type: file
-  register: _ic_script_target_find
-
-- name: "Xoá file script mồ côi trên target (đã bị xoá khỏi deploy node)"
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop: "{{ _ic_script_target_find.files | map(attribute='path') | list }}"
-  loop_control: { label: "{{ item | basename }}" }
-  when: (item | basename) not in _ic_script_names
-  notify: Reload icinga2
 
 # ---------- Mount nguyên cây config chính thức ----------
 - name: Xây danh sách volume Icinga 2

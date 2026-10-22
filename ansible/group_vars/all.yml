@@ -14,33 +14,17 @@ ansible_python_interpreter: "/usr/bin/python3"
 # trong globals.yml. Nâng cấp = sửa tag ở đó rồi chạy 'icinga-ansible upgrade' (design.md mục 13).
 # prechecks kiểm tra đủ khoá + không rỗng trước khi deploy.
 
-# module_catalog: metadata PHÂN LOẠI module web A/B/C (không phải version) — trước ở version-matrix.yml,
-# nay inline ở đây vì là dữ liệu tĩnh, không liên quan version. Dùng cho xử lý module (P6):
+# module_catalog: metadata cho đúng các module web mà role hỗ trợ:
 #   A = chỉ enable | B = enable + config .ini | C = enable + DB riêng + migration
 # "requires" dùng để TỰ GIẢI PHỤ THUỘC (roles/icingaweb2/tasks/main.yml — khai "director" tự kéo
 # theo "incubator", không cần liệt kê tay trong enable_icingaweb2_modules).
-#
-# BUG THẬT ĐÃ GẶP (2026-07-22): trước đây liệt kê "ipl" trong requires của director/reporting/x509
-# (theo tài liệu Icinga cũ) — nhưng "ipl" (Icinga PHP Library) đã được GỘP VÀO CORE Icinga Web 2 từ
-# lâu, không còn là module bật/tắt riêng được nữa (`icingacli module list installed` KHÔNG có "ipl"
-# trong image icingaweb2:2.14.0 hiện dùng) — `icingacli module enable ipl` báo thẳng
-# `"Cannot enable module 'ipl'. Module is not installed."`, làm cả bước "Tự giải phụ thuộc" fail.
-# Đã xoá "ipl" khỏi mọi "requires" + xoá hẳn entry "ipl" khỏi catalog (không phải module thật trong
-# bản Icinga Web 2 hiện tại — nếu sau này quay lại bản cũ hơn 2.11, cần thêm lại).
 module_catalog:
   icingadb:        { type: B, needs: [resource_icingadb, redis] }
-  graphite:        { type: B, needs: [graphite_url] }
-  map:             { type: A }
-  businessprocess: { type: A }
   incubator:       { type: A }
-  pdfexport:       { type: A }
   director:        { type: C, db: director, requires: [incubator] }
-  reporting:       { type: C, db: reporting, requires: [pdfexport] }
-  x509:            { type: C, db: x509 }
 
 # --- Thư mục state trên host (data — KHÔNG tái sinh được, đừng lẫn với config) ------
 icinga_base_dir: "/var/lib/icinga-ansible"
-docker_network_name: "icinga-net"
 
 # --- Thư mục config đã render, trên TỪNG target node (giống /etc/kolla/<svc>) -------
 # Tái sinh được (xoá đi chạy `reconfigure` là có lại) -> KHÔNG đưa vào diện destroy.yml xoá.
@@ -151,12 +135,13 @@ proxy_http_runtime: >-
            _managed_host_environment.get('HTTP_PROXY', '')) }}
 proxy_https_runtime: >-
   {{ proxy_https_effective
-     if (proxy_http_effective | default('')) | length > 0
+     if (proxy_https_effective | default('')) | length > 0
      else (_managed_host_environment.get('https_proxy', '') or
            _managed_host_environment.get('HTTPS_PROXY', '')) }}
 proxy_no_proxy_runtime: >-
   {{ proxy_no_proxy_effective
-     if (proxy_http_effective | default('')) | length > 0
+     if ((proxy_http_effective | default('')) | length > 0 or
+         (proxy_https_effective | default('')) | length > 0)
      else (_managed_host_environment.get('no_proxy', '') or
            _managed_host_environment.get('NO_PROXY', '')) }}
 

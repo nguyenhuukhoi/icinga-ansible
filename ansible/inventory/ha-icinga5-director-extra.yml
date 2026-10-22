@@ -1,9 +1,0 @@
----
-# Lab-only overrides cho inventory ha-icinga5-director.
-# Proxy endpoint is intentionally not committed; keep it in
-# /etc/icinga-ansible/globals.yml (preferably encrypted with Ansible Vault).
-proxy_no_proxy: "localhost,127.0.0.1,::1,172.28.82.0/24"
-
-enable_icingaweb2_modules:
-  - icingadb
-  - director

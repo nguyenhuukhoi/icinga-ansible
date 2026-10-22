@@ -110,8 +110,8 @@
     - name: Icinga 2 API phải trả HTTP 200
       ansible.builtin.uri:
         url: "https://127.0.0.1:{{ icinga2_api_port }}/v1/status"
-        user: icingaweb2
-        password: "{{ icinga2_api_user_password }}"
+        user: icingadb-web
+        password: "{{ icingadb_web_api_user_password }}"
         force_basic_auth: true
         validate_certs: false
         status_code: 200

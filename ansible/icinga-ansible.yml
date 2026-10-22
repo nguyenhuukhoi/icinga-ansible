@@ -1,6 +1,6 @@
 # =============================================================================
 # Site playbook. CLI 'tools/icinga-ansible' chọn công việc qua --tags / playbook chuyên biệt.
-#   tags: bootstrap | prechecks | mariadb | redis | icingadb | icinga2 | web | lb
+#   tags: bootstrap | prechecks | mariadb | redis | icingadb | icinga2 | web
 #   tag 'deploy' = chạy toàn bộ chuỗi deploy.
 # =============================================================================
 
@@ -147,19 +147,3 @@
   roles:
     - role: icingaweb2
       tags: [web, deploy]
-
-# --- 7. Load balancer / VIP (chỉ khi HA, P2) ---------------------------------
-# BUG THẬT (đọc trước khi thêm lại "when: master_count > 1"): role loadbalancer là stub CỐ Ý fail
-# cứng bất cứ khi nào [loadbalancer] có host (xem roles/loadbalancer/tasks/main.yml — "Không thể báo
-# deploy thành công giả"). Trước đây play này CÒN gate thêm "when: groups['master']|length > 1" ở
-# cấp role — với single-master + [loadbalancer] có host, điều kiện đó false nên role KHÔNG chạy, cái
-# fail cố ý cũng không kích hoạt: deploy "thành công" như thể LB/VIP đã được cấu hình dù thực ra
-# không đụng gì. "hosts: loadbalancer" ở trên đã đủ để play tự no-op khi nhóm rỗng — không cần thêm
-# điều kiện master_count nữa, để cái fail cứng LUÔN có hiệu lực bất kể mô hình 1 hay N master.
-- name: Deploy load balancer (VIP web 443)
-  hosts: loadbalancer
-  become: true
-  gather_facts: true
-  roles:
-    - role: loadbalancer
-      tags: [lb, deploy]

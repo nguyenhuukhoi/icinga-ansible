@@ -92,8 +92,7 @@
     that:
       - >-
         ((groups['master'] | default([])) + (groups['satellite'] | default([]))
-         + (groups['client'] | default([])) + (groups['galera'] | default([]))
-         + (groups['loadbalancer'] | default([])))
+         + (groups['client'] | default([])) + (groups['galera'] | default([])))
         | unique | difference(groups['all_hosts'] | default([])) | length == 0
     fail_msg: >-
       Có host mang role nhưng không nằm trong [all_hosts]. Các play bootstrap/pull/upgrade image chạy
@@ -227,31 +226,14 @@
     that: "'icingadb' in (enable_icingaweb2_modules | default([]))"
     fail_msg: "Thiếu module 'icingadb' trong enable_icingaweb2_modules (thay module monitoring/IDO cũ)."
 
-- name: "Chặn module web chưa được role thực sự cấu hình (khai trong module_catalog nhưng chưa implement)"
-  # module_catalog (group_vars/all.yml) phân loại graphite=B (cần config .ini), reporting/x509=C
-  # (cần DB riêng + migration) — nhưng roles/icingaweb2/tasks/main.yml hiện chỉ thực sự xử lý type B
-  # cho "icingadb" và type C cho "director" (hard-code theo tên, không đọc "type" tổng quát từ
-  # module_catalog). Bật graphite/reporting/x509 qua enable_icingaweb2_modules (ví dụ mẫu có sẵn
-  # trong etc/examples/globals.yml) khiến icingacli "enable" được module (installed=true) nhưng
-  # module hoàn toàn KHÔNG hoạt động (graphite thiếu config graphite_url; reporting/x509 không có
-  # database nào được roles/mariadb tạo, không schema, không migration) — không có cảnh báo nào cho
-  # tới khi người dùng tự phát hiện qua UI lỗi. Chặn sớm ở đây, giống cách "icingadb" bắt buộc ở trên.
+- name: Chỉ cho phép các module web mà role thực sự cấu hình
   ansible.builtin.assert:
     that: >-
       (enable_icingaweb2_modules | default([]))
-      | intersect(['graphite', 'reporting', 'x509']) | length == 0
+      | difference(['icingadb', 'director']) | length == 0
     fail_msg: >-
-      enable_icingaweb2_modules có khai module chưa được role hỗ trợ đầy đủ:
-      {{ (enable_icingaweb2_modules | default([])) | intersect(['graphite', 'reporting', 'x509']) | join(', ') }}.
-      module_catalog liệt kê các module này (type B/C) nhưng roles/icingaweb2 mới thực sự cấu hình
-      config/DB/migration cho 'icingadb' (B) và 'director' (C) — bật module khác trong nhóm này sẽ
-      "enabled" nhưng không chạy được. Bỏ khỏi enable_icingaweb2_modules cho tới khi role được bổ
-      sung hỗ trợ, hoặc tự thêm task tương ứng trong roles/icingaweb2/tasks/main.yml.
-
-- name: Web server phải là apache2
-  ansible.builtin.assert:
-    that: icingaweb2_web_server == 'apache2'
-    fail_msg: "Thiết kế cố định web server = apache2."
+      enable_icingaweb2_modules chỉ hỗ trợ 'icingadb' và 'director'; module không hỗ trợ:
+      {{ (enable_icingaweb2_modules | default([])) | difference(['icingadb', 'director']) | join(', ') }}.
 
 - name: External DB phải khai host
   ansible.builtin.assert:

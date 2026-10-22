@@ -61,8 +61,8 @@ Các giới hạn được kiểm tra cứng trong `prechecks`:
 10. Backup còn nằm trên chính deployment node chưa phải backup DR. Phải đồng bộ sang storage độc lập.
 11. Inventory thường nằm trong repo nên không thuộc `config-*.tar.gz`; lưu inventory/host vars và
     revision code riêng cùng bundle DR.
-12. `conf.d/operator`, package static monitoring và credential nằm ngoài `/etc/icinga-ansible` không
-    thuộc `backup-full`; operator phải backup/restore bằng pipeline riêng. Không dùng `zones.d`.
+12. `zones.d`, package static monitoring và credential nằm ngoài `/etc/icinga-ansible` không thuộc
+    `backup-full`; operator phải backup/restore bằng pipeline riêng.
 
 ## 3. Kiến trúc mong muốn
 
@@ -265,8 +265,6 @@ galera1
 galera2
 galera3
 
-[loadbalancer]
-
 [icinga:children]
 master
 satellite
@@ -317,7 +315,6 @@ icingaweb2_db_password: "..."
 director_db_password: "..."
 icingadb_redis_password: "..."
 icinga2_ticket_salt: "..."
-icinga2_api_user_password: "..."
 icinga2_director_api_user_password: "..."
 icingadb_web_api_user_password: "..."
 icingaweb2_admin_user: "admin"
@@ -331,9 +328,6 @@ Trong DR từ physical DB, `mariadb_root_password` cũ là bắt buộc để m�
 Chỉnh `/etc/icinga-ansible/globals.yml`:
 
 ```yaml
-base_distro: "ubuntu"
-network_interface: "eth0"
-
 icinga_image_versions:
   icinga2: "2.16.5"
   icingadb: "1.5.1"
@@ -368,7 +362,6 @@ mariadb_backup:
   destination: "/var/backups/icinga-db"
 
 icingaweb2_http_port: 8080
-icingaweb2_enable_tls: false
 icingaweb2_timezone: "Asia/Ho_Chi_Minh"
 
 enable_icingaweb2_modules:
@@ -383,7 +376,7 @@ Các lưu ý:
 - Nếu có DB VIP/proxy riêng, điền IP đó vào `managed_db.host`.
 - Icinga không có một “lineup” bundle chung. Mỗi component có tag độc lập.
 - Không dùng tag `latest` trong production. Nên mirror vào registry nội bộ và pin immutable tag hoặc digest.
-- `icingaweb2_enable_tls: true` chưa được role cấu hình vhost/certificate hoàn chỉnh. Dùng reverse proxy ngoài.
+- TLS termination/reverse proxy nằm ngoài phạm vi của tool.
 
 ### External DB
 
@@ -512,8 +505,7 @@ ansible -i "$INV" satellite2 -m ping
 ```
 
 `add-node` chạy lại deploy idempotent cho topology. Node mới được cấp certificate và các endpoint cũ
-được render lại `zones.conf`. Role chỉ bảo đảm `conf.d/operator` tồn tại; monitoring content trên
-satellite mới phải do operator triển khai riêng.
+được render lại `zones.conf`. Monitoring content trên satellite mới phải do operator triển khai riêng.
 
 ### 11.2. Xóa satellite
 
@@ -640,8 +632,8 @@ Kết quả trên deployment node:
 
 Artifact DB/PKI được kiểm tra tồn tại, kích thước và checksum trong lúc fetch. Pointer chỉ được cập nhật sau khi backup hợp lệ.
 
-Không nằm trong bundle: inventory/host vars trong repo; `conf.d/operator`; package static monitoring;
-credential bên ngoài `/etc/icinga-ansible`; và mọi nội dung `zones.d`. Lưu các phần này trong
+Không nằm trong bundle: inventory/host vars trong repo; package static monitoring; credential bên
+ngoài `/etc/icinga-ansible`; và mọi nội dung `zones.d`. Lưu các phần này trong
 SCM/vault/storage riêng. Với external DB, `backup-full` không thay quy trình backup của DBA.
 
 ### 12.3. Kiểm tra backup ngay sau khi tạo
@@ -941,10 +933,10 @@ Ansible chỉ phục hồi hạ tầng. Sau restore:
 
 1. Nếu dùng Director, operator tự kiểm tra database/module, tự Kickstart khi thật sự cần và tự deploy
    Host/Service/CheckCommand. Project không tự import hoặc xóa object.
-2. Nếu dùng static DSL, phục hồi package ngoài project vào `conf.d/operator` trên đúng Icinga node,
-   validate `icinga2 daemon -C` rồi reload.
-3. Không đặt static monitoring vào `/etc/icinga-ansible/config/icinga2/zones.d`; project cố ý không
-   đọc, copy, mount, backup hay restore `zones.d`.
+2. Nếu dùng static DSL, phục hồi package ngoài project vào `zones.d/<ZoneName>` trên master CA,
+   validate `icinga2 daemon -C` rồi reload để Icinga config-sync sang peer.
+3. Không đặt static monitoring vào `/etc/icinga-ansible/config/icinga2/zones.d`; project không đọc,
+   copy, backup hay restore `zones.d`. Runtime chỉ thấy nó qua bind mount toàn cây config trên master.
 4. Chạy lại `icinga-ansible check` sau khi pipeline monitoring hoàn tất.
 
 ### 14.6. Full DR chuẩn: dựng cụm mới 2 master + 3 Galera từ `backup-full`
@@ -1011,7 +1003,7 @@ Nếu chọn CA mới, bỏ qua duy nhất bước `restore-pki` và enroll lạ
 khác bundle hoặc số master thay đổi, bỏ qua `restore-web`, dựng Web config mới và review/chuyển thủ
 công phần cần giữ; tuyệt đối không đổi tên archive để ép restore.
 
-Sau khi hạ tầng PASS, restore `conf.d/operator`, plugin, SSH key và credential qua pipeline operator
+Sau khi hạ tầng PASS, restore `zones.d`, plugin, SSH key và credential qua pipeline operator
 riêng; validate config, reload Icinga 2, chạy lại `check`, rồi tạo một `backup-full` baseline mới.
 
 ## 15. Upgrade

@@ -26,9 +26,6 @@ galera1
 galera2
 galera3
 
-# ===== Load balancer / VIP — để trống, chưa dùng ở đợt này =====
-[loadbalancer]
-
 [icinga:children]
 master
 satellite

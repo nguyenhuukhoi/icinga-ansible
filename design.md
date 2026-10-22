@@ -23,7 +23,7 @@ từ `satellite_zones`; client có zone một endpoint.
 ### 4.1. Repo và config runtime
 
 Repo chứa logic. `/etc/icinga-ansible` trên deployment node chứa `globals.yml`, `passwords.yml` và
-nguồn override/operator. Node đích nhận config tại `/etc/icinga-ansible`; state ghi được nằm dưới
+nguồn override hạ tầng. Node đích nhận config tại `/etc/icinga-ansible`; state ghi được nằm dưới
 `/var/lib/icinga-ansible`. Mỗi service mount **nguyên thư mục config** read-write (`rw`), không mount
 từng file. Vì vậy UI/daemon tạo file mới hoặc thay file bằng atomic rename vẫn ghi bền vững về host.
 Input archive chỉ dùng để restore vẫn giữ read-only theo nguyên tắc tối thiểu quyền.
@@ -40,14 +40,14 @@ Input archive chỉ dùng để restore vẫn giữ read-only theo nguyên tắc
 cố ý che cây config cũ. Deploy đầu tiên sau nâng cấp chỉ migrate file còn thiếu từ cây cũ, không ghi
 đè file đã có dưới `/etc/icinga-ansible`.
 
-Role không đọc, copy, mount hoặc xoá `zones.d`. Cấu hình hạ tầng mới do role sở hữu được kiểm tra
-bằng `icinga2 daemon -C` với đúng tập mount trước khi container phục vụ bị thay đổi.
+Role không đọc, copy hoặc xoá `zones.d`. Thư mục có mặt trong container chỉ vì toàn bộ cây config
+host được bind-mount RW. Cấu hình hạ tầng do role sở hữu được kiểm tra bằng `icinga2 daemon -C`
+với đúng tập mount trước khi container phục vụ bị thay đổi.
 
 ## 5. Network
 
 Service dùng Docker host network. Port cluster/API 5665 nối trực tiếp theo endpoint; không đặt VIP ở
-đây. Web mặc định dùng 8080. Nếu cần HAProxy/Keepalived/VIP Web thì quản lý bên ngoài vì role
-`loadbalancer` hiện fail-fast, chưa được hiện thực.
+đây. Web mặc định dùng 8080. Reverse proxy/load balancer cho Web nằm ngoài phạm vi của tool.
 
 ## 6. Invariant và precheck
 
@@ -89,8 +89,8 @@ deployment node ghi đè monitoring config. Cây config được mount nguyên t
 
 ### 9.4. SSH và secret
 
-SSH key và plugin hiện vẫn dùng kênh operator hiện hữu. Riêng credential API trên master hoàn toàn
-local: role tạo `/etc/icinga-ansible/icinga2/secrets` trên từng master. Thư mục này thuộc cây config
+SSH key, plugin và credential API hoàn toàn local trên từng executor; deployment node không phân
+phối hoặc xoá chúng. Role tạo `/etc/icinga-ansible/icinga2/secrets` trên từng master. Thư mục này thuộc cây config
 đã bind-mount RW nguyên khối vào `/data/etc/icinga2`, nên không cần mount riêng. Role không đọc, copy,
 merge hoặc xoá file trong thư mục này; sửa file trên host được container thấy ngay.
 

@@ -309,11 +309,3 @@
     - icingaweb2
     - mariadb
   tags: [bootstrap]
-
-# Ghi chú mạng: icinga2/mariadb/redis dùng network_mode=host (xem design 16.1),
-# nên chỉ cần 1 bridge phụ cho web nếu muốn tách. Tạo sẵn để dùng linh hoạt.
-- name: Tạo docker network (dùng cho web nếu không chạy host-net)
-  community.docker.docker_network:
-    name: "{{ docker_network_name }}"
-    state: present
-  tags: [bootstrap]

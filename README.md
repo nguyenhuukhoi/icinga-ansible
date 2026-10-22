@@ -87,8 +87,6 @@ db1
 db2
 db3
 
-[loadbalancer]
-
 [icinga:children]
 master
 satellite
@@ -134,16 +132,17 @@ cần runbook DB riêng; các lệnh node ở trên dành cho endpoint Icinga.
 ```
 
 Luôn chạy `backup-full`, kiểm tra `LATEST_COMPLETE`/manifest và copy cả bundle ra storage độc lập
-trước thao tác phá huỷ. Inventory trong repo và nội dung `conf.d/operator` không thuộc bundle này;
-phải backup bằng SCM/pipeline operator riêng.
+trước thao tác phá huỷ. Inventory và nội dung monitoring trong `zones.d` phải được backup bằng
+SCM/pipeline operator riêng.
 
 ## Tự quản lý Host/Service/Check
 
 Khuyến nghị dùng Director. Project chỉ enable module trên `ca_host`/master1 và migrate schema; operator tự Kickstart và
 quản lý object trong UI. Ansible không import hoặc reconcile object Director.
 
-Nếu dùng static DSL, hãy quản lý và triển khai bằng quy trình riêng của operator. Project cố ý không
-đọc, validate, copy, mount hoặc xoá `zones.d`; sửa file monitoring không yêu cầu chạy `reconfigure`.
+Nếu dùng static DSL, hãy quản lý và triển khai bằng quy trình riêng của operator. Project không đọc,
+validate, copy hoặc xoá `zones.d`; thư mục chỉ xuất hiện trong container vì toàn bộ cây config host
+được bind-mount RW. Sửa file monitoring không yêu cầu chạy `reconfigure`.
 
 Xem mục 6–7 trong [QUICKSTART.md](QUICKSTART.md) để làm theo từng lệnh thêm/xóa node và dựng lại cụm
 từ full backup; [OPERATIONS-RUNBOOK-VI.md](OPERATIONS-RUNBOOK-VI.md) là runbook vận hành/sự cố đầy

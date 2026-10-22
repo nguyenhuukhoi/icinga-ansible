@@ -8,10 +8,6 @@
 ###############################################################################
 # Chung
 ###############################################################################
-base_distro: "ubuntu"                          # ubuntu 24.04 / 26.04
-network_interface: "eth0"                       # interface mặc định để bind
-icinga_internal_vip_address: ""                 # VIP web (443) khi có loadbalancer; để trống nếu không
-
 # Proxy tuỳ chọn. Có thể để trống proxy_http/proxy_https và chỉ khai proxy trong /etc/environment
 # trên từng managed node (cách vận hành đơn giản như host chạy Kolla); playbook tự dùng môi trường đó cho
 # apt/get_url, Docker daemon, Ubuntu Pro ESM cache và container Icinga 2. Chỉ khai ở đây khi muốn
@@ -146,12 +142,9 @@ icingadb_redis_port: 6380
 icingadb_db_name: "icingadb"
 
 ###############################################################################
-# Web (Apache2)
+# Web
 ###############################################################################
-icingaweb2_web_server: "apache2"                 # cố định
 icingaweb2_http_port: 8080                        # image official serve Apache trên 8080
-icingaweb2_https_port: 443
-icingaweb2_enable_tls: false                      # TLS 443 = việc P6 (chưa cấu hình vhost/cert)
 icingaweb2_timezone: "Asia/Ho_Chi_Minh"           # timezone hiển thị mặc định trong Web UI (config.ini [global] timezone)
 
 # Module Icinga Web 2 muốn bật (chỉ quyết định BẬT CÁI NÀO, không quyết định version)
@@ -160,11 +153,6 @@ enable_icingaweb2_modules:
   # - "director"                                 # bật sau khi verify core (cần DB + migration)
 
 # Ansible chỉ enable/migrate Director. Operator tự Kickstart và quản lý object trong Web UI.
-
-# (nâng cao) version module web đi THEO image icingaweb2 (module build sẵn trong image) — thường
-# để trống. Chỉ khai nếu muốn nạp chồng 1 module bản khác image (P6, chưa hiện thực).
-icingaweb2_module_versions: {}
-#  director: "1.12.1"
 
 ###############################################################################
 # Database

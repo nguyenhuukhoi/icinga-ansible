@@ -71,9 +71,9 @@ env ICINGA_ANSIBLE_CONFIG_DIR):
 
 Vòng đời (2026-07-22: "deploy" KHÔNG còn tự chạy kèm "bootstrap-servers" nữa — 2 bước TÁCH HẲN.
 "bootstrap-servers" chỉ cần chạy 1 lần trên host HOÀN TOÀN MỚI — chưa từng cài Docker/chrony. "destroy"
-(2026-07-22, sửa lại) KHÔNG còn xoá docker network/cấu trúc thư mục nữa (giữ nguyên, giống
+(2026-07-22, sửa lại) KHÔNG còn xoá cấu trúc thư mục nữa (giữ nguyên, giống
 kolla-ansible), nên sau "destroy" chỉ cần "deploy" thẳng, KHÔNG cần "bootstrap-servers" lại):
-  bootstrap-servers   Cài Docker, chrony, tạo thư mục/mạng — chỉ cần 1 lần trên host mới
+  bootstrap-servers   Cài Docker, chrony và tạo thư mục — chỉ cần 1 lần trên host mới
   prechecks           Kiểm tra tiền deploy (topology, version, cổng)
   pull                Kéo image về host
   deploy              Triển khai toàn bộ stack (giả định host ĐÃ bootstrap ít nhất 1 lần)
@@ -83,7 +83,7 @@ kolla-ansible), nên sau "destroy" chỉ cần "deploy" thẳng, KHÔNG cần "b
   rollback            Quay về version cũ + restore DB pre-upgrade (-e confirm=yes)
   post-deploy         In thông tin truy cập / admin
   check               Health-check cluster + web + DB
-  destroy             Gỡ container + dữ liệu, giữ nguyên Docker/network (có xác nhận, giống kolla-ansible:
+  destroy             Gỡ container + dữ liệu, giữ nguyên Docker (có xác nhận, giống kolla-ansible:
                       -e confirm=yes-i-really-really-mean-it)
 
 Node ops (P3+):
@@ -116,7 +116,7 @@ Options:
       --limit HOSTS      giới hạn host (ansible --limit)
   -t, --tags TAGS        chạy hẹp theo tag — THAY THẾ tag mặc định của lệnh (không cộng dồn).
                          Tag có sẵn: bootstrap, prechecks, mariadb, redis, icinga2, icingadb,
-                         web, director-config, lb. Ví dụ chỉ đẩy lại config Icinga 2:
+                         web. Ví dụ chỉ đẩy lại config Icinga 2:
                            icinga-ansible reconfigure -i <inv> -t icinga2
                          Lưu ý: tag hẹp bỏ qua prechecks (gắn tag prechecks/deploy).
       --config-backup PATH   dùng với restore-config
