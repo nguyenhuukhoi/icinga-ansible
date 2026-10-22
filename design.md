@@ -89,12 +89,10 @@ deployment node ghi đè monitoring config. Cây config được mount nguyên t
 
 ### 9.4. SSH và secret
 
-SSH key, plugin và credential chỉ là kênh vận chuyển operator-owned. Chúng không kích hoạt object nào
-nếu operator chưa tự định nghĩa CheckCommand/Host/Service.
-
-Tầng `config/icinga2/secrets` chỉ được phân phối tới master, dành cho API credential như
-`clouds.yaml`; tầng `config/icinga2/secret` vẫn là global cho mọi Icinga node. Runtime secret được
-mount tại `/etc/icinga-ansible/icinga2` trong container và không được ghi vào monitoring DSL.
+SSH key và plugin hiện vẫn dùng kênh operator hiện hữu. Riêng credential API trên master hoàn toàn
+local: role tạo `/etc/icinga-ansible/config/icinga2/secrets` trên từng master và bind-mount RW vào
+`/etc/icinga-ansible/icinga2` trong container. Role không đọc, copy, merge hoặc xoá file trong thư mục
+này; sửa file trên host được container thấy ngay.
 
 ### 9.6. Custom image
 

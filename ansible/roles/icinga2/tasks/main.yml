@@ -15,6 +15,8 @@
     ic_etc: "{{ icinga_base_dir }}/icinga2/data/etc/icinga2"
     # Đây là cây config chính thức trên host; container mount nguyên thư mục RW.
     ic_config_dir: "{{ icinga_etc_dir }}/icinga2"
+    # Credential local của master; không đọc/copy từ deployment node.
+    ic_master_secrets_dir: "{{ icinga_etc_dir }}/config/icinga2/secrets"
 
 # Mọi lệnh bootstrap/verify bên dưới đều chạy bằng image đích. Nếu image chưa có
 # và registry tạm lỗi, `docker run` trả rc=125; tuyệt đối không được hiểu đó là
@@ -125,184 +127,14 @@
       -v {{ ic_config_dir }}:/data/etc/icinga2:rw
       {{ images.icinga2 }}
 
-# These are operator-owned inputs, not Icinga DSL. Merge in deterministic order: global, node role,
-# host. Later sources override the same relative path from earlier sources. A topology node belongs
-# to only one Icinga role; keep the explicit order defensive and independent from group_names order.
-- name: Xác định loại Icinga node cho tầng secret
-  ansible.builtin.set_fact:
-    _ic_secret_role: >-
-      {{ 'master' if 'master' in group_names else
-         'satellite' if 'satellite' in group_names else
-         'client' if 'client' in group_names else '' }}
-
-- name: Xác định các tầng secret áp dụng cho node
-  ansible.builtin.set_fact:
-    # Tầng theo role dùng tiền tố "group_" cho ĐỒNG NHẤT với tầng override config
-    # (render_config_item.yml: config/icinga2/group_<nhóm>/<file>) — quyết định người dùng 2026-10-18.
-    # Trước đó tầng secret bỏ tiền tố (master/secret) nên cùng một khái niệm "theo nhóm" lại có hai
-    # cách viết khác nhau, rất dễ nhầm. prechecks chặn đường dẫn CŨ để không âm thầm bỏ sót credential.
-    _ic_secret_source_dirs: >-
-      {{ [icinga2_secret_source_dir]
-         + ([icinga2_master_secret_source_dir]
-            if _ic_secret_role == 'master' else [])
-         + ([deploy_config_dir + '/icinga2/group_' + _ic_secret_role + '/secret']
-            if _ic_secret_role | length > 0 else [])
-         + [deploy_config_dir + '/icinga2/' + inventory_hostname + '/secret'] }}
-
-- name: Kiểm tra các tầng secret Icinga 2 trên deployment node
-  ansible.builtin.stat:
-    path: "{{ secret_source_dir }}"
-  loop: "{{ _ic_secret_source_dirs }}"
-  loop_control:
-    loop_var: secret_source_dir
-    label: "{{ secret_source_dir }}"
-  delegate_to: localhost
-  become: false
-  register: _ic_secret_source_stats
-
-- name: Chặn đường dẫn secret tồn tại nhưng không phải thư mục
-  ansible.builtin.assert:
-    that:
-      - not item.stat.exists or (item.stat.isdir | default(false))
-    fail_msg: "{{ item.secret_source_dir }} phải là thư mục."
-  loop: "{{ _ic_secret_source_stats.results }}"
-  loop_control:
-    label: "{{ item.secret_source_dir }}"
-
-- name: Xác định có bật mount secret trên node này hay không
-  ansible.builtin.set_fact:
-    _ic_secret_enabled: >-
-      {{ (_ic_secret_source_stats.results
-          | selectattr('stat.exists', 'equalto', true) | list | length) > 0 }}
-    _ic_secret_effective_files: {}
-    _ic_secret_unreadable_sources: []
-
-- name: Dò file trong từng tầng secret trên deployment node
-  ansible.builtin.find:
-    paths: "{{ secret_source_stat.secret_source_dir }}"
-    recurse: true
-    hidden: true
-    file_type: file
-  loop: "{{ _ic_secret_source_stats.results }}"
-  loop_control:
-    loop_var: secret_source_stat
-    label: "{{ secret_source_stat.secret_source_dir }}"
-  delegate_to: localhost
-  become: false
-  register: _ic_secret_source_find
-  when: secret_source_stat.stat.exists
-  no_log: true
-
-- name: Ghi nhận tầng secret có nhánh mà deployment user không đọc được
-  ansible.builtin.set_fact:
-    _ic_secret_unreadable_sources: >-
-      {{ _ic_secret_unreadable_sources
-         + [secret_source_find.secret_source_stat.secret_source_dir] }}
-  loop: "{{ _ic_secret_source_find.results | selectattr('files', 'defined') | list }}"
-  loop_control:
-    loop_var: secret_source_find
-    label: "secret source"
-  when: secret_source_find.skipped_paths | default({}) | length > 0
-  no_log: true
-
-- name: Chặn tầng secret có file hoặc thư mục con mà deployment user không đọc được
-  ansible.builtin.assert:
-    that:
-      - _ic_secret_unreadable_sources | length == 0
-    fail_msg: >-
-      User chạy Ansible không đọc được toàn bộ: {{ _ic_secret_unreadable_sources | join(', ') }}.
-      Hãy sửa owner/mode của mọi file và thư mục con trong tầng nguồn này.
-
-- name: Lập bản đồ file secret hiệu lực sau khi trộn các tầng
-  ansible.builtin.include_tasks: collect_secret_manifest.yml
-  loop: "{{ _ic_secret_source_find.results | selectattr('files', 'defined') | list }}"
-  loop_control:
-    loop_var: secret_source_find
-    label: "secret source"
-  no_log: true
-
-- name: Tạo thư mục secret runtime trên Icinga node
+- name: Tạo thư mục credential local trên master
   ansible.builtin.file:
-    path: "{{ icinga_etc_dir }}/icinga2/secret"
+    path: "{{ ic_master_secrets_dir }}"
     state: directory
     owner: "{{ ic_uid }}"
     group: "{{ ic_uid }}"
     mode: "0700"
-  when: _ic_secret_enabled
-
-- name: Tạo các thư mục con cho file secret hiệu lực
-  ansible.builtin.file:
-    path: "{{ icinga_etc_dir }}/icinga2/secret/{{ item }}"
-    state: directory
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: "0700"
-  loop: >-
-    {{ _ic_secret_effective_files.keys() | map('dirname') | unique | list }}
-  loop_control:
-    label: "secret directory"
-  no_log: true
-  when: _ic_secret_enabled
-
-- name: Đồng bộ bản cuối cùng của từng file secret xuống Icinga node
-  ansible.builtin.copy:
-    src: "{{ item.value }}"
-    dest: "{{ icinga_etc_dir }}/icinga2/secret/{{ item.key }}"
-    owner: "{{ ic_uid }}"
-    group: "{{ ic_uid }}"
-    mode: preserve
-  loop: "{{ _ic_secret_effective_files | dict2items }}"
-  loop_control:
-    label: "secret file"
-  no_log: true
-  when: _ic_secret_enabled
-
-- name: Dò file secret runtime để loại bỏ file không còn ở nguồn
-  ansible.builtin.find:
-    paths: "{{ icinga_etc_dir }}/icinga2/secret"
-    recurse: true
-    hidden: true
-    file_type: file
-  register: _ic_secret_runtime_files
-  when: _ic_secret_enabled
-
-- name: Xóa file secret runtime không còn ở bất kỳ tầng nguồn nào
-  ansible.builtin.file:
-    path: "{{ item.path }}"
-    state: absent
-  loop: "{{ _ic_secret_runtime_files.files | default([]) }}"
-  loop_control:
-    label: "secret file"
-  no_log: true
-  when:
-    - _ic_secret_enabled
-    - >-
-      (item.path | regex_replace('^' ~ ((icinga_etc_dir ~ '/icinga2/secret/') | regex_escape), ''))
-      not in _ic_secret_effective_files
-
-- name: Dọn thư mục con secret runtime đã rỗng
-  ansible.builtin.command:
-    argv:
-      - find
-      - "{{ icinga_etc_dir }}/icinga2/secret"
-      - -mindepth
-      - "1"
-      - -depth
-      - -type
-      - d
-      - -empty
-      - -print
-      - -delete
-  register: _ic_secret_empty_dirs_removed
-  changed_when: _ic_secret_empty_dirs_removed.stdout | length > 0
-  no_log: true
-  when: _ic_secret_enabled
-
-- name: Gỡ secret runtime khi node không có tầng nguồn nào
-  ansible.builtin.file:
-    path: "{{ icinga_etc_dir }}/icinga2/secret"
-    state: absent
-  when: not _ic_secret_enabled
+  when: inventory_hostname in groups['master']
 # ---------- Base config skeleton (toàn bộ /etc/icinga2 image ship kèm) — seed 1 LẦN ra node ---------
 # Mục tiêu (theo yêu cầu người dùng — giống hệt kolla /etc/kolla/<svc>, KHÔNG lồng thêm thư mục con
 # nào kiểu "base/"): MỌI file trong /etc/icinga2 đều là file THẬT nằm PHẲNG ngay dưới
@@ -1272,12 +1104,12 @@
       {{ _ic_dynamic_volumes +
          [ic_config_dir + '/custom-plugins:/usr/lib/nagios/custom-plugins:rw'] }}
 
-- name: "Mount thư mục secret operator vào container Icinga 2"
+- name: "Mount trực tiếp credential local của master vào container Icinga 2"
   ansible.builtin.set_fact:
     _ic_dynamic_volumes: >-
       {{ _ic_dynamic_volumes +
-         [icinga_etc_dir + '/icinga2/secret:' + icinga2_secret_container_dir + ':rw'] }}
-  when: _ic_secret_enabled
+         [ic_master_secrets_dir + ':/etc/icinga-ansible/icinga2:rw'] }}
+  when: inventory_hostname in groups['master']
 
 - name: Bật các feature khai báo (idempotent)
   # Satellite KHÔNG có Redis cục bộ (chỉ master mới chạy icingadb-redis) -> loại 'icingadb' khỏi

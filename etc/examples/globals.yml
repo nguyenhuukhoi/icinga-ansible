@@ -161,23 +161,6 @@ enable_icingaweb2_modules:
 
 # Ansible chỉ enable/migrate Director. Operator tự Kickstart và quản lý object trong Web UI.
 
-# File nhạy cảm dành cho nội dung operator tự quản lý đặt tại:
-#   config/icinga2/secret/                         (mọi Icinga node)
-#   config/icinga2/secrets/                        (chỉ master; API credentials như clouds.yaml)
-#   config/icinga2/group_master/secret/                  (chỉ master)
-#   config/icinga2/group_satellite/secret/               (chỉ satellite)
-#   config/icinga2/group_client/secret/                  (chỉ client)
-#   config/icinga2/<inventory_hostname>/secret/    (chỉ một node)
-# Thứ tự trộn: global -> loại node -> host. Tầng sau ghi đè file cùng đường dẫn ở tầng trước;
-# những file khác vẫn được giữ. Xem QUICKSTART.md mục 3 để biết ví dụ đầy đủ.
-# Ansible đồng bộ và mount read-write vào container Icinga 2 tại:
-#   /etc/icinga-ansible/icinga2/
-# Có thể override đường dẫn global và đường dẫn trong container nếu cần. Các tầng role/host luôn nằm
-# dưới deploy_config_dir để cấu trúc override nhất quán với phần config Icinga 2 còn lại.
-icinga2_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secret"
-icinga2_master_secret_source_dir: "{{ deploy_config_dir }}/icinga2/secrets"
-icinga2_secret_container_dir: "/etc/icinga-ansible/icinga2"
-
 # (nâng cao) version module web đi THEO image icingaweb2 (module build sẵn trong image) — thường
 # để trống. Chỉ khai nếu muốn nạp chồng 1 module bản khác image (P6, chưa hiện thực).
 icingaweb2_module_versions: {}

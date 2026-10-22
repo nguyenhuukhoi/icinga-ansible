@@ -20,11 +20,9 @@ Với static HA, operator có thể đặt file trực tiếp trong `zones.d/<Zo
 Icinga tự config-sync sang master peer. Đây là đồng bộ nội bộ của Icinga, không phải deployment node
 ghi đè `zones.d`.
 
-Script riêng đặt tại
-`/etc/icinga-ansible/config/icinga2/custom-plugins/`; secret của script có thể đặt tại các tầng
-`config/icinga2/secret`, `group_master/secret`, `group_satellite/secret`, `group_client/secret`
-hoặc `<inventory_hostname>/secret`. Riêng `config/icinga2/secrets` chỉ được chuyển tới master, phù hợp
-cho `clouds.yaml` của check API OpenStack chạy từ master.
+Credential của plugin chạy trên master được operator đặt trực tiếp trên từng master tại
+`/etc/icinga-ansible/config/icinga2/secrets/`. Role chỉ tạo và bind-mount nguyên thư mục local này
+vào container; không đọc hoặc sao chép secret từ deployment node.
 
 ## Cấu trúc
 

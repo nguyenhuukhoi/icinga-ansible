@@ -78,32 +78,6 @@
     fail_msg: >-
       Các nhóm [master], [satellite], [client] phải rời nhau vì một Icinga endpoint chỉ có một zone.
 
-# 2026-10-18: tầng secret theo role dùng LẠI tiền tố group_ cho đồng nhất với tầng override config
-# (config/icinga2/group_<nhóm>/<file>). Chặn đường dẫn KHÔNG có tiền tố (master/secret...) vì role
-# không còn đọc nó nữa — để im lặng thì credential sẽ không được mount và check sẽ fail ở runtime với
-# lý do rất khó truy.
-- name: Kiểm tra thư mục secret theo tên cũ (không có tiền tố group_) có còn trên deployment node không
-  ansible.builtin.stat:
-    path: "{{ deploy_config_dir }}/icinga2/{{ item }}/secret"
-  loop: [master, satellite, client]
-  delegate_to: localhost
-  become: false
-  run_once: true
-  register: _precheck_legacy_role_secret_dirs
-
-- name: Chặn đường dẫn <role>/secret đã bỏ để không âm thầm mất credential
-  ansible.builtin.assert:
-    that:
-      - >-
-        (_precheck_legacy_role_secret_dirs.results
-         | selectattr('stat.exists', 'equalto', true) | list | length) == 0
-    fail_msg: >-
-      Tầng secret theo role dùng tiền tố group_ (đồng nhất với override config). Hãy chuyển
-      master/secret thành group_master/secret, satellite/secret thành group_satellite/secret và
-      client/secret thành group_client/secret, rồi xóa các thư mục cũ. Playbook từ chối chạy để
-      không âm thầm bỏ sót secret.
-  run_once: true
-
 - name: Tên tài khoản quản trị Icinga Web phải an toàn khi ghi vào SQL
   ansible.builtin.assert:
     that:

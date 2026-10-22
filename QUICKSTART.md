@@ -131,29 +131,33 @@ trong `zones.d`. Đặc biệt, `/etc/icinga-ansible/config/icinga2/zones.d` tr�
 còn là nguồn cấu hình và nội dung đặt tại đó sẽ bị bỏ qua. Operator phải dùng quy trình triển khai
 riêng nếu không dùng Director.
 
-Script riêng đặt trong `custom-plugins`; credential dùng chung cho mọi Icinga node đặt trong `secret/`,
-còn `/etc/icinga-ansible/config/icinga2/secrets/` chỉ được chuyển tới master. Credential theo role/host
-đặt dưới tầng `secret/` tương ứng. Những thư mục này chỉ là kênh vận chuyển an toàn, không phải object
-generator.
+Credential API không đi qua deployment node. Trên mỗi master, role tạo và mount trực tiếp thư mục local
+`/etc/icinga-ansible/config/icinga2/secrets/`; Ansible không đọc, copy, merge hoặc xoá file bên trong.
 
 ### Monitor Nova/Cinder/Neutron bằng static file, thực thi HA từ hai master
 
 Luồng này không dùng Director. Deployment node không đọc hoặc đồng bộ `zones.d`; operator đặt object trên
-`master1` và để cơ chế config-sync gốc của Icinga chuyển sang `master2`. Đặt credential OpenStack trên
-deployment node:
+`master1` và để cơ chế config-sync gốc của Icinga chuyển sang `master2`. Trên **từng master**, đặt
+`clouds.yaml` trực tiếp vào thư mục local:
 
 ```bash
-install -d -m 0700 /etc/icinga-ansible/config/icinga2/secrets
-install -m 0600 ~/.config/openstack/clouds.yaml \
+sudo install -d -o 5665 -g 5665 -m 0700 /etc/icinga-ansible/config/icinga2/secrets
+sudo install -o 5665 -g 5665 -m 0600 /path/to/clouds.yaml \
   /etc/icinga-ansible/config/icinga2/secrets/clouds.yaml
+docker exec icinga2 test -r /etc/icinga-ansible/icinga2/clouds.yaml
+```
+
+Bind mount là RW và trực tiếp: sửa file trên master được thấy ngay trong container, không cần chạy
+`reconfigure`. Plugin vẫn được đặt bằng kênh `custom-plugins` hiện hữu:
+
+```bash
 install -d -m 0750 /etc/icinga-ansible/config/icinga2/custom-plugins
 install -m 0755 examples/openstack-file-monitoring/check_openstack_service.py \
   /etc/icinga-ansible/config/icinga2/custom-plugins/check_openstack_service.py
 ```
 
-Role trộn secret và đưa `clouds.yaml` vào cả hai container master tại
-`/etc/icinga-ansible/icinga2/clouds.yaml`. Plugin gọi API qua endpoint trong `clouds.yaml`; vì vậy khi
-một controller hỏng, check vẫn chạy nếu OpenStack API/VIP còn hoạt động. Từ deployment node, thực hiện
+Plugin đọc file local trong container tại `/etc/icinga-ansible/icinga2/clouds.yaml`; vì vậy khi một
+controller hỏng, check vẫn chạy nếu OpenStack API/VIP còn hoạt động. Từ deployment node, thực hiện
 một lần các lệnh operator sau để đặt file vào đúng zone trên `master1` (không copy lên master2 và không
 được `reconfigure` quản lý lại):
 
