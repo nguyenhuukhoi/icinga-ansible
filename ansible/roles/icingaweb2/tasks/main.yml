@@ -19,6 +19,14 @@
       -v {{ icinga_etc_dir }}/icingaweb2:/data/etc/icingaweb2:rw
       --entrypoint icingacli {{ images.icingaweb2 }}
 
+# Director is deliberately single-node. ca_host is the first host in the [master]
+# inventory group (normally master1) and is also where the Icinga CA lives.
+- name: Xác định Director có được bật trên master hiện tại
+  ansible.builtin.set_fact:
+    _director_enabled_here: >-
+      {{ inventory_hostname == ca_host and
+         'director' in (enable_icingaweb2_modules | default([])) }}
+
 - name: Tạo cây config Icinga Web 2 chính thức trên host
   ansible.builtin.file:
     path: "{{ web_etc }}/{{ item }}"
@@ -265,11 +273,19 @@
           {'section': 'director_db', 'option': 'username', 'value': 'director'},
           {'section': 'director_db', 'option': 'password', 'value': director_db_password},
           {'section': 'director_db', 'option': 'charset', 'value': 'utf8'}
-        ] if 'director' in (enable_icingaweb2_modules | default([])) else [])
+        ] if _director_enabled_here | bool else [])
     }}
   loop_control:
     label: "{{ item.section }}.{{ item.option }}"
   no_log: true
+  notify: Reload icingaweb2
+
+- name: Xoá resource DB Director khỏi master không chạy Director
+  community.general.ini_file:
+    path: "{{ icinga_etc_dir }}/icingaweb2/resources.ini"
+    section: director_db
+    state: absent
+  when: not (_director_enabled_here | bool)
   notify: Reload icingaweb2
 
 # BUG THẬT (đọc trước khi xoá task này): commandtransports.ini seed-once giống resources.ini (để
@@ -297,23 +313,24 @@
 
 # ---------- Module (loại A/B/C) ----------
 # Tự giải phụ thuộc (2026-07-22, trước là TODO): đọc "requires" từ module_catalog
-# (group_vars/all.yml) — khai "director" trong globals.yml tự kéo theo "ipl"+"incubator" mà KHÔNG
+# (group_vars/all.yml) — khai "director" trong globals.yml tự kéo theo "incubator" mà KHÔNG
 # cần liệt kê tay. Trước đây "incubator" chỉ chạy được nhờ MAY MẮN (image tự bật sẵn theo default,
 # không phải Ansible chủ động đảm bảo) — trên volume/node hoàn toàn mới, nếu image không tự bật,
 # "director" sẽ gãy (thiếu autoload các package gipfl/* nó cần, xem bug daemon ở "Khởi động container
 # icingaweb2-director-daemon" bên dưới). Dùng biến RIÊNG (_effective_icingaweb2_modules) chỉ cho việc
-# "enable module nào" — mọi chỗ khác trong role (template resources.ini.j2 kiểm tra 'director' in
-# enable_icingaweb2_modules, mount module-director/config.ini...) vẫn dùng đúng
-# enable_icingaweb2_modules gốc, vì đó là Ý ĐỊNH người dùng (director được BẬT hay không), khác với
-# "cần enable thêm module phụ thuộc nào" (chi tiết triển khai, người dùng không cần biết).
+# "enable module nào". Director và dependency của nó chỉ được thêm trên ca_host/master1;
+# các module khác vẫn được bật trên mọi master như khai báo trong globals.yml.
 - name: "Tự giải phụ thuộc module: khởi tạo bằng danh sách khai trong globals.yml"
   ansible.builtin.set_fact:
-    _effective_icingaweb2_modules: "{{ enable_icingaweb2_modules }}"
+    _effective_icingaweb2_modules: >-
+      {{ (enable_icingaweb2_modules | default([]))
+         if inventory_hostname == ca_host
+         else (enable_icingaweb2_modules | default([]) | reject('equalto', 'director') | list) }}
 
-- name: "Tự giải phụ thuộc module: thêm requires từ module_catalog (vd director → ipl, incubator)"
+- name: "Tự giải phụ thuộc module: thêm requires từ module_catalog (vd director → incubator)"
   ansible.builtin.set_fact:
     _effective_icingaweb2_modules: "{{ (_effective_icingaweb2_modules + module_catalog[item].requires) | unique | list }}"
-  loop: "{{ enable_icingaweb2_modules }}"
+  loop: "{{ _effective_icingaweb2_modules }}"
   loop_control: { label: "{{ item }}" }
   when:
     - item in module_catalog
@@ -332,6 +349,16 @@
   loop_control:
     label: "{{ item.item }}"
   when: not item.stat.exists
+
+- name: Gỡ module và config Director khỏi master không chạy Director
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ web_etc }}/enabledModules/director"
+    - "{{ web_etc }}/modules/director"
+  when: not (_director_enabled_here | bool)
+  notify: Reload icingaweb2
 
 - name: (loại B) Render config module Icinga DB Web (resource DB + Redis, override-aware)
   ansible.builtin.include_tasks: render_config_item.yml
@@ -373,7 +400,7 @@
 
 - name: (loại C) Director — chỉ cấu hình kết nối và migrate schema
   ansible.builtin.include_tasks: module-director.yml
-  when: "'director' in (enable_icingaweb2_modules | default([]))"
+  when: _director_enabled_here | bool
 
 # ---------- Mount nguyên cây config RW ----------
 # Mọi file UI/icingacli tạo thêm đều xuất hiện ngay dưới /etc/icinga-ansible/icingaweb2 trên host.
@@ -459,10 +486,8 @@
 # nên chạy để tắt cảnh báo + có Job hoạt động khi cần.
 # Container RIÊNG (không nhét vào icingaweb2) — đúng tinh thần "1 tiến trình dài hạn = 1 container"
 # của dự án, có healthcheck/restart_policy độc lập.
-# CHẠY TRÊN MỌI master (không chỉ ca_host) — đã xác nhận qua test thật: daemon tự có cơ chế LOCK qua
-# DB (`icingacli director daemon run` trên node thứ 2 log "db: locked by other instance") — an toàn
-# chạy nhiều instance, tự failover giống leader-election của icingadb (không cần Ansible tự chọn 1
-# node để chạy).
+# Chỉ chạy trên ca_host/master1 theo thiết kế single-node Director. Master khác vẫn chạy
+# Icinga Web 2/Icinga DB Web nhưng không enable module, không giữ resource DB và không chạy daemon.
 #
 # BUG THẬT ĐÃ GẶP (2026-07-22): chạy thẳng `icingacli director daemon run` crash-loop
 # (exit 255) với "PHP Fatal error: Uncaught Error: Class 'gipfl\Cli\Process' not found" — file
@@ -502,7 +527,7 @@
       timeout: 5s
       retries: 3
   register: _director_daemon_container
-  when: "'director' in (enable_icingaweb2_modules | default([]))"
+  when: _director_enabled_here | bool
 
 - name: Chờ Director daemon healthy sau khi tạo/tái tạo
   community.docker.docker_container_info:
@@ -514,11 +539,11 @@
   retries: 24
   delay: 5
   when:
-    - "'director' in (enable_icingaweb2_modules | default([]))"
+    - _director_enabled_here | bool
     - _director_daemon_container.changed | default(false)
 
-- name: Dừng container icingaweb2-director-daemon nếu module director bị tắt (dọn mồ côi)
+- name: Dừng container icingaweb2-director-daemon trên node không chạy Director
   community.docker.docker_container:
     name: icingaweb2-director-daemon
     state: absent
-  when: "'director' not in (enable_icingaweb2_modules | default([]))"
+  when: not (_director_enabled_here | bool)

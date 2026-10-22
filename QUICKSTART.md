@@ -98,7 +98,7 @@ Role mount nguyên thư mục config với `rw`; không mount rời từng file:
 | Service | Host | Container |
 |---|---|---|
 | Icinga 2 | `/etc/icinga-ansible/icinga2/` | `/data/etc/icinga2/` |
-| Icinga Web 2/Director | `/etc/icinga-ansible/icingaweb2/` | `/data/etc/icingaweb2/` |
+| Icinga Web 2 (Director chỉ trên `ca_host`/master1) | `/etc/icinga-ansible/icingaweb2/` | `/data/etc/icingaweb2/` |
 | Icinga DB | `/etc/icinga-ansible/icingadb/` | `/etc/icingadb/` |
 | Redis | `/etc/icinga-ansible/icingadb-redis/` | `/usr/local/etc/redis/` |
 | MariaDB/Galera | `/etc/icinga-ansible/mariadb/` | `/etc/mysql/conf.d/` |
@@ -121,8 +121,10 @@ DSL hoàn toàn độc lập với project.
 ### Director
 
 Bật `director` trong `enable_icingaweb2_modules`. Ansible chỉ tạo DB, migrate schema và enable
-module. Operator tự chạy Kickstart trong UI rồi tự tạo Host/Service/CheckCommand; Ansible không
-import hoặc reconcile object Director.
+module trên `ca_host` (host đầu tiên trong `[master]`, thường là `master1`). Các master khác
+vẫn phục vụ Icinga DB Web nhưng không có module, resource DB, config hay daemon Director.
+Operator truy cập Web UI của master1, tự chạy Kickstart rồi tự tạo
+Host/Service/CheckCommand; Ansible không import hoặc reconcile object Director.
 
 ### Static DSL
 

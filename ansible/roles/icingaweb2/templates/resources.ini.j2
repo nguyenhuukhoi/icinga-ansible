@@ -18,7 +18,7 @@ dbname   = "icingadb"
 username = "icingadb"
 password = {{ icingadb_db_password | to_json }}
 charset  = "utf8mb4"
-{% if 'director' in (enable_icingaweb2_modules | default([])) %}
+{% if _director_enabled_here | bool %}
 
 [director_db]
 type     = "db"

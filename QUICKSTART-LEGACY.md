@@ -676,7 +676,11 @@ source /path/to/venv/bin/activate
 
 Nếu bật Director, không thêm key `director` vào `custom_image_overrides`: Director là module nằm trong
 image `icingaweb2`, vì vậy chỉ cần override `icingaweb2` và bật `director` trong
-`enable_icingaweb2_modules`.
+`enable_icingaweb2_modules`. Director chỉ được enable trên `ca_host` (host đầu tiên trong group
+`[master]`, thường là `master1`): resource `director_db`, config module và container
+`icingaweb2-director-daemon` đều không tồn tại trên các master còn lại. Vì vậy khi dùng Web UI
+qua load balancer, cần truy cập trực tiếp `master1` (hoặc route riêng/sticky route) để thao tác
+Director; Icinga DB Web vẫn hoạt động trên mọi master.
 
 ## 6. Ghi đè cấu hình (override) — tuỳ biến sâu mà không sửa code
 

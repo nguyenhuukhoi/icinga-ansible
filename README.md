@@ -5,7 +5,7 @@ Ansible project để triển khai và vận hành **hạ tầng Icinga** trên 
 - Icinga 2 master/satellite/client topology, PKI và API;
 - Icinga DB, Redis và Icinga Web 2;
 - MariaDB standalone hoặc Galera 3+ node;
-- Director module/schema (tuỳ chọn), backup/restore và rolling upgrade;
+- Director module/schema trên `ca_host`/master1 (tuỳ chọn), backup/restore và rolling upgrade;
 - vòng đời node: thêm, cấu hình lại và xoá master/satellite.
 
 ## Ranh giới quản lý
@@ -139,7 +139,7 @@ phải backup bằng SCM/pipeline operator riêng.
 
 ## Tự quản lý Host/Service/Check
 
-Khuyến nghị dùng Director. Project chỉ enable module và migrate schema; operator tự Kickstart và
+Khuyến nghị dùng Director. Project chỉ enable module trên `ca_host`/master1 và migrate schema; operator tự Kickstart và
 quản lý object trong UI. Ansible không import hoặc reconcile object Director.
 
 Nếu dùng static DSL, hãy quản lý và triển khai bằng quy trình riêng của operator. Project cố ý không

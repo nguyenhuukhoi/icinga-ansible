@@ -12,11 +12,49 @@
         _expected_containers: >-
           {{ ((['icinga2', 'icingadb-redis', 'icingadb', 'icingaweb2'] if 'master' in group_names else [])
               + (['icingaweb2-director-daemon']
-                 if ('master' in group_names and 'director' in (enable_icingaweb2_modules | default([])))
+                 if ('master' in group_names and inventory_hostname == ca_host
+                     and 'director' in (enable_icingaweb2_modules | default([])))
                  else [])
               + (['icinga2'] if ('satellite' in group_names or 'client' in group_names) else [])
               + (['mariadb'] if ('galera' in group_names and icinga_database_type == 'managed_db') else []))
              | unique | list }}
+
+    - name: Đọc trạng thái Director trên master không phải CA
+      when:
+        - "'master' in group_names"
+        - inventory_hostname != ca_host
+      block:
+        - name: Kiểm tra container Director daemon không còn tồn tại
+          community.docker.docker_container_info:
+            name: icingaweb2-director-daemon
+          register: _non_ca_director_daemon
+
+        - name: Kiểm tra module Director không còn enable
+          ansible.builtin.stat:
+            path: "{{ icinga_etc_dir }}/icingaweb2/enabledModules/director"
+          register: _non_ca_director_module
+
+        - name: Kiểm tra config module Director không còn tồn tại
+          ansible.builtin.stat:
+            path: "{{ icinga_etc_dir }}/icingaweb2/modules/director/config.ini"
+          register: _non_ca_director_config
+
+        - name: Đọc resources.ini để kiểm tra cô lập Director
+          ansible.builtin.slurp:
+            path: "{{ icinga_etc_dir }}/icingaweb2/resources.ini"
+          register: _non_ca_web_resources
+          no_log: true
+
+        - name: Xác nhận Director chỉ chạy trên CA/master1
+          ansible.builtin.assert:
+            that:
+              - not (_non_ca_director_daemon.exists | default(false))
+              - not (_non_ca_director_module.stat.exists | default(false))
+              - not (_non_ca_director_config.stat.exists | default(false))
+              - "'[director_db]' not in (_non_ca_web_resources.content | b64decode)"
+            fail_msg: >-
+              Director còn tồn tại trên {{ inventory_hostname }}; module, config, resource DB và
+              daemon chỉ được phép chạy trên ca_host={{ ca_host }}.
 
     - name: Đọc trạng thái container bắt buộc
       community.docker.docker_container_info:
