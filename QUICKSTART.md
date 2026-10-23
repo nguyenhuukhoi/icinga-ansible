@@ -479,23 +479,179 @@ khớp/healthy. Xem `TEST-REPORT-SAME-IP-DR-2026-10-23.md`.
 
 #### Trường hợp chỉ import database ứng dụng vào cụm mới
 
-Nếu muốn giữ system DB của Galera mới, logical dump chỉ đúng ba schema `icingadb`, `icingaweb2` và
-`director`; tuyệt đối không dùng `--all-databases` và không import `mysql`, `sys`,
-`performance_schema`, `information_schema`.
+Luồng này dựng Galera sạch, giữ nguyên system DB của cụm mới và chỉ mang theo:
 
-Thứ tự bắt buộc:
+- `icingadb`: dữ liệu current state và lịch sử Icinga DB;
+- `icingaweb2`: user/preference nằm trong database;
+- `director`: object/config của Director.
 
-1. dựng cụm đích sạch bằng đúng version nguồn: `bootstrap-servers`, `pull`, `deploy`, `check`;
-2. dừng `icingaweb2-director-daemon` (nếu có), `icingaweb2`, `icingadb`, `icinga2` trên mọi master;
-3. **không dừng `icingadb-redis`**;
-4. xác minh gzip, SHA-256 và dump chỉ có ba database ứng dụng rồi import trên `galera[0]`;
-5. chạy `recover-db-only -e confirm=yes`, `deploy`, rồi `check`;
-6. triển khai lại monitoring config bằng pipeline operator.
+Tuyệt đối không dùng `--all-databases` và không import `mysql`, `sys`, `performance_schema` hoặc
+`information_schema`. User/grant, root credential, system table và Galera state phải do cụm đích mới
+tạo. Ví dụ dưới đây chạy trên deployment node bằng user thường đã activate virtualenv.
 
-Đây không phải full DR: CA/PKI, file config Web, `zones.d`, plugin và credential operator không nằm
-trong logical DB dump. Lịch sử Icinga DB được giữ, nhưng active Host/Service sẽ hội tụ theo config của
-cụm mới; nếu chưa triển khai lại config monitoring, chúng có thể biến mất khỏi current state. Quy trình,
-lệnh dump/import và bằng chứng regression thật nằm ở mục 14.8 của `OPERATIONS-RUNBOOK-VI.md`.
+Khai biến và kiểm tra hai inventory trước:
+
+```bash
+cd /opt/icinga-ansible
+source /path/to/venv/bin/activate
+
+SOURCE_INV=inventory-source
+TARGET_INV=inventory-new
+SOURCE_DB_HOST=galera1       # galera[0] trong inventory nguồn
+TARGET_DB_HOST=galera1       # galera[0] trong inventory đích
+BACKUP_ROOT=/var/backups/icinga-ansible-config/logical
+DUMP_TS="$(date +%Y%m%d-%H%M%S)"
+DUMP_FILE="icinga-app-db-$DUMP_TS.sql.gz"
+
+ansible-inventory -i "$SOURCE_INV" --graph
+ansible-inventory -i "$TARGET_INV" --graph
+ansible -i "$SOURCE_INV" all_hosts -m ping
+ansible -i "$TARGET_INV" all_hosts -m ping
+```
+
+Tạo logical dump trên `galera[0]` nguồn. `--single-transaction` lấy snapshot nhất quán mà không cần
+dừng cụm nguồn:
+
+```bash
+ansible -i "$SOURCE_INV" "$SOURCE_DB_HOST" -b -m shell -a \
+  "docker exec mariadb mariadb-dump \
+    --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf \
+    --single-transaction --quick --routines --events --triggers --hex-blob \
+    --add-drop-database --databases icingadb icingaweb2 director \
+    | gzip -1 > /tmp/$DUMP_FILE"
+
+mkdir -p .tmp
+ansible -i "$SOURCE_INV" "$SOURCE_DB_HOST" -b -m fetch -a \
+  "src=/tmp/$DUMP_FILE dest=$PWD/.tmp/$DUMP_FILE flat=yes"
+
+sudo install -d -m 0750 "$BACKUP_ROOT"
+gzip -t ".tmp/$DUMP_FILE"
+(cd .tmp && sha256sum "$DUMP_FILE") | tee ".tmp/$DUMP_FILE.sha256"
+sudo install -m 0640 ".tmp/$DUMP_FILE" "$BACKUP_ROOT/$DUMP_FILE"
+sudo install -m 0640 ".tmp/$DUMP_FILE.sha256" "$BACKUP_ROOT/$DUMP_FILE.sha256"
+```
+
+Xác minh phạm vi dump. Lệnh `test` phải PASS; nếu không, dừng lại và không import:
+
+```bash
+ACTUAL_DATABASES="$(gzip -cd ".tmp/$DUMP_FILE" \
+  | sed -n 's/^-- Current Database: `\([^`]*\)`$/\1/p' \
+  | sort -u)"
+EXPECTED_DATABASES="$(printf '%s\n' director icingadb icingaweb2)"
+
+printf '%s\n' "$ACTUAL_DATABASES"
+test "$ACTUAL_DATABASES" = "$EXPECTED_DATABASES"
+```
+
+Đồng bộ cả file dump và checksum sang storage ngoài deployment node trước khi tiếp tục.
+
+Dựng cụm đích sạch bằng **đúng version nguồn**. Không nâng version đồng thời với DR; restore xong mới
+dùng quy trình `upgrade` riêng:
+
+```bash
+./tools/icinga-ansible bootstrap-servers -i "$TARGET_INV"
+./tools/icinga-ansible prechecks         -i "$TARGET_INV"
+./tools/icinga-ansible pull              -i "$TARGET_INV"
+./tools/icinga-ansible deploy            -i "$TARGET_INV"
+./tools/icinga-ansible check             -i "$TARGET_INV"
+```
+
+Lần deploy sạch tạo service user/grant trong system DB đích. Ghi lại baseline trước import:
+
+```bash
+ansible -i "$TARGET_INV" "$TARGET_DB_HOST" -b -m shell -a \
+  'docker exec mariadb mariadb \
+    --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf -N -e \
+    "SELECT COUNT(*) FROM mysql.global_priv; CHECKSUM TABLE mysql.global_priv; \
+     SELECT COUNT(*) FROM icingadb.host;"'
+```
+
+Dừng publisher/consumer DB trên mọi master. **Không dừng `icingadb-redis`** vì
+`recover-db-only` cần Redis đang chạy để flush stream tạm:
+
+```bash
+ansible -i "$TARGET_INV" master -b -m shell -a '
+  for c in icingaweb2-director-daemon icingaweb2 icingadb icinga2; do
+    docker inspect "$c" >/dev/null 2>&1 && docker stop "$c" || true
+  done'
+```
+
+Stage dump lên `galera[0]` đích, kiểm tra lại rồi import:
+
+```bash
+ansible -i "$TARGET_INV" "$TARGET_DB_HOST" -b -m copy -a \
+  "src=$PWD/.tmp/$DUMP_FILE dest=/tmp/$DUMP_FILE mode=0600"
+
+ansible -i "$TARGET_INV" "$TARGET_DB_HOST" -b -m shell -a \
+  "gzip -t /tmp/$DUMP_FILE && sha256sum /tmp/$DUMP_FILE && \
+   gzip -cd /tmp/$DUMP_FILE \
+     | grep '^-- Current Database:'"
+
+ansible -i "$TARGET_INV" "$TARGET_DB_HOST" -b -m shell -a \
+  "gzip -dc /tmp/$DUMP_FILE \
+    | docker exec -i mariadb mariadb \
+        --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf"
+```
+
+Ngay sau import, xác minh app DB đã có dữ liệu nhưng system DB không đổi. Count/checksum
+`mysql.global_priv` phải khớp baseline đích, không phải cụm nguồn:
+
+```bash
+ansible -i "$TARGET_INV" "$TARGET_DB_HOST" -b -m shell -a \
+  'docker exec mariadb mariadb \
+    --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf -N -e \
+    "SELECT COUNT(*) FROM mysql.global_priv; CHECKSUM TABLE mysql.global_priv; \
+     SELECT COUNT(*) FROM icingadb.host; \
+     SELECT COUNT(*) FROM icingaweb2.icingaweb_user; \
+     SELECT COUNT(*) FROM director.director_schema_migration; \
+     SHOW STATUS LIKE '\''wsrep_cluster_size'\''; \
+     SHOW STATUS LIKE '\''wsrep_ready'\'';"'
+```
+
+Phục hồi environment ID cũ lên mọi master, hội tụ service và chạy deep check:
+
+```bash
+./tools/icinga-ansible recover-db-only -i "$TARGET_INV" -e confirm=yes
+./tools/icinga-ansible deploy           -i "$TARGET_INV"
+./tools/icinga-ansible check            -i "$TARGET_INV"
+```
+
+Xác minh hai master dùng cùng environment ID và lịch sử vẫn đọc được:
+
+```bash
+ansible -i "$TARGET_INV" master -b \
+  -a 'cat /var/lib/icinga-ansible/icinga2/icingadb.env'
+
+ansible -i "$TARGET_INV" "$TARGET_DB_HOST" -b -m shell -a \
+  'docker exec mariadb mariadb \
+    --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf -N -e \
+    "SELECT '\''history'\'',COUNT(*) FROM icingadb.history \
+     UNION ALL SELECT '\''state_history'\'',COUNT(*) FROM icingadb.state_history \
+     UNION ALL SELECT '\''sla_history_state'\'',COUNT(*) FROM icingadb.sla_history_state;"'
+```
+
+Sau khi toàn bộ kiểm tra PASS, xóa bản stage trên Galera đích; giữ bản backup trên deployment node và
+storage ngoài:
+
+```bash
+ansible -i "$TARGET_INV" "$TARGET_DB_HOST" -b -m file -a \
+  "path=/tmp/$DUMP_FILE state=absent"
+```
+
+Giới hạn của DB-only restore:
+
+1. Không restore CA/PKI. Nếu không chạy `restore-pki` riêng trước deploy đầu tiên, cụm có CA mới và
+   agent/client cũ phải enroll lại.
+2. Không restore filesystem config Web. Thay đổi UI nằm trong file INI chỉ trở lại qua `restore-web`.
+3. Không restore `zones.d`, plugin, SSH key hoặc credential operator.
+4. Icinga DB xem runtime config hiện tại là nguồn sự thật. Host/Service vừa import có thể bị xóa khỏi
+   current state nếu cụm mới chưa có monitoring config tương ứng; dữ liệu lịch sử vẫn còn.
+5. Với Director, schema `director` mang object/config về nhưng operator vẫn phải kiểm tra Kickstart và
+   tự deploy chúng. Director chỉ chạy trên master1.
+
+Regression thật ngày 2026-10-23 đã dựng cụm mới 2 master + 3 Galera, giữ system DB đích, import đúng
+ba schema ứng dụng, phục hồi environment ID và chạy full `check` với `failed=0`. Chi tiết và checksum
+nằm ở mục 14.8 và 19.4 của `OPERATIONS-RUNBOOK-VI.md`.
 
 ### 7.3. Kiểm tra sau restore
 
