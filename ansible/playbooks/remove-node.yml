@@ -1,6 +1,7 @@
 # =============================================================================
 # remove-node.yml — Gỡ 1 satellite khỏi cluster (design 12.2). PHÁ HUỶ trên host bị gỡ.
-# Dùng: icinga-ansible remove-node -e target_host=<tên trong inventory> -e confirm=yes
+# Dùng một node: icinga-ansible remove-node -e target_host=sat01 -e confirm=yes
+# Dùng nhiều node song song: icinga-ansible remove-node -e target_host=sat01,sat02 -e confirm=yes
 #
 # Chỉ xoá container icinga2 + dữ liệu TRÊN HOST BỊ GỠ (satellite không có redis/icingadb/web).
 # Sau khi chạy, PHẢI tự tay:
@@ -17,27 +18,36 @@
     confirm: false
     target_host: ""
   tasks:
-    - name: Kiểm tra tham số bắt buộc
-      ansible.builtin.fail:
-        msg: >-
-          remove-node cần: -e target_host=<tên host trong inventory, vd sat02> -e confirm=yes.
-          Đây là thao tác PHÁ HUỶ container+dữ liệu icinga2 TRÊN HOST ĐÓ.
-      # So sánh chuỗi CHÍNH XÁC "yes" — xem giải thích ở remove-master.yml (cùng bug class: "| bool"
-      # coi cả "true"/"on"/"1" hợp lệ, dễ bị 1 giá trị sót lại trong vars file kích hoạt nhầm).
-      when: confirm != 'yes' or (target_host | default('')) | length == 0
+    - name: Chuẩn hoá danh sách satellite cần xoá
+      ansible.builtin.set_fact:
+        _remove_node_targets: >-
+          {{ (target_host | default('')).split(',')
+             | map('trim') | reject('equalto', '') | list }}
+
+    - name: Kiểm tra xác nhận và danh sách target
+      ansible.builtin.assert:
+        that:
+          - confirm == 'yes'
+          - _remove_node_targets | length > 0
+          - (_remove_node_targets | unique | list | length) == (_remove_node_targets | length)
+        fail_msg: >-
+          remove-node cần -e target_host=sat01 hoặc -e target_host=sat01,sat02 và -e confirm=yes.
+          Không chấp nhận target rỗng hoặc trùng tên.
 
     # BUG THẬT (đọc trước khi xoá check này): gõ nhầm target_host (không khớp host nào trong
     # inventory) khiến play "Xoá container..." bên dưới chỉ in "skipping: no hosts matched" — KHÔNG
     # fail — rồi play "Nhắc việc còn lại" vẫn chạy và in "Đã xoá container + dữ liệu trên
     # '<target_host>'" dù thực tế KHÔNG đụng gì cả. Chặn sớm ở đây để gõ sai tên fail rõ ràng ngay,
     # không phải im lặng tưởng đã xoá xong.
-    - name: "Xác nhận target_host tồn tại trong inventory (tránh gõ sai tên bị bỏ qua âm thầm)"
-      ansible.builtin.fail:
-        msg: >-
-          target_host='{{ target_host }}' không khớp host nào trong inventory đang dùng
-          ({{ groups['all'] | join(', ') }}). Kiểm tra lại chính tả — gõ sai tên sẽ khiến play xoá bị
-          Ansible tự "skip" (không fail), dễ tưởng nhầm là đã gỡ xong dù chưa đụng gì.
-      when: target_host not in groups['all']
+    - name: Xác nhận mọi target tồn tại và đều là satellite
+      ansible.builtin.assert:
+        that:
+          - _remove_node_targets | difference(groups['all'] | default([])) | length == 0
+          - _remove_node_targets | difference(groups['satellite'] | default([])) | length == 0
+        fail_msg: >-
+          Target yêu cầu: {{ _remove_node_targets | join(', ') }}. Mọi target phải tồn tại trong
+          inventory và thuộc [satellite]. Satellite hiện có:
+          {{ groups['satellite'] | default([]) | join(', ') }}.
 
 - name: Xoá container + dữ liệu trên satellite bị gỡ
   hosts: "{{ target_host }}"
@@ -84,9 +94,9 @@
   tasks:
     - ansible.builtin.debug:
         msg:
-          - "Đã xoá container + dữ liệu trên '{{ target_host }}'."
+          - "Đã xoá song song container + dữ liệu trên: {{ target_host }}."
           - "VIỆC CÒN LẠI (tự làm, chưa tự động):"
-          - "  1) Xoá '{{ target_host }}' khỏi [satellite]/[all_hosts] trong inventory, và khỏi"
+          - "  1) Xoá các target khỏi [satellite]/[all_hosts] trong inventory, và khỏi"
           - "     satellite_zones[].members trong globals.yml nếu cần."
           - "  2) Chạy: icinga-ansible reconfigure -i <inventory> — để cluster còn lại render lại"
-          - "     zones.conf (hết endpoint/zone '{{ target_host }}') + tự reload."
+          - "     zones.conf (hết các endpoint vừa xoá) + tự reload."

@@ -34,6 +34,10 @@ Sửa `/etc/icinga-ansible/globals.yml`, tối thiểu kiểm tra:
 - `enable_icingaweb2_modules`;
 - proxy/registry CA nếu môi trường yêu cầu.
 
+Các biến `proxy_http`, `proxy_https`, `proxy_no_proxy` và `proxy_group_overrides` là proxy mạng qua
+environment (APT, download, Docker daemon pull image và Icinga 2 container), không phải cấu hình
+Docker socket và không liên quan `/var/run/docker.sock`.
+
 Có thể mã hoá secret bằng `ansible-vault encrypt /etc/icinga-ansible/passwords.yml` và truyền
 tuỳ chọn Vault qua CLI.
 
@@ -257,6 +261,16 @@ $EDITOR /etc/icinga-ansible/globals.yml
 Chỉ xóa VM sau khi `check` PASS. Xóa satellite cuối cùng của một zone không ảnh hưởng database hoặc
 Web, nhưng object monitoring do operator tự quản lý có thể còn tham chiếu `command_endpoint`; hãy
 kiểm tra và sửa phần đó trong pipeline monitoring riêng.
+
+Để xóa đồng thời hai satellite, giữ cả hai trong inventory và `satellite_zones`, truyền danh sách
+phân cách bằng dấu phẩy. Playbook kiểm tra toàn bộ target trước rồi thực thi song song theo Ansible
+forks:
+
+```bash
+./tools/icinga-ansible remove-node -i "$INV" \
+  -e target_host=satellite1,satellite2 -e confirm=yes
+# Sau khi PASS mới xóa cả hai khỏi inventory/satellite_zones rồi reconfigure toàn cụm còn lại.
+```
 
 ### 6.4. Xoá master
 

@@ -87,7 +87,8 @@ kolla-ansible), nên sau "destroy" chỉ cần "deploy" thẳng, KHÔNG cần "b
                       -e confirm=yes-i-really-really-mean-it)
 
 Node ops (P3+):
-  add-node | remove-node        Thêm/xoá satellite
+  add-node | remove-node        Thêm/xoá satellite; remove-node nhận một hoặc nhiều target
+                                (-e target_host=sat01,sat02 để xoá song song)
   add-master | remove-master    Thêm/xoá master
 
 DB ops:

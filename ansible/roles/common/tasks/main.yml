@@ -53,7 +53,8 @@
                           else (_managed_host_environment_file.get('https_proxy', '') or
                                 _managed_host_environment_file.get('HTTPS_PROXY', ''))),
           'no_proxy': (proxy_no_proxy_effective
-                       if (proxy_http_effective | default('')) | length > 0
+                       if ((proxy_http_effective | default('')) | length > 0 or
+                           (proxy_https_effective | default('')) | length > 0)
                        else (_managed_host_environment_file.get('no_proxy', '') or
                              _managed_host_environment_file.get('NO_PROXY', '')))} }}
   no_log: true
@@ -97,7 +98,7 @@
 # (dạng "http://user:pass@proxy:3128"), credential đó sẽ world-readable qua file này — hạn chế cố
 # hữu khi dùng /etc/environment cho proxy có auth, không riêng gì icinga-ansible. Cân nhắc dùng
 # proxy không yêu cầu auth (allowlist theo IP nguồn) nếu đây là rủi ro cần tránh.
-- name: (bootstrap) Cấu hình proxy hệ thống (/etc/environment) — chỉ khi khai proxy_http hiệu lực
+- name: (bootstrap) Cấu hình proxy hệ thống (/etc/environment) — khi khai HTTP hoặc HTTPS proxy
   ansible.builtin.blockinfile:
     path: /etc/environment
     create: true
@@ -110,7 +111,9 @@
       HTTPS_PROXY="{{ proxy_https_effective }}"
       no_proxy="{{ proxy_no_proxy_effective }}"
       NO_PROXY="{{ proxy_no_proxy_effective }}"
-  when: (proxy_http_effective | default('')) | length > 0
+  when: >-
+    (proxy_http_effective | default('')) | length > 0 or
+    (proxy_https_effective | default('')) | length > 0
   tags: [bootstrap]
 
 - name: (bootstrap) Xoá proxy icinga-ansible khỏi /etc/environment khi đã tắt proxy
@@ -118,7 +121,9 @@
     path: /etc/environment
     marker: "# {mark} icinga-ansible proxy"
     state: absent
-  when: (proxy_http_effective | default('')) | length == 0
+  when:
+    - (proxy_http_effective | default('')) | length == 0
+    - (proxy_https_effective | default('')) | length == 0
   tags: [bootstrap]
 
 # PAM của Ubuntu nạp /etc/environment cho SSH và sudo, nhưng systemd system service không tự đọc

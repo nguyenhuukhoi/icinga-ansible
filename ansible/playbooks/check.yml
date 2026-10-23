@@ -164,9 +164,13 @@
 
     - name: Trích CSRF token của form login
       ansible.builtin.set_fact:
+        _web_login_legacy_form: >-
+          {{ 'name="formUID"' in _web_login_form.content }}
         _web_login_csrf: >-
-          {{ (_web_login_form.content
-              | regex_findall('value="([^"]+)" name="CSRFToken"')
+          {{ (((_web_login_form.content
+                | regex_findall('name="CSRFToken" value="([^"]+)"'))
+               + (_web_login_form.content
+                  | regex_findall('value="([^"]+)" name="CSRFToken"')))
               | first) }}
       no_log: true
 
@@ -177,16 +181,27 @@
         follow_redirects: none
         status_code: [302, 303]
         headers:
-          Cookie: "{{ _web_login_session.set_cookie | regex_replace(',\\s*', '; ') }}"
+          Cookie: >-
+            {{ _web_login_form.cookies_string
+               | default(_web_login_session.set_cookie | regex_replace(',\\s*', '; ')) }}
         body_format: form-urlencoded
-        body:
-          CSRFToken: "{{ _web_login_csrf }}"
-          uid: form_login
-          username: "{{ icingaweb2_admin_user }}"
-          password: "{{ icingaweb2_admin_password }}"
-          rememberme: "n"
-          submit_login: Login
-          redirect: ""
+        body: >-
+          {{ (_web_login_legacy_form | bool)
+             | ternary(
+                 {'CSRFToken': _web_login_csrf,
+                  'formUID': 'form_login',
+                  'username': icingaweb2_admin_user,
+                  'password': icingaweb2_admin_password,
+                  'rememberme': '0',
+                  'btn_submit': 'Login',
+                  'redirect': ''},
+                 {'CSRFToken': _web_login_csrf,
+                  'uid': 'form_login',
+                  'username': icingaweb2_admin_user,
+                  'password': icingaweb2_admin_password,
+                  'rememberme': 'n',
+                  'submit_login': 'Login',
+                  'redirect': ''}) }}
       register: _web_admin_login
       no_log: true
 

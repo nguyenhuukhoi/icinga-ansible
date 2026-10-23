@@ -215,6 +215,10 @@ từng managed node. `globals.yml` có thể để trống proxy. Chỉ dùng `p
 `proxy_no_proxy` và `proxy_group_overrides` khi muốn playbook tự quản file này hoặc cần giá trị khác
 nhau cho từng group `master`, `satellite`, `galera`, `client`.
 
+Đây là **proxy mạng dạng environment**, không phải Docker socket và không thay đổi
+`/var/run/docker.sock`. Giá trị được dùng cho APT/download, ghi vào `/etc/environment`, truyền cho
+container Icinga 2 và cho Docker daemon đọc để pull image qua HTTP/HTTPS proxy.
+
 Ví dụ `/etc/environment` đã kiểm thử trên lab OpenStack:
 
 ```ini
@@ -520,6 +524,14 @@ Xóa workload trên host khi host vẫn còn trong inventory:
 ```bash
 ./tools/icinga-ansible remove-node -i "$INV" \
   -e target_host=satellite2 -e confirm=yes
+```
+
+Xóa nhiều satellite trong cùng một lượt bằng danh sách phân cách dấu phẩy; toàn bộ target được
+validate trước và các host được xử lý song song:
+
+```bash
+./tools/icinga-ansible remove-node -i "$INV" \
+  -e target_host=satellite1,satellite2 -e confirm=yes
 ```
 
 Sau khi lệnh trên thành công:
