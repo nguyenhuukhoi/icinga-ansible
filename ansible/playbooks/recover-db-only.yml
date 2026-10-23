@@ -121,7 +121,8 @@
         name: "{{ item }}"
       loop: >-
         {{ (['icingaweb2-director-daemon']
-            if 'director' in (enable_icingaweb2_modules | default([])) else [])
+            if (inventory_hostname == ca_host and
+                'director' in (enable_icingaweb2_modules | default([]))) else [])
            + ['icingaweb2', 'icingadb', 'icinga2', 'icingadb-redis'] }}
       register: _db_only_required_containers
       no_log: true
@@ -158,7 +159,8 @@
         state: stopped
       loop: >-
         {{ (['icingaweb2-director-daemon']
-            if 'director' in (enable_icingaweb2_modules | default([])) else [])
+            if (inventory_hostname == ca_host and
+                'director' in (enable_icingaweb2_modules | default([]))) else [])
            + ['icingaweb2', 'icingadb', 'icinga2'] }}
 
 - name: DB-only recovery | seed both masters and rebuild Redis state

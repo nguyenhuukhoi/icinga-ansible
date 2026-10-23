@@ -285,9 +285,9 @@ init_config() {
      [[ -n "$(sudo find "$CONFIG_DIR_REAL" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
     echo "!!! $CONFIG_DIR_REAL đã có dữ liệu — restore-config sẽ GHI ĐÈ TOÀN BỘ" >&2
     echo "    (globals.yml, passwords.yml, mọi override) bằng nội dung trong backup." >&2
-    if [[ "${CONFIRM:-}" != "yes-i-really-mean-it" ]]; then
-      echo "    Chạy lại kèm CONFIRM=yes-i-really-mean-it để xác nhận, vd:" >&2
-      echo "    CONFIRM=yes-i-really-mean-it icinga-ansible restore-config --config-backup $CONFIG_BACKUP" >&2
+    if [[ "${CONFIRM:-}" != "yes-i-really-really-mean-it" ]]; then
+      echo "    Chạy lại kèm CONFIRM=yes-i-really-really-mean-it để xác nhận, vd:" >&2
+      echo "    CONFIRM=yes-i-really-really-mean-it icinga-ansible restore-config --config-backup $CONFIG_BACKUP" >&2
       exit 1
     fi
   fi

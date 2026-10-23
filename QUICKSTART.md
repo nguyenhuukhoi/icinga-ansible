@@ -385,7 +385,7 @@ Khôi phục desired state trên deployment node. Nếu `/etc/icinga-ansible` đ
 dùng đúng biến môi trường `CONFIRM`; đây không phải Ansible extra-var `-e confirm=...`:
 
 ```bash
-CONFIRM=yes-i-really-mean-it ./tools/icinga-ansible restore-config \
+CONFIRM=yes-i-really-really-mean-it ./tools/icinga-ansible restore-config \
   --config-backup "$BACKUP_ROOT/config-$BACKUP_TS.tar.gz"
 ```
 
@@ -447,6 +447,55 @@ mới rồi chuyển thủ công phần cần giữ sau khi review.
 Cuối cùng, triển khai lại `zones.d`, plugin/credential và object monitoring bằng pipeline riêng của
 operator, validate `icinga2 daemon -C`, reload Icinga 2 rồi chạy `check` lại. Không trông chờ
 `deploy` đồng bộ nội dung operator.
+
+#### Trường hợp server sạch dùng lại đúng IP cũ
+
+Quy trình restore không thay đổi, nhưng phải xử lý identity hạ tầng trước khi bootstrap. Chỉ tái sử
+dụng IP sau khi server cũ đã tắt/xóa hoàn toàn và Neutron không còn port cũ giữ địa chỉ; tuyệt đối
+không để hai máy cùng dùng một IP. Nên tạo trước port mới với đúng fixed IP rồi gắn port đó vào VM
+mới để khóa địa chỉ trong suốt quá trình dựng lại.
+
+Giữ nguyên inventory hostname (`master1`, `master2`, `galera1`...) và `ansible_host`; không cần sửa
+inventory nếu topology và IP đều giữ nguyên. Vì VM sạch có SSH host key mới, xóa key cũ rồi chỉ chấp
+nhận key mới ở lần kết nối đầu:
+
+```bash
+for ip in 10.0.0.11 10.0.0.12 10.0.0.21 10.0.0.22 10.0.0.23; do
+  ssh-keygen -f ~/.ssh/known_hosts -R "$ip"
+  ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/monitoring-lab-key ubuntu@"$ip" true
+done
+
+ansible -i "$INV" all_hosts -m ping
+```
+
+Sau đó chạy nguyên thứ tự ở trên: `restore-config`, `bootstrap-servers`, `restore-pki` trước deploy
+đầu tiên, `pull`, `deploy`, `mariadb-recovery`, `recover-db-only`, `restore-web`, deploy cuối và
+`check`. Cùng IP không thay thế việc restore CA hay environment ID: disk mới vẫn không có PKI và
+runtime identity cũ. `zones.d`, plugin và credential operator vẫn phải được backup/restore riêng.
+
+Bài destructive regression ngày 2026-10-23 đã xóa và dựng lại 2 master + 3 Galera bằng đúng năm IP
+cũ, sau đó xác nhận CA fingerprint, environment ID, Web login, Galera 3/3 và sáu ICMP Host check đều
+khớp/healthy. Xem `TEST-REPORT-SAME-IP-DR-2026-10-23.md`.
+
+#### Trường hợp chỉ import database ứng dụng vào cụm mới
+
+Nếu muốn giữ system DB của Galera mới, logical dump chỉ đúng ba schema `icingadb`, `icingaweb2` và
+`director`; tuyệt đối không dùng `--all-databases` và không import `mysql`, `sys`,
+`performance_schema`, `information_schema`.
+
+Thứ tự bắt buộc:
+
+1. dựng cụm đích sạch bằng đúng version nguồn: `bootstrap-servers`, `pull`, `deploy`, `check`;
+2. dừng `icingaweb2-director-daemon` (nếu có), `icingaweb2`, `icingadb`, `icinga2` trên mọi master;
+3. **không dừng `icingadb-redis`**;
+4. xác minh gzip, SHA-256 và dump chỉ có ba database ứng dụng rồi import trên `galera[0]`;
+5. chạy `recover-db-only -e confirm=yes`, `deploy`, rồi `check`;
+6. triển khai lại monitoring config bằng pipeline operator.
+
+Đây không phải full DR: CA/PKI, file config Web, `zones.d`, plugin và credential operator không nằm
+trong logical DB dump. Lịch sử Icinga DB được giữ, nhưng active Host/Service sẽ hội tụ theo config của
+cụm mới; nếu chưa triển khai lại config monitoring, chúng có thể biến mất khỏi current state. Quy trình,
+lệnh dump/import và bằng chứng regression thật nằm ở mục 14.8 của `OPERATIONS-RUNBOOK-VI.md`.
 
 ### 7.3. Kiểm tra sau restore
 

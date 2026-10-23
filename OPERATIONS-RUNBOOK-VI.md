@@ -778,7 +778,7 @@ cd /opt/icinga-ansible
 source /path/to/venv/bin/activate
 ansible-galaxy collection install -r ansible/requirements.yml
 
-CONFIRM=yes-i-really-mean-it ./tools/icinga-ansible restore-config \
+CONFIRM=yes-i-really-really-mean-it ./tools/icinga-ansible restore-config \
   --config-backup /safe-backup/config-<timestamp>.tar.gz
 
 ./tools/icinga-ansible check -i inventory-prod
@@ -786,12 +786,12 @@ CONFIRM=yes-i-really-mean-it ./tools/icinga-ansible restore-config \
 
 Không bootstrap, deploy, restore PKI hoặc restore DB vì cụm vẫn đang chạy.
 
-Nếu `/etc/icinga-ansible/globals.yml` đã tồn tại, `restore-config` yêu cầu biến môi trường `CONFIRM=yes-i-really-mean-it`. Đây là biến môi trường của shell, không phải `-e confirm=...`.
+Nếu `/etc/icinga-ansible/globals.yml` đã tồn tại, `restore-config` yêu cầu biến môi trường `CONFIRM=yes-i-really-really-mean-it`. Đây là biến môi trường của shell, không phải `-e confirm=...`.
 
 `restore-config` kiểm tra gzip/tar, chặn path traversal, yêu cầu đúng một thư mục gốc có `globals.yml`,
 giải nén thử vào staging, rồi mới xóa nội dung config directory và thay bằng bản backup. Vì vậy file
 override cũ không có trong backup sẽ không còn sót lại. Directory không rỗng luôn yêu cầu
-`CONFIRM=yes-i-really-mean-it`; các path hệ thống nguy hiểm như `/`, `/etc`, `/var` bị từ chối.
+`CONFIRM=yes-i-really-really-mean-it`; các path hệ thống nguy hiểm như `/`, `/etc`, `/var` bị từ chối.
 
 ### 14.2. Mất service node, còn deployment node và DB backup
 
@@ -971,7 +971,7 @@ test "$(cat database/LATEST_FULL)" = "$BACKUP_TS"
 cd /opt/icinga-ansible
 
 # 2. Restore config/secrets của deployment node. CONFIRM là biến môi trường shell.
-CONFIRM=yes-i-really-mean-it ./tools/icinga-ansible restore-config \
+CONFIRM=yes-i-really-really-mean-it ./tools/icinga-ansible restore-config \
   --config-backup "$BACKUP_ROOT/config-$BACKUP_TS.tar.gz"
 
 # 3. Phục hồi inventory riêng, sửa ansible_host sang IP mới và sửa satellite_zones nếu topology đổi.
@@ -1017,6 +1017,128 @@ công phần cần giữ; tuyệt đối không đổi tên archive để ép re
 
 Sau khi hạ tầng PASS, restore `zones.d`, plugin, SSH key và credential qua pipeline operator
 riêng; validate config, reload Icinga 2, chạy lại `check`, rồi tạo một `backup-full` baseline mới.
+
+### 14.7. Full DR trên server sạch nhưng dùng lại đúng fixed IP cũ
+
+Áp dụng nguyên thứ tự mục 14.6. Khác biệt nằm ở lớp OpenStack/SSH, không nằm trong Icinga:
+
+1. Tắt hoặc xóa hoàn toàn server cũ trước khi cấp lại IP; xác minh port cũ không còn giữ địa chỉ.
+2. Nên tạo Neutron port mới với đúng fixed IP trước, sau đó gắn port vào VM sạch để khóa địa chỉ.
+3. Giữ nguyên inventory hostname và `ansible_host` nếu topology không thay đổi.
+4. Xóa SSH host key cũ trên deployment node và chỉ chấp nhận key mới ở lần kết nối đầu:
+
+   ```bash
+   ssh-keygen -f ~/.ssh/known_hosts -R 10.0.0.11
+   ssh -o StrictHostKeyChecking=accept-new \
+     -i ~/.ssh/monitoring-lab-key ubuntu@10.0.0.11 true
+   ```
+
+   Lặp lại cho mọi master/Galera, rồi chạy `ansible -i "$INV" all_hosts -m ping`.
+5. Server cùng IP nhưng disk sạch vẫn phải `restore-pki` trước deploy đầu tiên và
+   `recover-db-only` sau restore DB. IP không phải Icinga DB environment identity.
+6. Chỉ restore `zones.d` sau khi infrastructure `check` PASS; đây là package operator độc lập với
+   `backup-full`.
+
+Bài destructive regression ngày 2026-10-23 đã xóa và tạo lại 2 master + 3 Galera bằng đúng fixed IP
+cũ. Kết quả: full `check` PASS, Galera 3/3, CA fingerprint và environment ID khớp bản gốc, Web login
+PASS, master2 nhận đủ 6 Host qua config-sync và 6/6 ICMP check UP. Bằng chứng chi tiết ở
+`TEST-REPORT-SAME-IP-DR-2026-10-23.md`.
+
+### 14.8. Dựng cụm mới và chỉ import database ứng dụng Icinga
+
+Dùng luồng này khi muốn tạo Galera sạch và chỉ mang theo ba schema ứng dụng:
+
+- `icingadb`: current state và lịch sử Icinga DB;
+- `icingaweb2`: user/preference lưu trong database;
+- `director`: object/config của Director.
+
+Không dump/import `mysql`, `sys`, `performance_schema` hoặc `information_schema`. Vì vậy user/grant,
+root credential, system table và Galera state của cụm đích vẫn là state do lần deploy mới tạo. Không
+dùng `--all-databases` trong quy trình này.
+
+Trên `galera[0]` của cụm nguồn, tạo logical dump nhất quán:
+
+```bash
+DUMP_TS="$(date +%Y%m%d-%H%M%S)"
+DUMP="/tmp/icinga-app-db-$DUMP_TS.sql.gz"
+
+sudo sh -c "docker exec mariadb mariadb-dump \
+  --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf \
+  --single-transaction --quick --routines --events --triggers --hex-blob \
+  --add-drop-database --databases icingadb icingaweb2 director \
+  | gzip -1 > '$DUMP'"
+sudo chown "$(id -u):$(id -g)" "$DUMP"
+gzip -t "$DUMP"
+sha256sum "$DUMP"
+gzip -cd "$DUMP" | grep '^-- Current Database:'
+```
+
+Lệnh cuối bắt buộc chỉ in đúng ba database `icingadb`, `icingaweb2`, `director`. Copy dump và file
+checksum về deployment node/storage ngoài. Không xem `/tmp` trên service node là nơi lưu backup.
+
+Dựng cụm đích sạch bằng inventory mới và cùng bộ version với nguồn trước:
+
+```bash
+./tools/icinga-ansible bootstrap-servers -i "$TARGET_INV"
+./tools/icinga-ansible prechecks         -i "$TARGET_INV"
+./tools/icinga-ansible pull              -i "$TARGET_INV"
+./tools/icinga-ansible deploy            -i "$TARGET_INV"
+./tools/icinga-ansible check             -i "$TARGET_INV"
+```
+
+Nếu muốn nâng version, hoàn tất restore bằng version nguồn trước rồi dùng quy trình `upgrade`; không
+trộn kiểm thử DR và schema upgrade trong cùng một bước. Deploy sạch phải hoàn tất trước import để tạo
+service user/grant mới trong system DB của đích.
+
+Trước import, dừng publisher/consumer trên **mọi master**, nhưng giữ `icingadb-redis` chạy vì
+`recover-db-only` cần Redis để flush stream tạm:
+
+```bash
+ansible -i "$TARGET_INV" master -b -m shell -a '
+  for c in icingaweb2-director-daemon icingaweb2 icingadb icinga2; do
+    docker inspect "$c" >/dev/null 2>&1 && docker stop "$c" || true
+  done'
+```
+
+Copy dump lên `galera[0]` của cụm đích, xác minh checksum/gzip và danh sách database lần nữa, rồi import:
+
+```bash
+gzip -t /tmp/icinga-app-db-<timestamp>.sql.gz
+sha256sum /tmp/icinga-app-db-<timestamp>.sql.gz
+gzip -cd /tmp/icinga-app-db-<timestamp>.sql.gz | grep '^-- Current Database:'
+
+gzip -dc /tmp/icinga-app-db-<timestamp>.sql.gz \
+  | sudo docker exec -i mariadb mariadb \
+      --defaults-extra-file=/var/lib/mysql/.my-healthcheck.cnf
+```
+
+Khôi phục environment ID từ database, hội tụ và kiểm tra sâu:
+
+```bash
+./tools/icinga-ansible recover-db-only -i "$TARGET_INV" -e confirm=yes
+./tools/icinga-ansible deploy           -i "$TARGET_INV"
+./tools/icinga-ansible check            -i "$TARGET_INV"
+```
+
+Các giới hạn phải hiểu rõ:
+
+1. Đây không phải full DR: không restore CA/PKI, filesystem config Web, `zones.d`, plugin, SSH key hay
+   credential operator. Nếu cần các phần đó, dùng mục 14.6.
+2. Import `icingaweb2` không thay thế `restore-web`; thay đổi UI nằm trong file INI chỉ trở lại khi
+   restore archive Web riêng.
+3. `recover-db-only` phục hồi Icinga DB environment ID, không phục hồi CA. CA mới đồng nghĩa agent cũ
+   phải enroll lại nếu không chạy `restore-pki` riêng trước deploy đầu tiên.
+4. Icinga DB xem runtime config hiện tại là nguồn sự thật. Nếu cụm mới chưa có `zones.d`/Director
+   deployment cũ, active Host/Service trong DB sẽ bị reconcile/xóa sau khi daemon sync; lịch sử DB vẫn
+   còn. Hãy triển khai lại object monitoring bằng pipeline operator sau khi infrastructure `check` PASS.
+5. Không stop `icingadb-redis` thủ công trước `recover-db-only`.
+
+Regression ngày 2026-10-23 đã dựng cụm cô lập 2 master + 3 Galera bằng IP mới, import dump 808 KiB có
+SHA-256 `559cd6aec2bac1cb383368df07f82aca8c3697cf4a3592bf7b9695ffd32c2473`, rồi chạy
+`recover-db-only`, `deploy` và full `check`. Trước/sau import, marker system của cụm đích vẫn tồn tại,
+`mysql.global_priv` giữ 10 row và checksum `3930341100`; nguồn có 9 row/checksum `504693781`. Galera
+giữ `Primary/Synced/Ready` 3/3. Dữ liệu lịch sử sau hội tụ còn `history=217`, `state_history=217`,
+`sla_history_state=182`; active `host` trở về 0 vì test cố ý không restore monitoring config.
 
 ## 15. Upgrade
 
@@ -1389,6 +1511,44 @@ dùng Director làm nguồn topology:
 
 Sau toàn bộ drill, inventory production vẫn là hai master và ba Galera; `check` cuối cùng
 `failed=0`. Báo cáo chi tiết trong workspace: `TEST-REPORT-LIFECYCLE-2026-10-22.md`.
+
+### 19.3. Disaster recovery cùng fixed IP ngày 2026-10-23
+
+Đã chạy destructive regression bằng backup `20261023-065951`: xóa toàn bộ 2 master + 3 Galera,
+tạo năm VM disk sạch với đúng fixed IP cũ, rồi restore config, CA, physical DB, environment ID và Web.
+
+| Case | Kết quả | Bằng chứng chính |
+|---|---|---|
+| Server sạch dùng lại đúng 5 IP cũ | PASS | OpenStack server ID thay đổi, inventory/IP giữ nguyên |
+| `restore-config` + bootstrap | PASS | 5/5 host SSH/Ansible sau khi thay host key |
+| Restore PKI | PASS | CA SHA-256 trước/sau khớp tuyệt đối |
+| Restore physical DB + identity | PASS | environment ID `3BFA66B31694A260CFCBA2B331EEA7B00AFDFBDF` được giữ nguyên |
+| Restore Web | PASS | Web login pass trên hai master; Director chỉ ở master1 |
+| Galera | PASS | Primary/Synced/Ready, cluster size 3/3 |
+| Restore operator config riêng | PASS | master2 nhận 6 Host qua config-sync; 6/6 ICMP UP, chia 3 check/master |
+| Full `check` cuối | PASS | mọi host `failed=0` |
+
+Báo cáo đầy đủ và mapping server ID cũ/mới nằm tại
+`TEST-REPORT-SAME-IP-DR-2026-10-23.md`.
+
+### 19.4. Cụm mới chỉ import database ứng dụng ngày 2026-10-23
+
+Đã dựng cụm cô lập 2 master + 3 Galera ở năm IP mới, deploy sạch, logical-import đúng ba schema
+`icingadb`, `icingaweb2`, `director` từ cụm đang chạy và cố ý không import system DB.
+
+| Case | Kết quả | Bằng chứng chính |
+|---|---|---|
+| Dump scope | PASS | Chỉ có ba `Current Database`; gzip và SHA-256 hợp lệ |
+| App schema import | PASS | 66 bảng Icinga DB, 6 bảng Web, 129 bảng Director |
+| Không import system DB | PASS | Marker đích còn nguyên; `mysql.global_priv` giữ 10 row/checksum `3930341100`, khác nguồn 9/`504693781` |
+| Identity recovery | PASS | Hai master dùng environment ID nguồn `3bfa66b31694a260cfcba2b331eea7b00afdfbdf` |
+| Galera | PASS | Primary/Synced/Ready, cluster size 3/3 |
+| Full `check` cuối | PASS | container, API, Web login, heartbeat, Director và DB đều `failed=0` |
+| Lịch sử DB | PASS | `history=217`, `state_history=217`, `sla_history_state=182` sau hội tụ |
+| Không restore monitoring config | EXPECTED | `host` từ 6 ngay sau import về 0 sau sync vì không restore `zones.d`/Director deployment |
+
+Test cũng xác nhận `recover-db-only` cần Redis đang chạy: chỉ dừng Web, Icinga DB daemon và Icinga 2
+trước import; không dừng `icingadb-redis`.
 
 ## 20. Troubleshooting
 
