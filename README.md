@@ -6,11 +6,11 @@ Ansible project để triển khai và vận hành **hạ tầng Icinga** trên 
 - Icinga DB, Redis và Icinga Web 2;
 - MariaDB standalone hoặc Galera 3+ node;
 - Director module/schema trên `ca_host`/master1 (tuỳ chọn), backup/restore và rolling upgrade;
-- vòng đời node: thêm, cấu hình lại và xoá master/satellite.
+- vòng đời node: thêm, cấu hình lại và xoá master/satellite/client.
 
 ## Ranh giới quản lý
 
-Project này **không tạo, đọc, đồng bộ hoặc xoá nội dung monitoring**. Ansible không quản lý
+Project này **không tạo, reconcile hoặc phân phối nội dung monitoring**. Ansible không quản lý
 `Host`, `Service`, `CheckCommand`, `Notification`, apply rule hoặc bất kỳ file nào trong `zones.d`.
 Operator tự quản lý object bằng Icinga Director/Web UI hoặc một quy trình static DSL độc lập ngoài
 project này. Đặt file dưới `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node không có
@@ -103,7 +103,7 @@ satellite
 | `prechecks` | Kiểm tra inventory, topology, version và DB |
 | `deploy` / `reconfigure` | Triển khai hoặc áp dụng lại cấu hình hạ tầng |
 | `check` | Kiểm tra container, API, Web, Icinga DB, Redis và Galera |
-| `add-master` / `add-node` | Thêm master hoặc satellite đã có trong inventory |
+| `add-master` / `add-node` | Thêm master hoặc satellite/client đã có trong inventory |
 | `remove-master` / `remove-node` | Xoá runtime của node được chỉ định |
 | `backup-full` | Backup config, database, PKI và Web |
 | `upgrade-plan` / `upgrade` / `rollback` | Lập kế hoạch, nâng cấp và rollback |
@@ -140,9 +140,11 @@ SCM/pipeline operator riêng.
 Khuyến nghị dùng Director. Project chỉ enable module trên `ca_host`/master1 và migrate schema; operator tự Kickstart và
 quản lý object trong UI. Ansible không import hoặc reconcile object Director.
 
-Nếu dùng static DSL, hãy quản lý và triển khai bằng quy trình riêng của operator. Project không đọc,
-validate, copy hoặc xoá `zones.d`; thư mục chỉ xuất hiện trong container vì toàn bộ cây config host
-được bind-mount RW. Sửa file monitoring không yêu cầu chạy `reconfigure`.
+Nếu dùng static DSL, hãy quản lý và triển khai bằng quy trình riêng của operator. Project không render
+hoặc phân phối `zones.d`; thư mục xuất hiện trong container vì toàn bộ cây config host được bind-mount
+RW. Trước khi thay đổi runtime, tool chạy `icinga2 daemon -C` trên config hiệu lực để không đưa daemon
+vào trạng thái lỗi. `remove-*`/`destroy` xóa nguyên config của đúng target, nên operator phải backup
+monitoring content riêng. Sửa file monitoring không yêu cầu chạy `reconfigure`.
 
 Xem mục 6–7 trong [QUICKSTART.md](QUICKSTART.md) để làm theo từng lệnh thêm/xóa node và dựng lại cụm
 từ full backup; [OPERATIONS-RUNBOOK-VI.md](OPERATIONS-RUNBOOK-VI.md) là runbook vận hành/sự cố đầy

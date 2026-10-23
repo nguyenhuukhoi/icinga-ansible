@@ -8,5 +8,5 @@ Các giới hạn hiện tại được giữ fail-fast hoặc ghi rõ, không g
 - external DB do DBA chịu trách nhiệm backup, schema migration và rollback;
 
 Regression bắt buộc trước release: syntax-check, fresh destroy/deploy, reconfigure `changed=0`,
-health-check 2 master + 3 Galera, add/remove master, add/remove satellite và kiểm tra Ansible không
-chạm `zones.d`.
+health-check 2 master + 3 Galera, add/remove master, add/remove satellite/client và kiểm tra Ansible
+không render hoặc phân phối `zones.d`.

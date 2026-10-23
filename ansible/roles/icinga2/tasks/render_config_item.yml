@@ -2,7 +2,7 @@
 # Include dùng lại cho từng file config icinga2 — override-aware (design.md mục 4.1).
 # Tham số: cfg.relpath (đường dẫn tương đối dưới icinga2/), cfg.template (file .j2 nguồn).
 # CHỈ dùng cho config hạ tầng do role sở hữu: constants.conf, zones.conf,
-# features-available/icingadb.conf và conf.d/api-users.conf. Role không đọc hoặc đồng bộ zones.d.
+# features-available/icingadb.conf và conf.d/api-users.conf. Role không render hoặc đồng bộ zones.d.
 #
 # Tầng "theo nhóm" (2026-07-23, theo yêu cầu người dùng) — chèn GIỮA per-host và global: override
 # tại config/icinga2/group_<tên_nhóm_inventory>/<relpath> áp dụng cho MỌI host thuộc nhóm đó (vd

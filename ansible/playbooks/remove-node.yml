@@ -1,12 +1,12 @@
 # =============================================================================
-# remove-node.yml — Gỡ 1 satellite khỏi cluster (design 12.2). PHÁ HUỶ trên host bị gỡ.
+# remove-node.yml — Gỡ satellite/client khỏi cluster. PHÁ HUỶ trên host bị gỡ.
 # Dùng một node: icinga-ansible remove-node -e target_host=sat01 -e confirm=yes
 # Dùng nhiều node song song: icinga-ansible remove-node -e target_host=sat01,sat02 -e confirm=yes
 #
-# Chỉ xoá container icinga2 + dữ liệu TRÊN HOST BỊ GỠ (satellite không có redis/icingadb/web).
+# Chỉ xoá container icinga2 + dữ liệu TRÊN HOST BỊ GỠ (satellite/client không có redis/icingadb/web).
 # Sau khi chạy, PHẢI tự tay:
-#   1) Xoá host khỏi [satellite] (và satellite_zones[].members trong globals.yml nếu cần) + khỏi
-#      [all_hosts] trong file inventory.
+#   1) Xoá host khỏi [satellite] hoặc [client] + khỏi [all_hosts]. Với satellite, cập nhật thêm
+#      satellite_zones[].members trong globals.yml.
 #   2) Chạy lại `icinga-ansible reconfigure` để master/satellite còn lại render lại zones.conf
 #      (hết endpoint/zone vừa gỡ) + tự reload.
 # =============================================================================
@@ -18,7 +18,7 @@
     confirm: false
     target_host: ""
   tasks:
-    - name: Chuẩn hoá danh sách satellite cần xoá
+    - name: Chuẩn hoá danh sách endpoint cần xoá
       ansible.builtin.set_fact:
         _remove_node_targets: >-
           {{ (target_host | default('')).split(',')
@@ -39,17 +39,20 @@
     # fail — rồi play "Nhắc việc còn lại" vẫn chạy và in "Đã xoá container + dữ liệu trên
     # '<target_host>'" dù thực tế KHÔNG đụng gì cả. Chặn sớm ở đây để gõ sai tên fail rõ ràng ngay,
     # không phải im lặng tưởng đã xoá xong.
-    - name: Xác nhận mọi target tồn tại và đều là satellite
+    - name: Xác nhận mọi target tồn tại và đều là satellite/client
       ansible.builtin.assert:
         that:
           - _remove_node_targets | difference(groups['all'] | default([])) | length == 0
-          - _remove_node_targets | difference(groups['satellite'] | default([])) | length == 0
+          - >-
+            _remove_node_targets
+            | difference((groups['satellite'] | default([])) + (groups['client'] | default([])))
+            | length == 0
         fail_msg: >-
           Target yêu cầu: {{ _remove_node_targets | join(', ') }}. Mọi target phải tồn tại trong
-          inventory và thuộc [satellite]. Satellite hiện có:
-          {{ groups['satellite'] | default([]) | join(', ') }}.
+          inventory và thuộc [satellite] hoặc [client]. Endpoint hợp lệ:
+          {{ ((groups['satellite'] | default([])) + (groups['client'] | default([]))) | join(', ') }}.
 
-- name: Xoá container + dữ liệu trên satellite bị gỡ
+- name: Xoá container + dữ liệu trên satellite/client bị gỡ
   hosts: "{{ target_host }}"
   any_errors_fatal: true
   become: true
@@ -57,12 +60,15 @@
   vars_files:
     - "{{ playbook_dir }}/../group_vars/all.yml"
   tasks:
-    - name: Xác nhận host này thật sự thuộc [satellite] (an toàn — tránh gõ nhầm target_host)
+    - name: Xác nhận host này thật sự thuộc [satellite] hoặc [client]
       ansible.builtin.assert:
         that:
           - confirm == 'yes'
-          - inventory_hostname in groups['satellite']
-        fail_msg: "'{{ inventory_hostname }}' không thuộc nhóm [satellite] trong inventory — dừng lại."
+          - >-
+            inventory_hostname in
+            ((groups['satellite'] | default([])) + (groups['client'] | default([])))
+        fail_msg: >-
+          '{{ inventory_hostname }}' không thuộc nhóm [satellite] hoặc [client] trong inventory.
 
     - name: Dừng & xoá container icinga2 trên host này
       community.docker.docker_container:
@@ -82,7 +88,7 @@
         mode: "0750"
       loop: [etc, var, pki]
 
-    - name: Xoá config icinga2 của satellite bị gỡ
+    - name: Xoá config icinga2 của endpoint bị gỡ
       ansible.builtin.file:
         path: "{{ icinga_etc_dir }}/icinga2"
         state: absent
@@ -96,7 +102,7 @@
         msg:
           - "Đã xoá song song container + dữ liệu trên: {{ target_host }}."
           - "VIỆC CÒN LẠI (tự làm, chưa tự động):"
-          - "  1) Xoá các target khỏi [satellite]/[all_hosts] trong inventory, và khỏi"
-          - "     satellite_zones[].members trong globals.yml nếu cần."
+          - "  1) Xoá target khỏi [satellite] hoặc [client] và [all_hosts] trong inventory."
+          - "     Nếu là satellite, xoá thêm khỏi satellite_zones[].members trong globals.yml."
           - "  2) Chạy: icinga-ansible reconfigure -i <inventory> — để cluster còn lại render lại"
           - "     zones.conf (hết các endpoint vừa xoá) + tự reload."

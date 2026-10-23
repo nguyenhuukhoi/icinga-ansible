@@ -6,8 +6,8 @@
 # Gồm 3 phần, gộp vào 1 lệnh cho tiện, nhưng MỖI PHẦN độc lập, không phụ thuộc nhau:
 #   1. Config trên deployment node (globals.yml, passwords.yml, MỌI override — config/) — đây là
 #      "recipe" để tái tạo lại toàn bộ hạ tầng + secrets, quan trọng nhất, nhẹ nhất.
-#   2. Database + PKI (tái dùng NGUYÊN VẸN roles/mariadb backup.yml đã có — mục 10.4/10.5) — tag
-#      "full" (không phải timestamp) để LUÔN có 1 con trỏ LATEST_FULL trỏ đúng bản mới nhất.
+#   2. Database + PKI: managed DB tái dùng role mariadb với tag "full"; external DB bỏ qua database
+#      của DBA nhưng vẫn snapshot CA/PKI độc lập để full backup luôn dựng lại được trust chain.
 #   3. icingaweb2 config trên MỖI master (resources.ini/config.ini/...) — vì cơ chế "seed 1 lần, mount
 #      RW" (xem design.md mục 4.1) khiến sửa qua UI chỉ nằm trên node, KHÔNG có trong bất kỳ override
 #      nào — nếu không backup riêng, mọi thứ sửa qua UI sẽ mất khi rebuild.
@@ -65,6 +65,20 @@
       become: true
       community.general.archive:
         path: "{{ controller_config_dir }}"
+        # Với all-in-one, controller_config_dir và icinga_etc_dir có thể cùng là
+        # /etc/icinga-ansible. Không đưa output/runtime của service (đặc biệt
+        # zones.d và secrets do operator quản lý) vào controller backup.
+        exclusion_patterns:
+          - "{{ controller_config_dir | basename }}/icinga2"
+          - "{{ controller_config_dir | basename }}/icinga2/**"
+          - "{{ controller_config_dir | basename }}/icingadb"
+          - "{{ controller_config_dir | basename }}/icingadb/**"
+          - "{{ controller_config_dir | basename }}/icingadb-redis"
+          - "{{ controller_config_dir | basename }}/icingadb-redis/**"
+          - "{{ controller_config_dir | basename }}/icingaweb2"
+          - "{{ controller_config_dir | basename }}/icingaweb2/**"
+          - "{{ controller_config_dir | basename }}/mariadb"
+          - "{{ controller_config_dir | basename }}/mariadb/**"
         dest: "{{ icinga_config_backup_dir }}/config-{{ backup_ts }}.tar.gz"
         format: gz
         mode: "0600"
@@ -77,7 +91,7 @@
         group: "{{ lookup('pipe', 'id -gn') }}"
         mode: "0600"
 
-- name: "Backup full (2/3) — database + PKI (tái dùng roles/mariadb backup.yml, tag 'full')"
+- name: "Backup full (2/3) — managed database + PKI (role mariadb, tag 'full')"
   # icinga_action + backup_tag được CLI truyền qua extra-vars; dùng tên riêng
   # thay vì biến reserved `action` của Ansible.
   hosts: galera
@@ -96,17 +110,74 @@
   vars_files:
     - "{{ playbook_dir }}/../group_vars/all.yml"
   tasks:
-    - name: Tạo thư mục lưu DB và PKI trên deployment node
+    - name: Tạo thư mục lưu PKI trên deployment node
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ pki_controller_backup_dir }}"
         state: directory
         mode: "0700"
-      loop:
-        - "{{ mariadb_controller_backup_dir }}"
-        - "{{ pki_controller_backup_dir }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Tạo thư mục lưu DB trên deployment node với managed DB
+      ansible.builtin.file:
+        path: "{{ mariadb_controller_backup_dir }}"
+        state: directory
+        mode: "0700"
       delegate_to: localhost
       become: false
       when: icinga_database_type == 'managed_db'
+
+    # Managed DB đã tạo PKI archive trong role mariadb cùng timestamp với DB.
+    # External DB không chạy role đó, nhưng PKI vẫn thuộc icinga-ansible và vẫn
+    # bắt buộc phải có trong một full backup hoàn chỉnh.
+    - name: Tạo thư mục stage PKI trên CA host với external DB
+      ansible.builtin.file:
+        path: "{{ mariadb_backup.destination }}"
+        state: directory
+        mode: "0700"
+      delegate_to: "{{ ca_host }}"
+      when: icinga_database_type == 'external'
+
+    - name: Kiểm tra CA nguồn trước khi backup với external DB
+      ansible.builtin.stat:
+        path: "{{ icinga_base_dir }}/icinga2/data/var/lib/icinga2/ca/{{ item }}"
+      loop: [ca.crt, ca.key]
+      register: _full_external_pki_sources
+      delegate_to: "{{ ca_host }}"
+      when: icinga_database_type == 'external'
+
+    - name: Chặn external full backup nếu CA nguồn không hoàn chỉnh
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.size | int > 0
+        fail_msg: "CA source {{ item.item }} trên {{ ca_host }} thiếu/rỗng; không công bố full backup."
+      loop: "{{ _full_external_pki_sources.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: icinga_database_type == 'external'
+
+    - name: Snapshot CA/PKI với external DB
+      community.general.archive:
+        path: "{{ icinga_base_dir }}/icinga2/data/var/lib/icinga2/ca"
+        dest: "{{ mariadb_backup.destination }}/pki-{{ backup_ts }}.tar.gz"
+        format: gz
+        mode: "0600"
+      delegate_to: "{{ ca_host }}"
+      when: icinga_database_type == 'external'
+
+    - name: Xác nhận external PKI archive chứa certificate và private key
+      ansible.builtin.shell: |
+        set -euo pipefail
+        members=$(tar -tzf {{ (mariadb_backup.destination ~ '/pki-' ~ backup_ts ~ '.tar.gz') | quote }})
+        grep -Eq '(^|/)ca\.crt$' <<<"$members"
+        grep -Eq '(^|/)ca\.key$' <<<"$members"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      delegate_to: "{{ ca_host }}"
+      when: icinga_database_type == 'external'
 
     - name: Xác minh DB artifact vừa tạo trên node Galera chính
       ansible.builtin.stat:
@@ -146,9 +217,7 @@
         checksum_algorithm: sha256
       register: _full_pki_remote
       delegate_to: "{{ ca_host }}"
-      when:
-        - icinga_database_type == 'managed_db'
-        - ca_host | length > 0
+      when: ca_host | length > 0
 
     - name: Chặn nếu PKI artifact nguồn không tồn tại hoặc rỗng
       ansible.builtin.assert:
@@ -157,9 +226,7 @@
           - _full_pki_remote.stat.isreg
           - _full_pki_remote.stat.size | int > 0
         fail_msg: "Không thể gom backup-full: PKI artifact trên CA host không hợp lệ."
-      when:
-        - icinga_database_type == 'managed_db'
-        - ca_host | length > 0
+      when: ca_host | length > 0
 
     - name: Fetch PKI artifact về deployment node
       ansible.builtin.fetch:
@@ -168,9 +235,7 @@
         flat: true
         validate_checksum: true
       delegate_to: "{{ ca_host }}"
-      when:
-        - icinga_database_type == 'managed_db'
-        - ca_host | length > 0
+      when: ca_host | length > 0
 
     - name: Siết quyền PKI artifact đã fetch
       ansible.builtin.file:
@@ -178,9 +243,7 @@
         mode: "0600"
       delegate_to: localhost
       become: false
-      when:
-        - icinga_database_type == 'managed_db'
-        - ca_host | length > 0
+      when: ca_host | length > 0
 
     - name: Ghi con trỏ DB backup-full sau khi cả DB và PKI đã fetch thành công
       ansible.builtin.copy:
@@ -238,6 +301,7 @@
       ansible.builtin.set_fact:
         _full_bundle_paths:
           - "{{ icinga_config_backup_dir }}/config-{{ backup_ts }}.tar.gz"
+          - "{{ pki_controller_backup_dir }}/pki-{{ backup_ts }}.tar.gz"
 
     - name: Thêm archive Icinga Web của từng master vào danh sách bắt buộc
       ansible.builtin.set_fact:
@@ -245,13 +309,12 @@
           {{ _full_bundle_paths + [icinga_config_backup_dir ~ '/icingaweb2-' ~ item ~ '-' ~ backup_ts ~ '.tar.gz'] }}
       loop: "{{ groups['master'] | default([]) }}"
 
-    - name: Thêm DB và PKI vào danh sách bắt buộc với managed DB
+    - name: Thêm DB vào danh sách bắt buộc với managed DB
       ansible.builtin.set_fact:
         _full_bundle_paths: >-
           {{
             _full_bundle_paths
             + [mariadb_controller_backup_dir ~ '/db-' ~ _full_backup_tag ~ '-' ~ backup_ts ~ '.xb.gz']
-            + [pki_controller_backup_dir ~ '/pki-' ~ backup_ts ~ '.tar.gz']
           }}
       when: icinga_database_type == 'managed_db'
 
@@ -298,8 +361,11 @@
         msg: >-
           Backup xong — toàn bộ artifact DR đã được gom về {{ icinga_config_backup_dir }}/:
           config-{{ backup_ts }}.tar.gz, icingaweb2-*-{{ backup_ts }}.tar.gz,
-          database/db-{{ backup_tag | default('full') | replace('-', '_') }}-{{ backup_ts }}.xb.gz,
-          database/LATEST_{{ backup_tag | default('full') | replace('-', '_') | upper }} và
+          {{ ('database/db-' ~ (backup_tag | default('full') | replace('-', '_')) ~ '-' ~ backup_ts
+              ~ '.xb.gz, database/LATEST_'
+              ~ (backup_tag | default('full') | replace('-', '_') | upper) ~ ' và ')
+             if icinga_database_type == 'managed_db'
+             else 'database do DBA external backup riêng; ' }}
           pki/pki-{{ backup_ts }}.tar.gz. Bundle hoàn chỉnh được xác nhận bởi
           manifest-{{ backup_ts }}.sha256 và LATEST_COMPLETE. Hãy sao chép thư mục này sang storage
           nằm ngoài hạ tầng.

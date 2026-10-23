@@ -11,19 +11,40 @@ if [[ -z "${VIRTUAL_ENV:-}" ]]; then
   exit 1
 fi
 ANSIBLE_PLAYBOOK="$(command -v ansible-playbook || true)"
+ANSIBLE_INVENTORY="$(command -v ansible-inventory || true)"
 if [[ -z "$ANSIBLE_PLAYBOOK" || "$ANSIBLE_PLAYBOOK" != "$VIRTUAL_ENV/bin/ansible-playbook" ]]; then
   echo "Venv '$VIRTUAL_ENV' chưa có Ansible. Chạy: python -m pip install ansible" >&2
   exit 1
 fi
-
-if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck "$ROOT/tools/icinga-ansible" "$ROOT/tools/validate"
-else
-  echo "SKIP shellcheck (chưa cài)." >&2
+if [[ -z "$ANSIBLE_INVENTORY" || "$ANSIBLE_INVENTORY" != "$VIRTUAL_ENV/bin/ansible-inventory" ]]; then
+  echo "Venv '$VIRTUAL_ENV' thiếu ansible-inventory." >&2
+  exit 1
 fi
 
+if ! command -v shellcheck >/dev/null 2>&1; then
+  echo "Thiếu shellcheck; validation không được phép SKIP. Hãy cài shellcheck rồi chạy lại." >&2
+  exit 1
+fi
+shellcheck "$ROOT/tools/icinga-ansible" "$ROOT/tools/validate"
+
 cd "$ANSIBLE_DIR"
-for playbook in icinga-ansible.yml playbooks/*.yml; do
+SAMPLE_INVENTORIES=(
+  inventory/all-in-one
+  inventory/ha-2master-galera3
+  inventory/ha-2master-2satellite-galera3
+  inventory/ha-2master-external-db
+)
+
+for inventory in "${SAMPLE_INVENTORIES[@]}"; do
+  echo "inventory-model: $inventory"
+  "$ANSIBLE_INVENTORY" -i "$inventory" --playbook-dir "$ANSIBLE_DIR" --list \
+    | "$VIRTUAL_ENV/bin/python" "$ROOT/tools/check-inventory-model"
+  echo "syntax-check: icinga-ansible.yml ($inventory)"
+  "$ANSIBLE_PLAYBOOK" -i "$inventory" icinga-ansible.yml --syntax-check \
+    -e "@$GLOBALS" -e "@$PASSWORDS"
+done
+
+for playbook in playbooks/*.yml; do
   echo "syntax-check: $playbook"
   "$ANSIBLE_PLAYBOOK" -i inventory/all-in-one "$playbook" --syntax-check \
     -e "@$GLOBALS" -e "@$PASSWORDS" -e target_host=localhost

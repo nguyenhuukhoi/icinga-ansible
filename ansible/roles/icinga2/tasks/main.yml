@@ -1,7 +1,7 @@
 ---
 # Role icinga2: CA/PKI + zones.conf + features (icingadb, api...) + API users.
 # P1 (single master), P2 (HA N-master), P3 (satellite + add/remove): đã verify chạy thật.
-# Client (command endpoint, block "(client)" bên dưới): đã code — xem TODO.md cho trạng thái verify.
+# Client (command endpoint, block "(client)" bên dưới): dùng chung lifecycle add-node/remove-node.
 #
 # MÔ HÌNH IMAGE (icinga/icinga2): toàn bộ state dưới /data (volume),
 #   /etc/icinga2 -> /data/etc/icinga2 ; /var/lib/icinga2 -> /data/var/lib/icinga2
@@ -107,8 +107,9 @@
     path: "{{ icinga_base_dir }}/icinga2/.whole-config-tree-v1"
   register: _ic_whole_config_migrated
 
-# Không ghi đè file đang có trong /etc/icinga-ansible. Cách này giữ mọi chỉnh sửa hiện hữu,
-# đồng thời mang sang features-enabled và các file do node setup từng tạo.
+# Không ghi đè file đang có trong /etc/icinga-ansible. Đây chỉ là migration layout cục bộ một lần
+# trên cùng node, không phải cơ chế phân phối config từ deployment node. Cố ý giữ cả nội dung operator
+# đã tồn tại trong cây cũ để nâng cấp không làm mất zones.d/secrets.
 - name: Migrate một lần config Icinga 2 cũ sang cây config chính thức
   ansible.builtin.shell: |
     set -euo pipefail
@@ -159,16 +160,16 @@
 # dù ic_data đã đúng sau đó. Hậu quả: node không "accept_config" thật (dù task node setup có đúng cờ
 # --accept-config). Thiết kế mới tránh hai bản file: node setup và daemon cùng ghi trực tiếp vào
 # {{ icinga_etc_dir }}/icinga2 qua mount nguyên thư mục.
-- name: "Danh sách loại trừ dùng chung cho seed + mount base config (cơ chế riêng hoặc render riêng)"
+- name: "Danh sách loại trừ khi seed base config (cơ chế riêng hoặc render riêng)"
   ansible.builtin.set_fact:
     # conf.d and scripts are monitoring content shipped as image examples. The role mounts only its
-    # infrastructure ApiUser explicitly. zones.d is excluded because Ansible does not manage,
-    # transport, mount or delete operator monitoring DSL.
+    # infrastructure ApiUser explicitly. zones.d/secrets are excluded from image seeding because
+    # Ansible does not author or distribute operator monitoring content/credentials.
     _ic_base_exclude_prefixes:
       - 'features-enabled/'
       - 'zones\.d/'
       - 'ssh/'
-      - 'secret/'
+      - 'secrets/'
       - 'custom-plugins/'
       - 'conf\.d/'
       - 'scripts/'
@@ -1010,20 +1011,6 @@
     argv: "{{ _ic_validate_argv }}"
   changed_when: false
 
-- name: Tính fingerprint nội dung config để recreate container khi bind-mounted file đổi inode
-  ansible.builtin.find:
-    paths: "{{ icinga_etc_dir }}/icinga2"
-    recurse: true
-    file_type: file
-    get_checksum: true
-  register: _ic_config_files
-
-- name: Chốt fingerprint config
-  ansible.builtin.set_fact:
-    _ic_config_fingerprint: >-
-      {{ (_ic_config_files.files | sort(attribute='path') | map(attribute='checksum') | join(':'))
-         | hash('sha256') }}
-
 - name: Ghi nhận node setup đã thay đổi runtime/PKI trong lượt chạy này
   ansible.builtin.set_fact:
     _ic_node_setup_changed: >-
@@ -1032,21 +1019,12 @@
          ((_satellite_node_setup | default({})).changed | default(false)) or
          ((_client_node_setup | default({})).changed | default(false)) }}
 
-# `node setup` có thể thay inode của constants.conf/api.conf bên trong /data.
-# Container cũ vẫn giữ bind mount tới inode cũ dù file Ansible vừa render lại có
-# đúng nội dung. Kiểm tra container hiện tại để retry sau sự cố luôn tự sửa được.
-- name: Kiểm tra config của container Icinga 2 hiện tại trước khi quyết định recreate
-  ansible.builtin.command: docker exec icinga2 icinga2 daemon -C
-  register: _ic_current_validate
-  changed_when: false
-  failed_when: false
-
 - name: Khởi động container icinga2 (host network, mount /data)
   community.docker.docker_container:
     name: icinga2
     image: "{{ images.icinga2 }}"
     state: started
-    recreate: "{{ _ic_node_setup_changed or _ic_current_validate.rc != 0 }}"
+    recreate: "{{ _ic_node_setup_changed }}"
     restart_policy: unless-stopped
     network_mode: host
     # NET_RAW: container mặc định KHÔNG có quyền tạo raw ICMP socket -> check dùng ping (hostalive,
@@ -1071,12 +1049,9 @@
     # gắn thêm vào container icinga2 để script gọi ra ngoài tự
     # đi qua proxy mà không cần tự cấu hình trong từng script. Khi globals không khai proxy, biến
     # này lấy từ /etc/environment qua facts.env; nếu host không có proxy thì vẫn là {}.
-    env: "{{ proxy_environment | combine({'ICINGA_ANSIBLE_CONFIG_FINGERPRINT': _ic_config_fingerprint}) }}"
-    # BUG THẬT ĐÃ GẶP (đọc trước khi đổi lại volumes:): so sánh mặc định của docker_container cho
-    # "volumes" chỉ phát hiện mount MỚI THÊM, KHÔNG phát hiện mount bị RÚT BỚT khỏi list -> xoá 1
-    # script/zone khỏi nguồn rồi reconfigure lại KHÔNG tự gỡ mount cũ (container không được recreate,
-    # để lại mount "ma" trỏ tới file không còn tồn tại). Bắt buộc "strict" để volumes: luôn phản ánh
-    # ĐÚNG danh sách hiện tại (thêm + xoá đều kích hoạt recreate).
+    env: "{{ proxy_environment }}"
+    # So sánh strict để gỡ mọi per-file mount còn sót từ layout cũ và bảo đảm container chỉ dùng
+    # đúng các mount nguyên cây hiện tại. Thay đổi file trong cây config được handler restart daemon.
     comparisons:
       volumes: strict
     healthcheck:
@@ -1117,5 +1092,5 @@
 # =============================================================================
 # Master thứ 2: block "(master2)"/"(CA HA)" ở trên — ĐÃ VERIFY chạy thật (P2).
 # Satellite: block "(satellite)" ở trên — ĐÃ VERIFY chạy thật (P3), kể cả add-node/remove-node.
-# Client (command endpoint): block "(client)" ở trên — ĐÃ CODE, xem TODO.md cho trạng thái verify.
+# Client (command endpoint): block "(client)" ở trên, dùng chung add-node/remove-node.
 # =============================================================================

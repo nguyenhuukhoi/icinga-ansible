@@ -26,8 +26,9 @@ module_catalog:
 # --- Thư mục state trên host (data — KHÔNG tái sinh được, đừng lẫn với config) ------
 icinga_base_dir: "/var/lib/icinga-ansible"
 
-# --- Thư mục config đã render, trên TỪNG target node (giống /etc/kolla/<svc>) -------
-# Tái sinh được (xoá đi chạy `reconfigure` là có lại) -> KHÔNG đưa vào diện destroy.yml xoá.
+# --- Thư mục config hiệu lực trên TỪNG target node (giống /etc/kolla/<svc>) ----------
+# Chứa cả file hạ tầng do role render và file local do service/operator tạo. `remove-*`/`destroy`
+# cố ý xoá cây này trên target; phần operator/UI phải được backup bằng quy trình tương ứng.
 # Mặc định TRÙNG path với CONFIG_DIR bên deploy node (tools/icinga-ansible) nhưng khác Ý NGHĨA:
 # bên deploy node là input (globals.yml/passwords.yml/config override); bên target node đây là
 # OUTPUT (config đã render xong cho service chạy trên đúng node đó) — xem design.md mục 4.1.

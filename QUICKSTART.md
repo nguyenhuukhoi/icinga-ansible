@@ -129,14 +129,16 @@ Host/Service/CheckCommand; Ansible không import hoặc reconcile object Directo
 
 ### Static DSL
 
-Static DSL nằm ngoài phạm vi của project. Ansible không đọc, validate, copy, mount hoặc xoá file
-trong `zones.d`. Đặc biệt, `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node không
-còn là nguồn cấu hình và nội dung đặt tại đó sẽ bị bỏ qua. Operator phải dùng quy trình triển khai
-riêng nếu không dùng Director.
+Static DSL nằm ngoài phạm vi quản lý của project. Ansible không render, reconcile hoặc phân phối file
+trong `zones.d`. Đặc biệt, `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node không còn
+là nguồn cấu hình và nội dung đặt tại đó sẽ bị bỏ qua. Operator phải dùng quy trình triển khai riêng
+nếu không dùng Director. Tool vẫn chạy `icinga2 daemon -C` trên config hiệu lực trước thay đổi runtime;
+lỗi cú pháp trong nội dung operator vì vậy sẽ dừng deploy/reconfigure an toàn.
 
 Credential API là local trên từng master. Role tạo thư mục
 `/etc/icinga-ansible/icinga2/secrets/` ngay trong cây config chính thức đã được mount RW vào container;
-không cần volume riêng và Ansible không đọc, copy, merge hoặc xoá file bên trong.
+không cần volume riêng và Ansible không render, merge hoặc phân phối file bên trong. `remove-*` và
+`destroy` xóa toàn bộ config của target, gồm cả credential local, nên phải backup riêng.
 
 ## 6. Thêm, sửa và xoá node
 
@@ -231,8 +233,8 @@ ansible -i "$INV" 'satellite1:satellite2' -m ping
 ./tools/icinga-ansible check             -i "$INV"
 ```
 
-`add-node` phải dùng inventory đầy đủ. Nội dung monitoring phải được operator triển khai bằng pipeline
-riêng sau khi hạ tầng đã PASS.
+`add-node` phải dùng inventory đầy đủ và dùng được cho cả satellite lẫn client. Nội dung monitoring
+phải được operator triển khai bằng pipeline riêng sau khi hạ tầng đã PASS.
 
 ### 6.3. Xoá satellite
 
@@ -261,6 +263,10 @@ $EDITOR /etc/icinga-ansible/globals.yml
 Chỉ xóa VM sau khi `check` PASS. Xóa satellite cuối cùng của một zone không ảnh hưởng database hoặc
 Web, nhưng object monitoring do operator tự quản lý có thể còn tham chiếu `command_endpoint`; hãy
 kiểm tra và sửa phần đó trong pipeline monitoring riêng.
+
+Client dùng cùng lệnh `remove-node`. Target phải còn trong `[client]` và `[all_hosts]` lúc chạy;
+sau khi PASS, xóa khỏi hai group rồi `reconfigure -t icinga2`. Client không thuộc
+`satellite_zones`, nên không sửa biến đó.
 
 Để xóa đồng thời hai satellite, giữ cả hai trong inventory và `satellite_zones`, truyền danh sách
 phân cách bằng dấu phẩy. Playbook kiểm tra toàn bộ target trước rồi thực thi song song theo Ansible
@@ -346,7 +352,8 @@ find . -maxdepth 2 -type f -name "*$BACKUP_TS*" -ls
 
 Copy **cả cây thư mục**, không chỉ file DB, sang storage ngoài deployment node. Inventory thường nằm
 trong repo nên không thuộc `config-*.tar.gz`; phải lưu inventory/host vars cùng phiên bản code ở SCM
-hoặc backup riêng. Với external DB, DBA phải backup/restore database bằng quy trình riêng.
+hoặc backup riêng. Với external DB, DBA phải backup/restore database bằng quy trình riêng;
+`backup-full` vẫn luôn backup và đưa CA/PKI về deployment node.
 
 `backup-full` không backup package monitoring static hoặc credential nằm ngoài
 `/etc/icinga-ansible`. Hãy lưu những phần đó trong Git/vault/storage riêng. Project không backup và
@@ -475,7 +482,7 @@ runtime identity cũ. `zones.d`, plugin và credential operator vẫn phải đ�
 
 Bài destructive regression ngày 2026-10-23 đã xóa và dựng lại 2 master + 3 Galera bằng đúng năm IP
 cũ, sau đó xác nhận CA fingerprint, environment ID, Web login, Galera 3/3 và sáu ICMP Host check đều
-khớp/healthy. Xem `TEST-REPORT-SAME-IP-DR-2026-10-23.md`.
+khớp/healthy; kết quả tóm tắt được giữ trong mục 19.3 của `OPERATIONS-RUNBOOK-VI.md`.
 
 #### Trường hợp chỉ import database ứng dụng vào cụm mới
 

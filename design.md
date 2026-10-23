@@ -40,9 +40,11 @@ Input archive chỉ dùng để restore vẫn giữ read-only theo nguyên tắc
 cố ý che cây config cũ. Deploy đầu tiên sau nâng cấp chỉ migrate file còn thiếu từ cây cũ, không ghi
 đè file đã có dưới `/etc/icinga-ansible`.
 
-Role không đọc, copy hoặc xoá `zones.d`. Thư mục có mặt trong container chỉ vì toàn bộ cây config
-host được bind-mount RW. Cấu hình hạ tầng do role sở hữu được kiểm tra bằng `icinga2 daemon -C`
-với đúng tập mount trước khi container phục vụ bị thay đổi.
+Role không render, reconcile hoặc phân phối `zones.d`. Thư mục có mặt trong container vì toàn bộ cây
+config host được bind-mount RW. Trước khi thay đổi runtime, role chạy `icinga2 daemon -C` trên config
+hiệu lực, nên lỗi cú pháp operator vẫn dừng deploy an toàn. Migration layout cũ chỉ copy cục bộ một
+lần trên chính node để tránh mất dữ liệu. `remove-*`/`destroy` xóa nguyên config của target được chỉ
+định; nội dung operator phải có backup/pipeline riêng.
 
 ## 5. Network
 
@@ -60,13 +62,13 @@ Service dùng Docker host network. Port cluster/API 5665 nối trực tiếp the
 
 ## 7. Vòng đời node
 
-Node mới được bootstrap một lần rồi `add-master`/`add-node`. Xoá node là hai pha: playbook xoá
+Node mới được bootstrap một lần rồi `add-master`/`add-node` (satellite/client). Xoá node là hai pha: playbook xoá
 workload trên target, operator cập nhật inventory, sau đó `reconfigure` đồng bộ topology. CA host
 không được xoá trực tiếp. Membership Galera không thuộc lệnh remove master/satellite.
 
 ## 8. Vai trò runtime
 
-### 8.3. Satellite và client
+### 8.1. Satellite và client
 
 Satellite nhận config từ parent zone và có thể thực thi check do operator định nghĩa. Client là
 command endpoint một node. Role chỉ quản lý zone, endpoint, certificate và cờ accept-config/
@@ -74,12 +76,12 @@ accept-commands; không tạo Host/Service cho các node này.
 
 ## 9. Icinga 2
 
-### 9.2. CA HA
+### 9.1. CA HA
 
 CA private key được sao sang master peer để còn khả năng ký certificate khi CA host chính lỗi. Backup
 PKI vẫn bắt buộc trước mọi thay đổi phá huỷ.
 
-### 9.3. Config monitoring
+### 9.2. Config monitoring
 
 Role không quản lý hay đồng bộ `zones.d`. Operator tự triển khai static DSL trực tiếp lên master đầu
 tiên bằng pipeline riêng hoặc quản lý object qua Director. Với static HA, config đặt trong
@@ -87,14 +89,15 @@ tiên bằng pipeline riêng hoặc quản lý object qua Director. Với static
 deployment node ghi đè monitoring config. Cây config được mount nguyên thư mục chỉ bảo đảm nội dung
 đã có trên node tồn tại bền vững.
 
-### 9.4. SSH và secret
+### 9.3. SSH và secret
 
 SSH key, plugin và credential API hoàn toàn local trên từng executor; deployment node không phân
-phối hoặc xoá chúng. Role tạo `/etc/icinga-ansible/icinga2/secrets` trên từng master. Thư mục này thuộc cây config
-đã bind-mount RW nguyên khối vào `/data/etc/icinga2`, nên không cần mount riêng. Role không đọc, copy,
-merge hoặc xoá file trong thư mục này; sửa file trên host được container thấy ngay.
+phối chúng. Role tạo `/etc/icinga-ansible/icinga2/secrets` trên từng master. Thư mục này thuộc cây
+config đã bind-mount RW nguyên khối vào `/data/etc/icinga2`, nên không cần mount riêng. Role không
+render/reconcile credential bên trong; sửa file trên host được container thấy ngay. Xóa target bằng
+`remove-*`/`destroy` cũng xóa thư mục local này, vì vậy credential phải được backup riêng.
 
-### 9.6. Custom image
+### 9.4. Custom image
 
 Project không build image. Operator build/push image bất biến rồi khai `custom_image_registry` và
 `custom_image_overrides`.

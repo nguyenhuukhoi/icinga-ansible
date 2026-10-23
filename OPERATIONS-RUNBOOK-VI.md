@@ -646,7 +646,8 @@ Artifact DB/PKI được kiểm tra tồn tại, kích thước và checksum tro
 
 Không nằm trong bundle: inventory/host vars trong repo; package static monitoring; credential bên
 ngoài `/etc/icinga-ansible`; và mọi nội dung `zones.d`. Lưu các phần này trong
-SCM/vault/storage riêng. Với external DB, `backup-full` không thay quy trình backup của DBA.
+SCM/vault/storage riêng. Với external DB, `backup-full` không thay quy trình backup database của DBA,
+nhưng vẫn snapshot CA/PKI và bắt buộc artifact đó có trong manifest.
 
 ### 12.3. Kiểm tra backup ngay sau khi tạo
 
@@ -947,8 +948,9 @@ Ansible chỉ phục hồi hạ tầng. Sau restore:
    Host/Service/CheckCommand. Project không tự import hoặc xóa object.
 2. Nếu dùng static DSL, phục hồi package ngoài project vào `zones.d/<ZoneName>` trên master CA,
    validate `icinga2 daemon -C` rồi reload để Icinga config-sync sang peer.
-3. Không đặt static monitoring vào `/etc/icinga-ansible/config/icinga2/zones.d`; project không đọc,
-   copy, backup hay restore `zones.d`. Runtime chỉ thấy nó qua bind mount toàn cây config trên master.
+3. Không đặt static monitoring vào `/etc/icinga-ansible/config/icinga2/zones.d`; project không render,
+   reconcile, phân phối, backup hay restore `zones.d`. Runtime thấy nó qua bind mount toàn cây config
+   trên master và preflight dùng `icinga2 daemon -C` để từ chối config hiệu lực bị lỗi.
 4. Chạy lại `icinga-ansible check` sau khi pipeline monitoring hoàn tất.
 
 ### 14.6. Full DR chuẩn: dựng cụm mới 2 master + 3 Galera từ `backup-full`
@@ -1041,8 +1043,8 @@ riêng; validate config, reload Icinga 2, chạy lại `check`, rồi tạo mộ
 
 Bài destructive regression ngày 2026-10-23 đã xóa và tạo lại 2 master + 3 Galera bằng đúng fixed IP
 cũ. Kết quả: full `check` PASS, Galera 3/3, CA fingerprint và environment ID khớp bản gốc, Web login
-PASS, master2 nhận đủ 6 Host qua config-sync và 6/6 ICMP check UP. Bằng chứng chi tiết ở
-`TEST-REPORT-SAME-IP-DR-2026-10-23.md`.
+PASS, master2 nhận đủ 6 Host qua config-sync và 6/6 ICMP check UP. Kết quả cốt lõi được giữ trong
+bảng regression ở mục 19.3 của runbook này.
 
 ### 14.8. Dựng cụm mới và chỉ import database ứng dụng Icinga
 
@@ -1510,7 +1512,7 @@ dùng Director làm nguồn topology:
 | Bind mount Docker do role quản lý | PASS | các mount config runtime được xác nhận `RW=true`; input backup chỉ đọc giữ `ro` có chủ đích |
 
 Sau toàn bộ drill, inventory production vẫn là hai master và ba Galera; `check` cuối cùng
-`failed=0`. Báo cáo chi tiết trong workspace: `TEST-REPORT-LIFECYCLE-2026-10-22.md`.
+`failed=0`. Bằng chứng cốt lõi được giữ ngay trong bảng regression ở mục này.
 
 ### 19.3. Disaster recovery cùng fixed IP ngày 2026-10-23
 
@@ -1528,8 +1530,7 @@ tạo năm VM disk sạch với đúng fixed IP cũ, rồi restore config, CA, p
 | Restore operator config riêng | PASS | master2 nhận 6 Host qua config-sync; 6/6 ICMP UP, chia 3 check/master |
 | Full `check` cuối | PASS | mọi host `failed=0` |
 
-Báo cáo đầy đủ và mapping server ID cũ/mới nằm tại
-`TEST-REPORT-SAME-IP-DR-2026-10-23.md`.
+Bằng chứng cốt lõi và mapping kết quả được giữ ngay trong bảng regression ở mục này.
 
 ### 19.4. Cụm mới chỉ import database ứng dụng ngày 2026-10-23
 
@@ -1598,9 +1599,9 @@ Không đưa output có password, container environment hoặc decrypted Vault v
 | Deploy | `icinga-ansible deploy -i <inventory>` |
 | Apply config | `icinga-ansible reconfigure -i <inventory>` |
 | Deep health check | `icinga-ansible check -i <inventory>` |
-| Thêm satellite | `icinga-ansible add-node -i <inventory>` |
+| Thêm satellite/client | `icinga-ansible add-node -i <inventory>` |
 | Thêm master | `icinga-ansible add-master -i <inventory>` |
-| Xóa satellite | `icinga-ansible remove-node -i <inventory> -e target_host=<host> -e confirm=yes` |
+| Xóa satellite/client | `icinga-ansible remove-node -i <inventory> -e target_host=<host> -e confirm=yes` |
 | Xóa master | `icinga-ansible remove-master -i <inventory> -e target_host=<host> -e confirm=yes` |
 | Backup DB | `icinga-ansible mariadb-backup -i <inventory>` |
 | Full backup | `icinga-ansible backup-full -i <inventory>` |
