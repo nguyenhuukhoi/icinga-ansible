@@ -59,6 +59,11 @@ icinga_config_backup_dir: "/var/backups/icinga-ansible-config"
 # cover. These directories live under the controller backup root and survive loss of all service nodes.
 mariadb_controller_backup_dir: "{{ icinga_config_backup_dir }}/database"
 pki_controller_backup_dir: "{{ icinga_config_backup_dir }}/pki"
+# Per-endpoint archives produced by backup-full. Each archive contains the complete bind-mounted
+# Icinga 2 configuration tree plus the endpoint certificate and, on masters, icingadb.env. This is
+# deliberately separate from the controller desired-state archive: generated topology is reconciled
+# from the selected restore inventory, while operator-owned zones.d/secrets/plugins are preserved.
+node_state_controller_backup_dir: "{{ icinga_config_backup_dir }}/nodes"
 
 # --- Suy diễn topology từ inventory -------------------------------------------
 master_count:    "{{ groups['master'] | default([]) | length }}"

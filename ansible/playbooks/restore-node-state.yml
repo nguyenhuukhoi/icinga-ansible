@@ -1,0 +1,448 @@
+---
+# Restore the per-endpoint Icinga 2 state from a completed backup-full bundle.
+#
+# restore_mode=existing:
+#   Roll an existing cluster back to the selected bundle. The current CA must match the backup CA;
+#   the playbook never replaces a live CA. A local pre-restore archive is kept on every endpoint.
+# restore_mode=clean:
+#   Restore onto freshly bootstrapped VMs. No endpoint config/certificate or CA may already exist.
+#   The old CA and endpoint identities are restored before the first deploy. IP addresses may differ,
+#   but logical inventory names and group membership must exactly match cluster-<timestamp>.json.
+#
+# The playbook intentionally leaves application containers stopped. Continue with deploy/DB/Web
+# recovery as documented in QUICKSTART.md so topology is rendered from the selected inventory.
+
+- name: Validate the completed full-cluster bundle and topology
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _restore_nodes: >-
+      {{
+        ((groups['master'] | default([]))
+         + (groups['satellite'] | default([]))
+         + (groups['client'] | default([]))) | unique | list
+      }}
+  tasks:
+    - name: Require explicit destructive acknowledgement, mode and timestamp
+      ansible.builtin.assert:
+        that:
+          - confirm | default('') == 'yes-i-really-really-mean-it'
+          - restore_mode | default('') in ['existing', 'clean']
+          - restore_backup_ts | default('') is regex('^[0-9]{8}-[0-9]{6}$')
+        fail_msg: >-
+          restore-node-state ghi đè config/certificate trên mọi Icinga endpoint. Cần
+          -e restore_mode=existing|clean -e restore_backup_ts=YYYYMMDD-HHMMSS
+          -e confirm=yes-i-really-really-mean-it.
+
+    - name: Verify every artifact in the bundle manifest before touching a node
+      ansible.builtin.command:
+        argv:
+          - sha256sum
+          - --strict
+          - --check
+          - "manifest-{{ restore_backup_ts }}.sha256"
+        chdir: "{{ icinga_config_backup_dir }}"
+      changed_when: false
+      check_mode: false
+
+    - name: Read full-cluster metadata
+      ansible.builtin.slurp:
+        src: "{{ icinga_config_backup_dir }}/cluster-{{ restore_backup_ts }}.json"
+      register: _restore_metadata_raw
+
+    - name: Parse full-cluster metadata
+      ansible.builtin.set_fact:
+        _restore_metadata: "{{ _restore_metadata_raw.content | b64decode | from_json }}"
+
+    - name: Require the same logical topology as the backup
+      ansible.builtin.assert:
+        that:
+          - _restore_metadata.schema | int == 2
+          - _restore_metadata.timestamp == restore_backup_ts
+          - _restore_metadata.database_type == icinga_database_type
+          - _restore_metadata.master_zone_name == icinga_master_zone_name
+          - _restore_metadata.groups.master == (groups['master'] | default([]))
+          - _restore_metadata.groups.satellite == (groups['satellite'] | default([]))
+          - _restore_metadata.groups.client == (groups['client'] | default([]))
+          - _restore_metadata.groups.galera == (groups['galera'] | default([]))
+        fail_msg: >-
+          Inventory hiện tại khác logical topology của backup. Được phép đổi ansible_host/IP nhưng
+          phải giữ nguyên tên và thứ tự master/satellite/client/Galera, database type và master zone.
+
+    - name: Check every expected endpoint archive
+      ansible.builtin.stat:
+        path: >-
+          {{ node_state_controller_backup_dir }}/icinga2-{{ item }}-{{ restore_backup_ts }}.tar.gz
+      loop: "{{ _restore_nodes }}"
+      register: _restore_node_archives
+
+    - name: Reject a missing or empty endpoint archive
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.size | int > 0
+        fail_msg: "Thiếu node-state archive của {{ item.item }}."
+      loop: "{{ _restore_node_archives.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: List endpoint archive members before extracting anywhere
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -tzf
+          - >-
+            {{ node_state_controller_backup_dir }}/icinga2-{{ item }}-{{ restore_backup_ts }}.tar.gz
+      loop: "{{ _restore_nodes }}"
+      register: _restore_node_members
+      changed_when: false
+      check_mode: false
+
+    - name: Reject unsafe or incomplete endpoint archives
+      ansible.builtin.assert:
+        that:
+          - item.stdout_lines | length > 0
+          - item.stdout_lines | select('match', '^/') | list | length == 0
+          - item.stdout_lines | select('search', '(^|/)\.\.(/|$)') | list | length == 0
+          - item.stdout_lines | reject('match', '^node-state(/|$)') | list | length == 0
+          - "'node-state/etc/icinga2/icinga2.conf' in item.stdout_lines"
+          - "('node-state/var/lib/icinga2/certs/' ~ item.item ~ '.crt') in item.stdout_lines"
+          - "('node-state/var/lib/icinga2/certs/' ~ item.item ~ '.key') in item.stdout_lines"
+          - "'node-state/var/lib/icinga2/certs/ca.crt' in item.stdout_lines"
+          - >-
+            (item.item not in (groups['master'] | default([]))) or
+            ('node-state/var/lib/icinga2/icingadb.env' in item.stdout_lines)
+        fail_msg: "Node-state archive của {{ item.item }} không an toàn hoặc thiếu identity."
+      loop: "{{ _restore_node_members.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Check the CA archive selected for restore
+      ansible.builtin.stat:
+        path: "{{ pki_controller_backup_dir }}/pki-{{ restore_backup_ts }}.tar.gz"
+      register: _restore_pki_archive
+
+    - name: Require a non-empty CA archive
+      ansible.builtin.assert:
+        that:
+          - _restore_pki_archive.stat.exists
+          - _restore_pki_archive.stat.isreg
+          - _restore_pki_archive.stat.size | int > 0
+        fail_msg: "Thiếu PKI archive của full bundle {{ restore_backup_ts }}."
+
+- name: Validate and restore the cluster CA
+  hosts: "{{ (groups['master'] | first) | default('invalid-ca-host') }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _restore_ca_dir: "{{ icinga_base_dir }}/icinga2/data/var/lib/icinga2/ca"
+    _restore_ca_archive: "/tmp/pki-{{ restore_backup_ts }}.tar.gz"
+    _restore_ca_stage: "/tmp/icinga-restore-ca-{{ restore_backup_ts }}"
+  tasks:
+    - name: Inspect current CA state
+      ansible.builtin.stat:
+        path: "{{ _restore_ca_dir }}/{{ item }}"
+      loop: [ca.crt, ca.key]
+      register: _restore_current_ca
+
+    - name: Require an untouched CA location on clean VMs
+      ansible.builtin.assert:
+        that:
+          - _restore_current_ca.results | selectattr('stat.exists') | list | length == 0
+        fail_msg: >-
+          restore_mode=clean nhưng {{ ca_host }} đã có CA state. Dùng VM sạch hoặc mode existing;
+          playbook không tự ghi đè CA.
+      when: restore_mode == 'clean'
+
+    - name: Require a complete live CA for existing-cluster restore
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.size | int > 0
+        fail_msg: "restore_mode=existing yêu cầu CA hiện tại hoàn chỉnh trên {{ ca_host }}."
+      loop: "{{ _restore_current_ca.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: restore_mode == 'existing'
+
+    - name: Validate the backup CA before changing endpoint state
+      block:
+        - name: Recreate clean CA validation stage
+          ansible.builtin.file:
+            path: "{{ _restore_ca_stage }}"
+            state: "{{ item }}"
+            mode: "0700"
+          loop: [absent, directory]
+
+        - name: Stage CA archive from the deployment node
+          ansible.builtin.copy:
+            src: "{{ pki_controller_backup_dir }}/pki-{{ restore_backup_ts }}.tar.gz"
+            dest: "{{ _restore_ca_archive }}"
+            mode: "0600"
+
+        - name: Reject unsafe CA archive layout
+          ansible.builtin.shell: |
+            set -euo pipefail
+            members=$(tar -tzf {{ _restore_ca_archive | quote }})
+            test -n "$members"
+            ! grep -Eq '(^|/)\.\.(/|$)|^/' <<<"$members"
+            test "$(awk -F/ 'NF {print $1}' <<<"$members" | sort -u | wc -l)" -eq 1
+            grep -Eq '^[^/]+/ca\.crt$' <<<"$members"
+            grep -Eq '^[^/]+/ca\.key$' <<<"$members"
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Extract backup CA to validation stage
+          ansible.builtin.unarchive:
+            src: "{{ _restore_ca_archive }}"
+            dest: "{{ _restore_ca_stage }}"
+            remote_src: true
+            extra_opts: ["--strip-components=1"]
+
+        - name: Verify backup CA certificate and private key are a matching pair
+          ansible.builtin.shell: |
+            set -euo pipefail
+            cert_pub=$(openssl x509 -in {{ (_restore_ca_stage + '/ca.crt') | quote }} -pubkey -noout |
+              openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
+            key_pub=$(openssl pkey -in {{ (_restore_ca_stage + '/ca.key') | quote }} -pubout -outform DER 2>/dev/null |
+              sha256sum | awk '{print $1}')
+            test "$cert_pub" = "$key_pub"
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Compare live and backup CA before existing-cluster restore
+          ansible.builtin.shell: |
+            set -euo pipefail
+            live=$(openssl x509 -in {{ (_restore_ca_dir + '/ca.crt') | quote }} -outform DER | sha256sum | awk '{print $1}')
+            backup=$(openssl x509 -in {{ (_restore_ca_stage + '/ca.crt') | quote }} -outform DER | sha256sum | awk '{print $1}')
+            live_cert_pub=$(openssl x509 -in {{ (_restore_ca_dir + '/ca.crt') | quote }} -pubkey -noout |
+              openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
+            live_key_pub=$(openssl pkey -in {{ (_restore_ca_dir + '/ca.key') | quote }} -pubout -outform DER 2>/dev/null |
+              sha256sum | awk '{print $1}')
+            test "$live" = "$backup"
+            test "$live_cert_pub" = "$live_key_pub"
+          args:
+            executable: /bin/bash
+          changed_when: false
+          when: restore_mode == 'existing'
+
+        - name: Create CA destination on clean VMs
+          ansible.builtin.file:
+            path: "{{ _restore_ca_dir }}"
+            state: directory
+            owner: "5665"
+            group: "5665"
+            mode: "0750"
+          when: restore_mode == 'clean'
+
+        - name: Restore old CA on clean VMs
+          ansible.builtin.copy:
+            src: "{{ _restore_ca_stage }}/{{ item }}"
+            dest: "{{ _restore_ca_dir }}/{{ item }}"
+            remote_src: true
+            owner: "5665"
+            group: "5665"
+            mode: "{{ '0600' if item == 'ca.key' else '0644' }}"
+          loop: [ca.crt, ca.key]
+          when: restore_mode == 'clean'
+      always:
+        - name: Remove CA validation staging files
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ _restore_ca_stage }}"
+            - "{{ _restore_ca_archive }}"
+
+- name: Restore Icinga 2 config and endpoint identity
+  hosts: master:satellite:client
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _restore_node_config: "{{ icinga_etc_dir }}/icinga2"
+    _restore_node_lib: "{{ icinga_base_dir }}/icinga2/data/var/lib/icinga2"
+    _restore_node_archive_name: "icinga2-{{ inventory_hostname }}-{{ restore_backup_ts }}.tar.gz"
+    _restore_node_archive: "/tmp/{{ _restore_node_archive_name }}"
+    _restore_node_stage: "/tmp/icinga-restore-node-{{ inventory_hostname }}-{{ restore_backup_ts }}"
+    _restore_safety_dir: "/var/backups/icinga-ansible-pre-restore"
+  tasks:
+    - name: Inspect current endpoint config and certificate before any shutdown
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ _restore_node_config }}/icinga2.conf"
+        - "{{ _restore_node_lib }}/certs/{{ inventory_hostname }}.crt"
+      register: _restore_current_node_state
+
+    - name: Require clean endpoint paths in clean mode
+      ansible.builtin.assert:
+        that:
+          - _restore_current_node_state.results | selectattr('stat.exists') | list | length == 0
+        fail_msg: >-
+          restore_mode=clean nhưng {{ inventory_hostname }} đã có config/certificate. Không ghi đè
+          một node đã deploy; dùng VM sạch hoặc restore_mode=existing.
+      when: restore_mode == 'clean'
+
+    - name: Require complete endpoint state in existing mode
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.size | int > 0
+        fail_msg: "restore_mode=existing nhưng {{ inventory_hostname }} thiếu {{ item.item }}."
+      loop: "{{ _restore_current_node_state.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: restore_mode == 'existing'
+
+    - name: Stage and validate this endpoint archive
+      block:
+        - name: Recreate clean endpoint staging directory
+          ansible.builtin.file:
+            path: "{{ _restore_node_stage }}"
+            state: "{{ item }}"
+            mode: "0700"
+          loop: [absent, directory]
+
+        - name: Copy verified endpoint archive from deployment node
+          ansible.builtin.copy:
+            src: "{{ node_state_controller_backup_dir }}/{{ _restore_node_archive_name }}"
+            dest: "{{ _restore_node_archive }}"
+            mode: "0600"
+
+        - name: Extract endpoint archive into staging
+          ansible.builtin.unarchive:
+            src: "{{ _restore_node_archive }}"
+            dest: "{{ _restore_node_stage }}"
+            remote_src: true
+
+        - name: Inspect required staged endpoint files
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: >-
+            {{
+              [_restore_node_stage ~ '/node-state/etc/icinga2/icinga2.conf',
+               _restore_node_stage ~ '/node-state/var/lib/icinga2/certs/' ~ inventory_hostname ~ '.crt',
+               _restore_node_stage ~ '/node-state/var/lib/icinga2/certs/' ~ inventory_hostname ~ '.key',
+               _restore_node_stage ~ '/node-state/var/lib/icinga2/certs/ca.crt']
+              + ([_restore_node_stage ~ '/node-state/var/lib/icinga2/icingadb.env']
+                 if inventory_hostname in groups['master'] else [])
+            }}
+          register: _restore_staged_node_files
+
+        - name: Require complete staged endpoint state
+          ansible.builtin.assert:
+            that:
+              - item.stat.exists
+              - item.stat.isreg
+              - item.stat.size | int > 0
+            fail_msg: "Archive {{ _restore_node_archive_name }} thiếu/rỗng {{ item.item }}."
+          loop: "{{ _restore_staged_node_files.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Verify staged endpoint certificate against the restored/current CA
+          ansible.builtin.command:
+            argv:
+              - openssl
+              - verify
+              - -CAfile
+              - "{{ _restore_node_stage }}/node-state/var/lib/icinga2/certs/ca.crt"
+              - >-
+                {{ _restore_node_stage }}/node-state/var/lib/icinga2/certs/{{ inventory_hostname }}.crt
+          changed_when: false
+
+        - name: Inspect application containers before shutdown
+          community.docker.docker_container_info:
+            name: "{{ item }}"
+          loop: >-
+            {{
+              (['icingaweb2-director-daemon', 'icingaweb2', 'icingadb', 'icinga2']
+               if inventory_hostname in groups['master'] else ['icinga2'])
+            }}
+          register: _restore_application_containers
+
+        - name: Stop existing application containers before replacing bind-mounted state
+          community.docker.docker_container:
+            name: "{{ item.item }}"
+            state: stopped
+          loop: "{{ _restore_application_containers.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          when: item.exists | default(false)
+
+        - name: Create local rollback directory for existing-cluster restore
+          ansible.builtin.file:
+            path: "{{ _restore_safety_dir }}"
+            state: directory
+            mode: "0700"
+          when: restore_mode == 'existing'
+
+        - name: Preserve current endpoint state before overwriting it
+          ansible.builtin.shell: |
+            set -euo pipefail
+            safety_stage=$(mktemp -d /tmp/icinga-before-restore.XXXXXX)
+            trap 'rm -rf "$safety_stage"' EXIT
+            install -d -m 0700 "$safety_stage/node-state/etc" "$safety_stage/node-state/var/lib/icinga2"
+            cp -a -- {{ _restore_node_config | quote }} "$safety_stage/node-state/etc/icinga2"
+            cp -a -- {{ (_restore_node_lib + '/certs') | quote }} "$safety_stage/node-state/var/lib/icinga2/certs"
+            if [ -s {{ (_restore_node_lib + '/icingadb.env') | quote }} ]; then
+              cp -a -- {{ (_restore_node_lib + '/icingadb.env') | quote }} \
+                "$safety_stage/node-state/var/lib/icinga2/icingadb.env"
+            fi
+            tar --numeric-owner -C "$safety_stage" -czf \
+              {{ (_restore_safety_dir + '/icinga2-' + inventory_hostname + '-before-' + restore_backup_ts + '.tar.gz') | quote }} \
+              node-state
+            chmod 0600 \
+              {{ (_restore_safety_dir + '/icinga2-' + inventory_hostname + '-before-' + restore_backup_ts + '.tar.gz') | quote }}
+          args:
+            executable: /bin/bash
+          when: restore_mode == 'existing'
+
+        - name: Replace endpoint config and identity from staged archive
+          ansible.builtin.shell: |
+            set -euo pipefail
+            rm -rf -- {{ _restore_node_config | quote }} {{ (_restore_node_lib + '/certs') | quote }}
+            install -d -m 0750 {{ icinga_etc_dir | quote }} {{ _restore_node_lib | quote }}
+            cp -a -- {{ (_restore_node_stage + '/node-state/etc/icinga2') | quote }} \
+              {{ _restore_node_config | quote }}
+            cp -a -- {{ (_restore_node_stage + '/node-state/var/lib/icinga2/certs') | quote }} \
+              {{ (_restore_node_lib + '/certs') | quote }}
+            if [ -s {{ (_restore_node_stage + '/node-state/var/lib/icinga2/icingadb.env') | quote }} ]; then
+              cp -a -- {{ (_restore_node_stage + '/node-state/var/lib/icinga2/icingadb.env') | quote }} \
+                {{ (_restore_node_lib + '/icingadb.env') | quote }}
+            fi
+            chown -R 5665:5665 {{ _restore_node_config | quote }} {{ (_restore_node_lib + '/certs') | quote }}
+            if [ -e {{ (_restore_node_lib + '/icingadb.env') | quote }} ]; then
+              chown 5665:5665 {{ (_restore_node_lib + '/icingadb.env') | quote }}
+              chmod 0600 {{ (_restore_node_lib + '/icingadb.env') | quote }}
+            fi
+          args:
+            executable: /bin/bash
+      always:
+        - name: Remove endpoint staging files
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ _restore_node_stage }}"
+            - "{{ _restore_node_archive }}"
+
+    - name: Print the required continuation
+      ansible.builtin.debug:
+        msg: >-
+          Đã restore node-state {{ inventory_hostname }} và để application containers dừng. Chạy
+          đúng chuỗi restore DB/Web/deploy trong QUICKSTART.md; không khởi động thủ công giữa chừng.

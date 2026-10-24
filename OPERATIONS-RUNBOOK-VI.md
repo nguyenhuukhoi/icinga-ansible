@@ -59,10 +59,10 @@ Các giới hạn được kiểm tra cứng trong `prechecks`:
 8. Không downgrade MariaDB/Galera tại chỗ. Rollback phải trả tag cũ rồi restore physical backup `pre-upgrade`.
 9. Không đặt VIP/LB trước cổng Icinga cluster 5665. Nếu dùng LB, chỉ đặt trước Web và bật sticky session vì Icinga Web dùng PHP file session.
 10. Backup còn nằm trên chính deployment node chưa phải backup DR. Phải đồng bộ sang storage độc lập.
-11. Inventory thường nằm trong repo nên không thuộc `config-*.tar.gz`; lưu inventory/host vars và
-    revision code riêng cùng bundle DR.
-12. `zones.d`, package static monitoring và credential nằm ngoài `/etc/icinga-ansible` không thuộc
-    `backup-full`; operator phải backup/restore bằng pipeline riêng.
+11. Inventory nằm trong `inventory-*.tar.gz`; revision code, logical topology, IP và image version
+    nằm trong `cluster-*.json`. Vẫn phải giữ source code đúng revision ở SCM.
+12. `backup-full` chụp nguyên cây Icinga 2 từng endpoint, gồm `zones.d`, secrets/plugin, cert và
+    identity. Nội dung ngoài các cây được liệt kê vẫn phải lưu bằng SCM/vault/storage riêng.
 
 ## 3. Kiến trúc mong muốn
 
@@ -102,7 +102,7 @@ Deployment node giữ desired state và artifact DR:
 | Global settings | `/etc/icinga-ansible/globals.yml` | topology logic, version, module, DB, proxy |
 | Secrets | `/etc/icinga-ansible/passwords.yml` | DB, Redis, API và Web admin của hạ tầng |
 | Override | `/etc/icinga-ansible/config/` | cấu hình ghi đè theo service/host/group/zone |
-| Full backup | `/var/backups/icinga-ansible-config/` | config, DB, PKI và Web config được fetch về deployment node |
+| Full backup | `/var/backups/icinga-ansible-config/` | inventory/topology, config, DB/PKI/Web và state từng endpoint |
 | Runtime data | `/var/lib/icinga-ansible/` trên service node | DB datadir, PKI, Redis và state container |
 | Rendered config | `/etc/icinga-ansible/` trên service node | output do Ansible render cho container |
 | DB backup gốc | `/var/backups/icinga-db/` trên `galera[0]` | physical mariabackup và pointer |
@@ -622,6 +622,8 @@ Kết quả trên deployment node:
 ```text
 /var/backups/icinga-ansible-config/
 ├── config-<timestamp>.tar.gz
+├── inventory-<timestamp>.tar.gz
+├── cluster-<timestamp>.json
 ├── icingaweb2-master1-<timestamp>.tar.gz
 ├── icingaweb2-master2-<timestamp>.tar.gz
 ├── manifest-<timestamp>.sha256
@@ -629,13 +631,19 @@ Kết quả trên deployment node:
 ├── database/
 │   ├── db-full-<timestamp>.xb.gz
 │   └── LATEST_FULL
-└── pki/
-    └── pki-<timestamp>.tar.gz
+├── pki/
+│   └── pki-<timestamp>.tar.gz
+└── nodes/
+    ├── icinga2-master1-<timestamp>.tar.gz
+    └── icinga2-master2-<timestamp>.tar.gz
 ```
 
 Ý nghĩa:
 
 - `config-*`: toàn bộ config đầu vào trên deployment node, gồm globals, passwords và override;
+- `inventory-*`, `cluster-*`: inventory và metadata logical topology/version/IP;
+- `nodes/icinga2-*`: config/cert/identity từng endpoint, gồm `zones.d`, secrets/plugin và
+  `icingadb.env` trên master;
 - `db-full-*`: physical DB chứa database Icinga DB, Web và Director;
 - `LATEST_FULL`: timestamp của full DB backup mới nhất;
 - `pki-*`: CA certificate/private key;
@@ -644,10 +652,9 @@ Kết quả trên deployment node:
 
 Artifact DB/PKI được kiểm tra tồn tại, kích thước và checksum trong lúc fetch. Pointer chỉ được cập nhật sau khi backup hợp lệ.
 
-Không nằm trong bundle: inventory/host vars trong repo; package static monitoring; credential bên
-ngoài `/etc/icinga-ansible`; và mọi nội dung `zones.d`. Lưu các phần này trong
-SCM/vault/storage riêng. Với external DB, `backup-full` không thay quy trình backup database của DBA,
-nhưng vẫn snapshot CA/PKI và bắt buộc artifact đó có trong manifest.
+Không nằm trong bundle: source code và nội dung đặt ngoài config/node-state đã liệt kê. Lưu các phần
+đó trong SCM/vault/storage riêng. Với external DB, `backup-full` không thay quy trình backup database
+của DBA, nhưng vẫn snapshot inventory, node-state và CA/PKI vào manifest.
 
 ### 12.3. Kiểm tra backup ngay sau khi tạo
 
@@ -736,9 +743,10 @@ Luồng đã sửa và test:
 
 Nếu các node không có majority UUID rõ ràng, dừng để điều tra. Không tự chọn node theo cảm tính vì có thể làm mất transaction mới hơn.
 
-### 13.2. Restore một full backup
+### 13.2. Restore physical DB từ một full bundle
 
-Restore full backup mới nhất đã được fetch về deployment node:
+Đây chỉ là bước database trong full-cluster restore. Restore DB mới nhất đã được fetch về máy điều
+khiển; quy trình đầy đủ nằm ở mục 14.6 và `QUICKSTART-BACKUP-RESTORE.md`:
 
 ```bash
 ./tools/icinga-ansible mariadb-recovery -i inventory-prod \
@@ -946,11 +954,11 @@ Ansible chỉ phục hồi hạ tầng. Sau restore:
 
 1. Nếu dùng Director, operator tự kiểm tra database/module, tự Kickstart khi thật sự cần và tự deploy
    Host/Service/CheckCommand. Project không tự import hoặc xóa object.
-2. Nếu dùng static DSL, phục hồi package ngoài project vào `zones.d/<ZoneName>` trên master CA,
-   validate `icinga2 daemon -C` rồi reload để Icinga config-sync sang peer.
+2. Full-cluster restore đưa snapshot `zones.d/<ZoneName>` trở lại bằng `restore-node-state`; operator
+   vẫn phải kiểm tra nó khớp source control, validate rồi reload/config-sync nếu có thay đổi mới hơn.
 3. Không đặt static monitoring vào `/etc/icinga-ansible/config/icinga2/zones.d`; project không render,
-   reconcile, phân phối, backup hay restore `zones.d`. Runtime thấy nó qua bind mount toàn cây config
-   trên master và preflight dùng `icinga2 daemon -C` để từ chối config hiệu lực bị lỗi.
+   reconcile hoặc phân phối `zones.d`. Runtime dùng cây `/etc/icinga-ansible/icinga2` bind-mount RW;
+   `backup-full`/`restore-node-state` chỉ snapshot/restore cây hiện hữu cho DR.
 4. Chạy lại `icinga-ansible check` sau khi pipeline monitoring hoàn tất.
 
 ### 14.6. Full DR chuẩn: dựng cụm mới 2 master + 3 Galera từ `backup-full`
@@ -976,7 +984,7 @@ cd /opt/icinga-ansible
 CONFIRM=yes-i-really-really-mean-it ./tools/icinga-ansible restore-config \
   --config-backup "$BACKUP_ROOT/config-$BACKUP_TS.tar.gz"
 
-# 3. Phục hồi inventory riêng, sửa ansible_host sang IP mới và sửa satellite_zones nếu topology đổi.
+# 3. Giải inventory từ bundle. Chỉ sửa ansible_host nếu IP đổi; logical topology phải giữ nguyên.
 $EDITOR "$INV"
 $EDITOR /etc/icinga-ansible/globals.yml
 ansible-inventory -i "$INV" --graph
@@ -986,18 +994,17 @@ ansible -i "$INV" all_hosts -m ping
 ./tools/icinga-ansible bootstrap-servers -i "$INV"
 ./tools/icinga-ansible prechecks         -i "$INV"
 
-# 5. Tuỳ chọn nhưng khuyến nghị nếu cần giữ trust chain cũ:
-#    copy PKI lên đúng master[0]/ca_host trước deploy đầu tiên.
-CA_IP=10.0.0.11  # thay bằng ansible_host mới của master1
-scp "$BACKUP_ROOT/pki/pki-$BACKUP_TS.tar.gz" ubuntu@"$CA_IP":/home/ubuntu/
-./tools/icinga-ansible restore-pki -i "$INV" \
-  -e pki_backup="/home/ubuntu/pki-$BACKUP_TS.tar.gz" -e confirm=yes
+# 5. Restore CA, config, certificate và identity mọi endpoint trước deploy đầu tiên.
+./tools/icinga-ansible restore-node-state -i "$INV" \
+  -e restore_mode=clean -e restore_backup_ts="$BACKUP_TS" \
+  -e confirm=yes-i-really-really-mean-it
 
 # 6. Dựng runtime tạm rồi restore DB theo đúng timestamp đã verify.
 ./tools/icinga-ansible pull   -i "$INV"
 ./tools/icinga-ansible deploy -i "$INV"
 ./tools/icinga-ansible mariadb-recovery -i "$INV" \
   -e recovery_mode=restore-backup \
+  -e restore_backup_tag=full \
   -e restore_backup_ts="$BACKUP_TS" \
   -e confirm=yes
 
@@ -1013,12 +1020,11 @@ scp "$BACKUP_ROOT/pki/pki-$BACKUP_TS.tar.gz" ubuntu@"$CA_IP":/home/ubuntu/
 ./tools/icinga-ansible check  -i "$INV"
 ```
 
-Nếu chọn CA mới, bỏ qua duy nhất bước `restore-pki` và enroll lại mọi agent/client cũ. Nếu tên master
-khác bundle hoặc số master thay đổi, bỏ qua `restore-web`, dựng Web config mới và review/chuyển thủ
-công phần cần giữ; tuyệt đối không đổi tên archive để ép restore.
+Full-cluster restore yêu cầu cùng logical topology. Nếu muốn đổi tên/số node, restore topology cũ
+trước rồi dùng quy trình add/remove node; không đổi tên archive để ép restore.
 
-Sau khi hạ tầng PASS, restore `zones.d`, plugin, SSH key và credential qua pipeline operator
-riêng; validate config, reload Icinga 2, chạy lại `check`, rồi tạo một `backup-full` baseline mới.
+Sau khi hạ tầng PASS, đối chiếu `zones.d`, plugin và credential đã restore với source control/vault,
+chạy lại `check`, rồi tạo một `backup-full` baseline mới.
 
 ### 14.7. Full DR trên server sạch nhưng dùng lại đúng fixed IP cũ
 
@@ -1036,15 +1042,13 @@ riêng; validate config, reload Icinga 2, chạy lại `check`, rồi tạo mộ
    ```
 
    Lặp lại cho mọi master/Galera, rồi chạy `ansible -i "$INV" all_hosts -m ping`.
-5. Server cùng IP nhưng disk sạch vẫn phải `restore-pki` trước deploy đầu tiên và
+5. Server cùng IP nhưng disk sạch vẫn phải `restore-node-state` mode `clean` trước deploy đầu tiên và
    `recover-db-only` sau restore DB. IP không phải Icinga DB environment identity.
-6. Chỉ restore `zones.d` sau khi infrastructure `check` PASS; đây là package operator độc lập với
-   `backup-full`.
+6. `zones.d`, plugin và credential đi cùng node-state; không cần stage thủ công lần hai.
 
-Bài destructive regression ngày 2026-10-23 đã xóa và tạo lại 2 master + 3 Galera bằng đúng fixed IP
-cũ. Kết quả: full `check` PASS, Galera 3/3, CA fingerprint và environment ID khớp bản gốc, Web login
-PASS, master2 nhận đủ 6 Host qua config-sync và 6/6 ICMP check UP. Kết quả cốt lõi được giữ trong
-bảng regression ở mục 19.3 của runbook này.
+Bài destructive regression ngày 2026-10-24 đã xóa/tạo lại 2 master + 3 Galera trên đúng fixed IP cũ,
+rồi lặp lại với năm IP mới. Cả hai case full `check` PASS, Galera 3/3, CA/cert và environment ID giữ
+nguyên, Web/API/Icinga DB heartbeat healthy và Director chỉ chạy trên master1.
 
 ### 14.8. Dựng cụm mới và chỉ import database ứng dụng Icinga
 
@@ -1310,9 +1314,9 @@ Không chạy destroy để “sửa” một lỗi chưa xác định. Hãy dù
 - chỉ cập nhật pointer khi cả artifact DB và archive PKI cùng timestamp đều hợp lệ;
 - archive trực tiếp CA canonical và xác nhận có cả `ca.crt` lẫn `ca.key` trước khi publish pointer;
 - thêm backup DB theo lịch và retention;
-- `backup-full` fetch DB và PKI về deployment node;
-- chỉ ghi `LATEST_COMPLETE` sau khi config, DB, PKI và archive Web của mọi master đều tồn tại, không
-  rỗng và đã được ghi vào manifest SHA-256;
+- `backup-full` fetch inventory/topology, DB, PKI, Web và node-state về deployment node;
+- chỉ ghi `LATEST_COMPLETE` sau khi mọi artifact bắt buộc tồn tại, không rỗng và đã được ghi vào
+  manifest SHA-256;
 - đưa backup controller ra ngoài `/etc/icinga-ansible` để `destroy` không xóa nhầm;
 - thêm controller fallback: nếu DB artifact mất trên `galera[0]`, restore tự lấy từ deployment node;
 - validate gzip/mbstream và metadata trước khi dừng MariaDB;
@@ -1514,21 +1518,22 @@ dùng Director làm nguồn topology:
 Sau toàn bộ drill, inventory production vẫn là hai master và ba Galera; `check` cuối cùng
 `failed=0`. Bằng chứng cốt lõi được giữ ngay trong bảng regression ở mục này.
 
-### 19.3. Disaster recovery cùng fixed IP ngày 2026-10-23
+### 19.3. Full-cluster disaster recovery ngày 2026-10-24
 
-Đã chạy destructive regression bằng backup `20261023-065951`: xóa toàn bộ 2 master + 3 Galera,
-tạo năm VM disk sạch với đúng fixed IP cũ, rồi restore config, CA, physical DB, environment ID và Web.
+Đã chạy bằng bundle `20261024-005118`, manifest 9/9 artifact. Case hiện tại restore tại chỗ; sau đó
+xóa toàn bộ 2 master + 3 Galera và restore hai lần trên VM disk sạch: cùng IP cũ và năm IP mới.
 
 | Case | Kết quả | Bằng chứng chính |
 |---|---|---|
-| Server sạch dùng lại đúng 5 IP cũ | PASS | OpenStack server ID thay đổi, inventory/IP giữ nguyên |
-| `restore-config` + bootstrap | PASS | 5/5 host SSH/Ansible sau khi thay host key |
-| Restore PKI | PASS | CA SHA-256 trước/sau khớp tuyệt đối |
+| Restore lên cụm hiện tại (`existing`) | PASS | CA khớp bundle, node-state rollback được lưu trước khi ghi đè |
+| Server sạch dùng lại đúng 5 IP cũ | PASS | OpenStack server ID/disk thay đổi, inventory/IP giữ nguyên |
+| Server sạch dùng 5 IP mới | PASS | chỉ đổi `ansible_host`; logical topology giữ nguyên và guard PASS |
+| `restore-config` + inventory từ bundle | PASS | inventory archive khớp SHA-256 với inventory vận hành |
+| Restore node-state (`clean`) | PASS | CA/key, cert mỗi master, `zones.d`, secrets/plugin và identity được xác minh/restore |
 | Restore physical DB + identity | PASS | environment ID `3BFA66B31694A260CFCBA2B331EEA7B00AFDFBDF` được giữ nguyên |
 | Restore Web | PASS | Web login pass trên hai master; Director chỉ ở master1 |
 | Galera | PASS | Primary/Synced/Ready, cluster size 3/3 |
-| Restore operator config riêng | PASS | master2 nhận 6 Host qua config-sync; 6/6 ICMP UP, chia 3 check/master |
-| Full `check` cuối | PASS | mọi host `failed=0` |
+| Full `check` cả hai IP model | PASS | API/Web/heartbeat/config sync/Director/Galera đều `failed=0` |
 
 Bằng chứng cốt lõi và mapping kết quả được giữ ngay trong bảng regression ở mục này.
 

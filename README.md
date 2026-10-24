@@ -105,7 +105,8 @@ satellite
 | `check` | Kiểm tra container, API, Web, Icinga DB, Redis và Galera |
 | `add-master` / `add-node` | Thêm master hoặc satellite/client đã có trong inventory |
 | `remove-master` / `remove-node` | Xoá runtime của node được chỉ định |
-| `backup-full` | Backup config, database, PKI và Web |
+| `backup-full` | Backup inventory/topology, desired config, DB/PKI/Web và state từng Icinga endpoint |
+| `restore-node-state` | Restore CA, config, cert và identity endpoint lên cụm hiện tại hoặc VM sạch |
 | `upgrade-plan` / `upgrade` / `rollback` | Lập kế hoạch, nâng cấp và rollback |
 | `destroy` | Xoá container/data/config runtime, giữ config/secrets trên deployment node |
 
@@ -132,8 +133,9 @@ cần runbook DB riêng; các lệnh node ở trên dành cho endpoint Icinga.
 ```
 
 Luôn chạy `backup-full`, kiểm tra `LATEST_COMPLETE`/manifest và copy cả bundle ra storage độc lập
-trước thao tác phá huỷ. Inventory và nội dung monitoring trong `zones.d` phải được backup bằng
-SCM/pipeline operator riêng.
+trước thao tác phá huỷ. Bundle chứa inventory, metadata topology và nguyên cây Icinga 2 trên từng
+endpoint, gồm `zones.d`, secrets/plugin, certificate và runtime identity. Git/vault vẫn là nguồn quản
+lý khuyến nghị cho monitoring content; backup không biến project thành công cụ reconcile object.
 
 ## Tự quản lý Host/Service/Check
 
@@ -143,9 +145,10 @@ quản lý object trong UI. Ansible không import hoặc reconcile object Direct
 Nếu dùng static DSL, hãy quản lý và triển khai bằng quy trình riêng của operator. Project không render
 hoặc phân phối `zones.d`; thư mục xuất hiện trong container vì toàn bộ cây config host được bind-mount
 RW. Trước khi thay đổi runtime, tool chạy `icinga2 daemon -C` trên config hiệu lực để không đưa daemon
-vào trạng thái lỗi. `remove-*`/`destroy` xóa nguyên config của đúng target, nên operator phải backup
-monitoring content riêng. Sửa file monitoring không yêu cầu chạy `reconfigure`.
+vào trạng thái lỗi. `remove-*`/`destroy` xóa nguyên config của đúng target; hãy chạy `backup-full` và
+vẫn giữ monitoring content trong Git/vault. Sửa file monitoring không yêu cầu chạy `reconfigure`.
 
-Xem mục 6–7 trong [QUICKSTART.md](QUICKSTART.md) để làm theo từng lệnh thêm/xóa node và dựng lại cụm
-từ full backup; [OPERATIONS-RUNBOOK-VI.md](OPERATIONS-RUNBOOK-VI.md) là runbook vận hành/sự cố đầy
-đủ. Ranh giới kỹ thuật nằm ở [design.md](design.md); giới hạn còn lại được ghi tại [TODO.md](TODO.md).
+Xem [QUICKSTART-BACKUP-RESTORE.md](QUICKSTART-BACKUP-RESTORE.md) để làm theo ba kịch bản full restore;
+mục 6–7 trong [QUICKSTART.md](QUICKSTART.md) có thêm/xóa node và giải thích chi tiết.
+[OPERATIONS-RUNBOOK-VI.md](OPERATIONS-RUNBOOK-VI.md) là runbook vận hành/sự cố đầy đủ. Ranh giới kỹ
+thuật nằm ở [design.md](design.md); giới hạn còn lại được ghi tại [TODO.md](TODO.md).

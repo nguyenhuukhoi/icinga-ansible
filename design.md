@@ -95,7 +95,8 @@ SSH key, plugin và credential API hoàn toàn local trên từng executor; depl
 phối chúng. Role tạo `/etc/icinga-ansible/icinga2/secrets` trên từng master. Thư mục này thuộc cây
 config đã bind-mount RW nguyên khối vào `/data/etc/icinga2`, nên không cần mount riêng. Role không
 render/reconcile credential bên trong; sửa file trên host được container thấy ngay. Xóa target bằng
-`remove-*`/`destroy` cũng xóa thư mục local này, vì vậy credential phải được backup riêng.
+`remove-*`/`destroy` cũng xóa thư mục local này. `backup-full` chụp nguyên cây endpoint để DR; Git/vault
+vẫn phải là nguồn quản lý dài hạn cho credential và monitoring content.
 
 ### 9.4. Custom image
 
@@ -104,9 +105,15 @@ Project không build image. Operator build/push image bất biến rồi khai `c
 
 ## 10. Backup và recovery
 
-`backup-full` gom config controller, MariaDB, PKI và Web config về destination ngoài config tree, tạo
-checksum/manifest rồi mới cập nhật `LATEST_COMPLETE`. Destroy không xoá backup destination.
-Recovery tách config, PKI, DB và Web để có thể kiểm soát thứ tự khôi phục.
+`backup-full` gom inventory/topology, config controller, physical MariaDB, PKI, Web config và nguyên
+state Icinga 2 của từng master/satellite/client về destination ngoài config tree. State endpoint gồm
+`zones.d`, secrets/plugin, certificate và `icingadb.env` trên master. Bundle tạo checksum/manifest rồi
+mới cập nhật `LATEST_COMPLETE`; destroy không xoá backup destination.
+
+`restore-node-state` có hai mode: `existing` chỉ rollback khi CA hiện tại khớp bundle và lưu rollback
+local; `clean` yêu cầu VM chưa có CA/cert/config. Logical hostname, thứ tự group, zone master và loại DB
+phải giống metadata, còn `ansible_host` có thể đổi. Sau node-state phải restore DB, environment ID và
+Web đúng thứ tự trước deploy/check cuối. Quickstart ngắn nằm ở `QUICKSTART-BACKUP-RESTORE.md`.
 
 ## 13. Upgrade
 

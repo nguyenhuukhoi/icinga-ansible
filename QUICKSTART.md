@@ -317,6 +317,9 @@ membership Galera; thêm/xóa Galera cần kế hoạch quorum, SST/IST và back
 
 ## 7. Backup, destroy và khôi phục
 
+Ba quy trình copy/paste ngắn (restore cụm hiện tại, VM sạch cùng IP, VM sạch khác IP) nằm tại
+[QUICKSTART-BACKUP-RESTORE.md](QUICKSTART-BACKUP-RESTORE.md). Phần dưới giải thích chi tiết.
+
 ### 7.1. Tạo và xác minh full backup
 
 ```bash
@@ -329,6 +332,9 @@ Mặc định bundle nằm tại `/var/backups/icinga-ansible-config` trên depl
 
 ```text
 config-<timestamp>.tar.gz
+inventory-<timestamp>.tar.gz
+cluster-<timestamp>.json
+nodes/icinga2-<endpoint>-<timestamp>.tar.gz
 icingaweb2-<master>-<timestamp>.tar.gz
 database/db-full-<timestamp>.xb.gz
 database/LATEST_FULL
@@ -350,20 +356,19 @@ test "$(cat database/LATEST_FULL)" = "$BACKUP_TS"
 find . -maxdepth 2 -type f -name "*$BACKUP_TS*" -ls
 ```
 
-Copy **cả cây thư mục**, không chỉ file DB, sang storage ngoài deployment node. Inventory thường nằm
-trong repo nên không thuộc `config-*.tar.gz`; phải lưu inventory/host vars cùng phiên bản code ở SCM
-hoặc backup riêng. Với external DB, DBA phải backup/restore database bằng quy trình riêng;
-`backup-full` vẫn luôn backup và đưa CA/PKI về deployment node.
+Copy **cả cây thư mục**, không chỉ file DB, sang storage ngoài deployment node. Inventory nằm trong
+`inventory-*.tar.gz`; revision code, logical topology, IP và image version nằm trong
+`cluster-*.json`. Với external DB, DBA phải backup/restore database bằng quy trình riêng;
+`backup-full` vẫn backup inventory, node-state và CA/PKI.
 
-`backup-full` không backup package monitoring static hoặc credential nằm ngoài
-`/etc/icinga-ansible`. Hãy lưu những phần đó trong Git/vault/storage riêng. Project không backup và
-không restore `zones.d`.
+`backup-full` backup nguyên cây Icinga 2 của từng endpoint, nên có `zones.d`, `secrets`, custom plugin,
+certificate và `icingadb.env` trên master. Nội dung nằm ngoài các cây đã nêu vẫn phải lưu trong
+Git/vault/storage riêng; backup không thay thế source control.
 
 Ví dụ copy off-site không xóa generation cũ ở đích:
 
 ```bash
 rsync -a "$BACKUP_ROOT/" backup-host:/srv/backup/icinga/prod/
-rsync -a "$INV" backup-host:/srv/backup/icinga/prod/inventory/
 ```
 
 ### 7.2. Dựng lại cụm mới từ full backup
@@ -371,10 +376,9 @@ rsync -a "$INV" backup-host:/srv/backup/icinga/prod/inventory/
 Quy trình dưới đây áp dụng khi mất toàn bộ service node và dựng lại topology 2 master + 3 Galera
 trên VM/IP mới. Dùng đúng version code và MariaDB đã tạo backup; chỉ upgrade sau khi restore PASS.
 
-Trước khi bắt đầu, đưa nguyên cây backup từ storage ngoài về đúng layout, clone đúng revision code,
-tạo venv và cài collection. Đặt inventory đã backup thành `ansible/inventory/restore-cluster` rồi sửa
-`ansible_host` sang IP mới. Nên giữ nguyên tên logic `master1`, `master2`, `galera1`... để archive Web
-và identity endpoint ánh xạ đúng.
+Trước khi bắt đầu, đưa nguyên cây backup từ storage ngoài về đúng layout, clone revision code ghi
+trong `cluster-*.json`, tạo venv và cài collection. Giải nén `inventory-*.tar.gz`; nếu IP đổi, chỉ sửa
+`ansible_host`. Phải giữ nguyên tên logic, thứ tự và membership group để node archive ánh xạ đúng.
 
 ```bash
 cd /opt/icinga-ansible
@@ -407,25 +411,19 @@ ansible-inventory -i "$INV" --graph
 ansible -i "$INV" all_hosts -m ping
 ```
 
-Bootstrap toàn bộ host mới:
+Bootstrap toàn bộ host mới rồi restore CA, config, certificate và identity của từng endpoint trước
+deploy đầu tiên:
 
 ```bash
 ./tools/icinga-ansible bootstrap-servers -i "$INV"
 ./tools/icinga-ansible prechecks         -i "$INV"
+./tools/icinga-ansible restore-node-state -i "$INV" \
+  -e restore_mode=clean -e restore_backup_ts="$BACKUP_TS" \
+  -e confirm=yes-i-really-really-mean-it
 ```
 
-Để giữ trust chain cũ, copy archive PKI lên đúng `master[0]` rồi restore **trước deploy đầu tiên**.
-Ví dụ CA host là `master1`:
-
-```bash
-CA_IP=10.0.0.11  # thay bằng ansible_host mới của master1
-scp "$BACKUP_ROOT/pki/pki-$BACKUP_TS.tar.gz" ubuntu@"$CA_IP":/home/ubuntu/
-./tools/icinga-ansible restore-pki -i "$INV" \
-  -e pki_backup="/home/ubuntu/pki-$BACKUP_TS.tar.gz" -e confirm=yes
-```
-
-Nếu chủ động dùng CA mới, bỏ qua đúng bước `restore-pki`; mọi agent/client cũ sẽ phải enroll lại.
-`restore-pki` sẽ từ chối chạy nếu CA host đã được deploy hoặc đã có một phần CA state.
+`restore-node-state` từ chối VM đã có CA/cert/config trong mode `clean`, xác minh manifest, CA/key,
+certificate từng endpoint và logical topology trước khi ghi dữ liệu.
 
 Dựng runtime tạm, restore physical database, khôi phục environment ID rồi restore Web:
 
@@ -435,6 +433,7 @@ Dựng runtime tạm, restore physical database, khôi phục environment ID r�
 
 ./tools/icinga-ansible mariadb-recovery -i "$INV" \
   -e recovery_mode=restore-backup \
+  -e restore_backup_tag=full \
   -e restore_backup_ts="$BACKUP_TS" \
   -e confirm=yes
 
@@ -451,9 +450,8 @@ Dựng runtime tạm, restore physical database, khôi phục environment ID r�
 so với thời điểm backup, không đổi tên archive để ép restore; hãy bỏ qua bước này, dựng Web config
 mới rồi chuyển thủ công phần cần giữ sau khi review.
 
-Cuối cùng, triển khai lại `zones.d`, plugin/credential và object monitoring bằng pipeline riêng của
-operator, validate `icinga2 daemon -C`, reload Icinga 2 rồi chạy `check` lại. Không trông chờ
-`deploy` đồng bộ nội dung operator.
+`zones.d`, plugin và credential đã trở lại từ node archive; `deploy` giữ chúng và chỉ hội tụ phần hạ
+tầng do role quản lý. Director database trở lại nhưng operator vẫn tự quản lý/deploy object Director.
 
 #### Trường hợp server sạch dùng lại đúng IP cũ
 
@@ -475,14 +473,13 @@ done
 ansible -i "$INV" all_hosts -m ping
 ```
 
-Sau đó chạy nguyên thứ tự ở trên: `restore-config`, `bootstrap-servers`, `restore-pki` trước deploy
-đầu tiên, `pull`, `deploy`, `mariadb-recovery`, `recover-db-only`, `restore-web`, deploy cuối và
-`check`. Cùng IP không thay thế việc restore CA hay environment ID: disk mới vẫn không có PKI và
-runtime identity cũ. `zones.d`, plugin và credential operator vẫn phải được backup/restore riêng.
+Sau đó chạy nguyên thứ tự ở trên: `restore-config`, `bootstrap-servers`, `restore-node-state` mode
+`clean`, `pull`, deploy tạm, `mariadb-recovery`, `recover-db-only`, `restore-web`, deploy cuối và
+`check`. Cùng IP không thay thế việc restore CA, certificate hay environment ID.
 
-Bài destructive regression ngày 2026-10-23 đã xóa và dựng lại 2 master + 3 Galera bằng đúng năm IP
-cũ, sau đó xác nhận CA fingerprint, environment ID, Web login, Galera 3/3 và sáu ICMP Host check đều
-khớp/healthy; kết quả tóm tắt được giữ trong mục 19.3 của `OPERATIONS-RUNBOOK-VI.md`.
+Bài destructive regression ngày 2026-10-24 đã xóa và dựng lại 2 master + 3 Galera bằng đúng năm IP
+cũ, rồi lặp lại trên năm IP mới. Cả hai lần đều xác nhận CA/cert, environment ID, Icinga API, Web
+login, Icinga DB heartbeat/config sync, Director chỉ master1 và Galera 3/3 healthy.
 
 #### Trường hợp chỉ import database ứng dụng vào cụm mới
 
@@ -627,7 +624,7 @@ Xác minh hai master dùng cùng environment ID và lịch sử vẫn đọc đ�
 
 ```bash
 ansible -i "$TARGET_INV" master -b \
-  -a 'cat /var/lib/icinga-ansible/icinga2/icingadb.env'
+  -a 'cat /var/lib/icinga-ansible/icinga2/data/var/lib/icinga2/icingadb.env'
 
 ansible -i "$TARGET_INV" "$TARGET_DB_HOST" -b -m shell -a \
   'docker exec mariadb mariadb \
@@ -680,9 +677,10 @@ ansible -i "$INV" icinga -b -a 'docker exec icinga2 icinga2 daemon -C'
 
 # Hai master phải in cùng environment ID JSON.
 ansible -i "$INV" master -b \
-  -a 'cat /var/lib/icinga-ansible/icinga2/icingadb.env'
+  -a 'cat /var/lib/icinga-ansible/icinga2/data/var/lib/icinga2/icingadb.env'
 
 # Nếu giữ PKI, hai fingerprint dưới đây phải giống nhau.
+CA_IP=10.0.0.11  # ansible_host của master[0]
 tar -xOzf "$BACKUP_ROOT/pki/pki-$BACKUP_TS.tar.gz" \
   --wildcards '*/ca.crt' | openssl x509 -noout -fingerprint -sha256
 ssh ubuntu@"$CA_IP" \

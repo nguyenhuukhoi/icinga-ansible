@@ -3,12 +3,14 @@
 # như y hệt cũ (thiết kế 2026-07-24, theo yêu cầu người dùng "cơ chế backup và restore ok... khi hệ
 # thống mất hết thì dựng lại hệ thống mới với topo tương tự và restore lại như cũ").
 #
-# Gồm 3 phần, gộp vào 1 lệnh cho tiện, nhưng MỖI PHẦN độc lập, không phụ thuộc nhau:
+# Gồm 4 phần, gộp vào 1 lệnh cho tiện, nhưng mỗi artifact có checksum độc lập:
 #   1. Config trên deployment node (globals.yml, passwords.yml, MỌI override — config/) — đây là
-#      "recipe" để tái tạo lại toàn bộ hạ tầng + secrets, quan trọng nhất, nhẹ nhất.
+#      "recipe" để tái tạo lại toàn bộ hạ tầng + secrets; kèm inventory/topology snapshot.
 #   2. Database + PKI: managed DB tái dùng role mariadb với tag "full"; external DB bỏ qua database
 #      của DBA nhưng vẫn snapshot CA/PKI độc lập để full backup luôn dựng lại được trust chain.
-#   3. icingaweb2 config trên MỖI master (resources.ini/config.ini/...) — vì cơ chế "seed 1 lần, mount
+#   3. Icinga 2 node state trên MỖI master/satellite/client: toàn bộ config bind-mount (bao gồm
+#      zones.d, secrets, custom plugin), certificate endpoint và icingadb.env trên master.
+#   4. icingaweb2 config trên MỖI master (resources.ini/config.ini/...) — vì cơ chế "seed 1 lần, mount
 #      RW" (xem design.md mục 4.1) khiến sửa qua UI chỉ nằm trên node, KHÔNG có trong bất kỳ override
 #      nào — nếu không backup riêng, mọi thứ sửa qua UI sẽ mất khi rebuild.
 #
@@ -23,7 +25,7 @@
 # liệu thật), rebuild lại từ đầu bằng cách chạy checks lại là đủ, không cần khôi phục.
 # =============================================================================
 
-- name: "Backup full (1/3) — config trên deployment node"
+- name: "Backup full (1/4) — config, inventory và topology trên deployment node"
   hosts: localhost
   connection: local
   # KHÔNG "become: true" ở CẤP PLAY (khác destroy.yml) — icinga_etc_dir (/etc/icinga-ansible) vốn đã
@@ -91,7 +93,90 @@
         group: "{{ lookup('pipe', 'id -gn') }}"
         mode: "0600"
 
-- name: "Backup full (2/3) — managed database + PKI (role mariadb, tag 'full')"
+    - name: Kiểm tra inventory nguồn được CLI truyền vào
+      ansible.builtin.stat:
+        path: "{{ backup_inventory_source | default('') }}"
+      register: _full_inventory_source
+
+    - name: Chặn backup không có snapshot inventory hợp lệ
+      ansible.builtin.assert:
+        that:
+          - backup_inventory_source | default('') | length > 0
+          - _full_inventory_source.stat.exists
+          - _full_inventory_source.stat.isreg or _full_inventory_source.stat.isdir
+        fail_msg: >-
+          backup-full cần backup_inventory_source là file/thư mục inventory hiện hữu. Hãy chạy qua
+          tools/icinga-ansible để inventory được snapshot cùng bundle.
+
+    - name: Archive inventory đã dùng để tạo backup
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -czf
+          - "{{ icinga_config_backup_dir }}/inventory-{{ backup_ts }}.tar.gz"
+          - -C
+          - "{{ backup_inventory_source | dirname }}"
+          - "{{ backup_inventory_source | basename }}"
+
+    - name: Siết quyền inventory archive
+      ansible.builtin.file:
+        path: "{{ icinga_config_backup_dir }}/inventory-{{ backup_ts }}.tar.gz"
+        mode: "0600"
+
+    - name: Đọc cấu trúc inventory archive vừa tạo
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -tzf
+          - "{{ icinga_config_backup_dir }}/inventory-{{ backup_ts }}.tar.gz"
+      register: _full_inventory_members
+      changed_when: false
+
+    - name: Chặn inventory archive rỗng hoặc có đường dẫn không an toàn
+      ansible.builtin.assert:
+        that:
+          - _full_inventory_members.stdout_lines | length > 0
+          - _full_inventory_members.stdout_lines | select('match', '^/') | list | length == 0
+          - _full_inventory_members.stdout_lines | select('search', '(^|/)\.\.(/|$)') | list | length == 0
+          - >-
+            _full_inventory_members.stdout_lines
+            | select('match', '^' ~ (backup_inventory_source | basename | regex_escape) ~ '(/|$)')
+            | list | length > 0
+        fail_msg: "Inventory archive không đúng tar layout hoặc chứa đường dẫn không an toàn."
+
+    - name: Ghi metadata topology và IP tại thời điểm backup
+      ansible.builtin.copy:
+        content: |
+          {
+            "schema": 2,
+            "timestamp": {{ backup_ts | to_json }},
+            "code_revision": {{ backup_code_revision | default('unknown') | to_json }},
+            "database_type": {{ icinga_database_type | to_json }},
+            "master_zone_name": {{ icinga_master_zone_name | to_json }},
+            "groups": {
+              "master": {{ groups['master'] | default([]) | to_json }},
+              "satellite": {{ groups['satellite'] | default([]) | to_json }},
+              "client": {{ groups['client'] | default([]) | to_json }},
+              "galera": {{ groups['galera'] | default([]) | to_json }}
+            },
+            "ansible_hosts": {
+          {% set node_hosts = ((groups['master'] | default([])) + (groups['satellite'] | default([])) + (groups['client'] | default([])) + (groups['galera'] | default([]))) | unique | list %}
+          {% for node in node_hosts %}
+              {{ node | to_json }}: {{ (hostvars[node].ansible_host | default(node) | string) | to_json }}{{ ',' if not loop.last else '' }}
+          {% endfor %}
+            },
+            "images": {{ images | to_json }}
+          }
+        dest: "{{ icinga_config_backup_dir }}/cluster-{{ backup_ts }}.json"
+        mode: "0600"
+
+    - name: Tạo thư mục archive state của từng Icinga endpoint
+      ansible.builtin.file:
+        path: "{{ node_state_controller_backup_dir }}"
+        state: directory
+        mode: "0700"
+
+- name: "Backup full (2/4) — managed database + PKI (role mariadb, tag 'full')"
   # icinga_action + backup_tag được CLI truyền qua extra-vars; dùng tên riêng
   # thay vì biến reserved `action` của Ansible.
   hosts: galera
@@ -103,7 +188,7 @@
     - role: mariadb
       when: icinga_database_type == 'managed_db'
 
-- name: "Backup full (2b/3) — đưa database + PKI về deployment node"
+- name: "Backup full (2b/4) — đưa database + PKI về deployment node"
   hosts: "{{ (groups['galera'] | default([]) | first) | default('localhost', true) }}"
   become: true
   gather_facts: false
@@ -256,7 +341,128 @@
         - icinga_database_type == 'managed_db'
         - ca_host | length > 0
 
-- name: "Backup full (3/3) — icingaweb2 config (resources.ini... sửa qua UI) trên mọi master"
+- name: "Backup full (3/4) — Icinga 2 config và identity trên từng endpoint"
+  hosts: master:satellite:client
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _node_stage: "/tmp/icinga-node-state-{{ inventory_hostname }}-{{ backup_ts }}"
+    _node_archive: "/tmp/icinga2-{{ inventory_hostname }}-{{ backup_ts }}.tar.gz"
+    _node_config: "{{ icinga_etc_dir }}/icinga2"
+    _node_lib: "{{ icinga_base_dir }}/icinga2/data/var/lib/icinga2"
+  tasks:
+    - name: Kiểm tra config và certificate bắt buộc của endpoint
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ _node_config }}/icinga2.conf"
+        - "{{ _node_lib }}/certs/{{ inventory_hostname }}.crt"
+        - "{{ _node_lib }}/certs/{{ inventory_hostname }}.key"
+        - "{{ _node_lib }}/certs/ca.crt"
+      register: _node_required_sources
+
+    - name: Chặn full backup nếu endpoint chưa có state hoàn chỉnh
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.size | int > 0
+        fail_msg: >-
+          {{ inventory_hostname }} thiếu/rỗng {{ item.item }}. Full backup không được công bố khi
+          một endpoint trong inventory chưa deploy hoặc có identity không hoàn chỉnh.
+      loop: "{{ _node_required_sources.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Kiểm tra Icinga DB environment identity trên master
+      ansible.builtin.stat:
+        path: "{{ _node_lib }}/icingadb.env"
+      register: _node_master_environment
+      when: inventory_hostname in groups['master']
+
+    - name: Chặn full backup nếu master chưa có environment identity
+      ansible.builtin.assert:
+        that:
+          - _node_master_environment.stat.exists
+          - _node_master_environment.stat.isreg
+          - _node_master_environment.stat.size | int > 0
+        fail_msg: >-
+          {{ inventory_hostname }} thiếu icingadb.env; không thể tạo full-cluster backup có identity
+          khôi phục được.
+      when: inventory_hostname in groups['master']
+
+    - name: Tạo archive node-state trong staging an toàn
+      block:
+        - name: Tạo staging root sạch
+          ansible.builtin.file:
+            path: "{{ _node_stage }}"
+            state: "{{ item }}"
+            mode: "0700"
+          loop: [absent, directory]
+
+        - name: Copy config, certificate và environment identity vào staging
+          ansible.builtin.shell: |
+            set -euo pipefail
+            install -d -m 0700 \
+              {{ (_node_stage + '/node-state/etc') | quote }} \
+              {{ (_node_stage + '/node-state/var/lib/icinga2') | quote }}
+            cp -a -- {{ _node_config | quote }} \
+              {{ (_node_stage + '/node-state/etc/icinga2') | quote }}
+            cp -a -- {{ (_node_lib + '/certs') | quote }} \
+              {{ (_node_stage + '/node-state/var/lib/icinga2/certs') | quote }}
+            if [ -s {{ (_node_lib + '/icingadb.env') | quote }} ]; then
+              cp -a -- {{ (_node_lib + '/icingadb.env') | quote }} \
+                {{ (_node_stage + '/node-state/var/lib/icinga2/icingadb.env') | quote }}
+            fi
+            tar --numeric-owner -C {{ _node_stage | quote }} -czf {{ _node_archive | quote }} node-state
+            chmod 0600 {{ _node_archive | quote }}
+          args:
+            executable: /bin/bash
+
+        - name: Xác nhận archive node-state an toàn và có đủ identity
+          ansible.builtin.shell: |
+            set -euo pipefail
+            members=$(tar -tzf {{ _node_archive | quote }})
+            test -n "$members"
+            ! grep -Eq '(^|/)\.\.(/|$)|^/' <<<"$members"
+            ! grep -Ev '^node-state(/|$)' <<<"$members"
+            grep -Fxq 'node-state/etc/icinga2/icinga2.conf' <<<"$members"
+            grep -Fxq {{ ('node-state/var/lib/icinga2/certs/' + inventory_hostname + '.crt') | quote }} <<<"$members"
+            grep -Fxq {{ ('node-state/var/lib/icinga2/certs/' + inventory_hostname + '.key') | quote }} <<<"$members"
+            grep -Fxq 'node-state/var/lib/icinga2/certs/ca.crt' <<<"$members"
+            {% if inventory_hostname in groups['master'] %}
+            grep -Fxq 'node-state/var/lib/icinga2/icingadb.env' <<<"$members"
+            {% endif %}
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Fetch archive node-state về deployment node
+          ansible.builtin.fetch:
+            src: "{{ _node_archive }}"
+            dest: "{{ node_state_controller_backup_dir }}/icinga2-{{ inventory_hostname }}-{{ backup_ts }}.tar.gz"
+            flat: true
+            validate_checksum: true
+
+        - name: Siết quyền archive node-state trên deployment node
+          ansible.builtin.file:
+            path: "{{ node_state_controller_backup_dir }}/icinga2-{{ inventory_hostname }}-{{ backup_ts }}.tar.gz"
+            mode: "0600"
+          delegate_to: localhost
+          become: false
+      always:
+        - name: Dọn staging node-state trên endpoint
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ _node_stage }}"
+            - "{{ _node_archive }}"
+
+- name: "Backup full (4/4) — icingaweb2 config (resources.ini... sửa qua UI) trên mọi master"
   hosts: master
   become: true
   gather_facts: false
@@ -301,7 +507,23 @@
       ansible.builtin.set_fact:
         _full_bundle_paths:
           - "{{ icinga_config_backup_dir }}/config-{{ backup_ts }}.tar.gz"
+          - "{{ icinga_config_backup_dir }}/inventory-{{ backup_ts }}.tar.gz"
+          - "{{ icinga_config_backup_dir }}/cluster-{{ backup_ts }}.json"
           - "{{ pki_controller_backup_dir }}/pki-{{ backup_ts }}.tar.gz"
+
+    - name: Thêm archive node-state của từng Icinga endpoint vào danh sách bắt buộc
+      ansible.builtin.set_fact:
+        _full_bundle_paths: >-
+          {{
+            _full_bundle_paths
+            + [node_state_controller_backup_dir ~ '/icinga2-' ~ item ~ '-' ~ backup_ts ~ '.tar.gz']
+          }}
+      loop: >-
+        {{
+          ((groups['master'] | default([]))
+           + (groups['satellite'] | default([]))
+           + (groups['client'] | default([]))) | unique | list
+        }}
 
     - name: Thêm archive Icinga Web của từng master vào danh sách bắt buộc
       ansible.builtin.set_fact:
@@ -360,7 +582,9 @@
       ansible.builtin.debug:
         msg: >-
           Backup xong — toàn bộ artifact DR đã được gom về {{ icinga_config_backup_dir }}/:
-          config-{{ backup_ts }}.tar.gz, icingaweb2-*-{{ backup_ts }}.tar.gz,
+          config-{{ backup_ts }}.tar.gz, inventory-{{ backup_ts }}.tar.gz,
+          cluster-{{ backup_ts }}.json, nodes/icinga2-*-{{ backup_ts }}.tar.gz,
+          icingaweb2-*-{{ backup_ts }}.tar.gz,
           {{ ('database/db-' ~ (backup_tag | default('full') | replace('-', '_')) ~ '-' ~ backup_ts
               ~ '.xb.gz, database/LATEST_'
               ~ (backup_tag | default('full') | replace('-', '_') | upper) ~ ' và ')

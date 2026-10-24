@@ -98,19 +98,21 @@ DB ops:
                       seed giống nhau lên mọi master và xoá Redis state tạm (-e confirm=yes)
 
 Backup/restore toàn hệ thống (dựng lại hạ tầng mới sau sự cố mất hết — design.md mục 10.6):
-  backup-full         Backup config (deployment node) + DB+PKI + icingaweb2 config (mọi master),
+  backup-full         Backup inventory/topology + config deployment + DB/PKI/Web + Icinga 2 state
+                      của từng master/satellite/client (zones.d, secrets, plugin, cert, identity),
                       gom về /var/backups/icinga-ansible-config/ (CỐ Ý ngoài \$CONFIG_DIR — destroy
                       không đụng tới)
+  restore-node-state  Khôi phục CA + config/cert/identity từng Icinga endpoint từ backup-full;
+                      hỗ trợ -e restore_mode=existing|clean, cùng logical topology nhưng IP có thể đổi
   restore-pki         (tuỳ chọn, giữa bootstrap-servers và deploy) Pre-seed CA cũ lên ca_host để
                       giữ nguyên định danh PKI — bỏ qua bước này = deploy tự tạo CA mới hoàn toàn
   restore-web         Khôi phục config Icinga Web riêng của từng master từ backup-full
                       (-e restore_backup_ts=YYYYMMDD-HHMMSS -e confirm=yes), rồi chạy deploy
   # Custom image (design.md mục 9.6): icinga-ansible KHÔNG tự build — tự build/push bằng cách nào
   # cũng được, rồi khai custom_image_registry + custom_image_overrides trong globals.yml.
-  # Quy trình đầy đủ: restore-config --config-backup PATH -> bootstrap-servers -> [restore-pki
-  # -e pki_backup=PATH -e confirm=yes] -> deploy -> mariadb-recovery -e recovery_mode=restore-backup
-  # -e restore_backup_tag=full -e confirm=yes (role tự stage DB từ backup directory trên deployment
-  # node nếu artifact không còn trên galera[0])
+  # Full-cluster restore: restore-config -> bootstrap-servers -> restore-node-state -> pull -> deploy
+  # -> mariadb-recovery -> recover-db-only -> restore-web -> deploy -> check. restore-pki chỉ dành
+  # cho luồng CA-only/legacy, không chạy thêm trong full-cluster restore.
 
 Options:
   -i, --inventory PATH   inventory (mặc định: all-in-one)
@@ -304,7 +306,7 @@ init_config() {
   trap - EXIT
   echo "Đã restore cấu hình vào $CONFIG_DIR_REAL."
   echo "Tiếp theo: kiểm tra lại $GLOBALS (đổi IP/hostname nếu hạ tầng mới khác hạ tầng cũ), rồi"
-  echo "  bootstrap-servers -> (tuỳ chọn) restore-pki -> deploy -> mariadb-recovery -> recover-db-only"
+  echo "  bootstrap-servers -> restore-node-state -> pull -> deploy -> mariadb-recovery -> recover-db-only"
   echo "  -> restore-web -> deploy -> check. Xem QUICKSTART.md mục 7.2 để dùng đúng timestamp/confirm."
   exit 0
 }
@@ -440,6 +442,13 @@ case "$COMMAND" in
       "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 
+  restore-node-state)
+    cd "$ANSIBLE_DIR"
+    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/restore-node-state.yml" \
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
+      "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+
   backup-full)
     # KHÔNG dùng run(): playbook riêng (không phải $PLAYBOOK site). Kết quả gom về
     # icinga_config_backup_dir (mặc định /var/backups/icinga-ansible-config/, CỐ Ý ngoài $CONFIG_DIR
@@ -449,8 +458,15 @@ case "$COMMAND" in
     # icinga_action + backup_tag truyền tường minh để role chỉ chạy nhánh backup.
     cd "$ANSIBLE_DIR"
     BACKUP_TS="$(date +%Y%m%d-%H%M%S)"
+    BACKUP_CODE_REVISION="$(git -C "$HERE" rev-parse HEAD 2>/dev/null || printf unknown)"
+    if [[ "$BACKUP_CODE_REVISION" != unknown ]] &&
+       [[ -n "$(git -C "$HERE" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+      BACKUP_CODE_REVISION="${BACKUP_CODE_REVISION}+dirty"
+    fi
     "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/backup-full.yml" \
-      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "backup_ts=$BACKUP_TS" -e icinga_action=backup -e backup_tag=full \
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "backup_ts=$BACKUP_TS" \
+      -e "backup_inventory_source=$INVENTORY" -e "backup_code_revision=$BACKUP_CODE_REVISION" \
+      -e icinga_action=backup -e backup_tag=full \
       "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   restore-pki)
