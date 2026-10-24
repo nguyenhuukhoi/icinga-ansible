@@ -1,5 +1,5 @@
 ---
-# Restore the per-endpoint Icinga 2 state from a completed backup-full bundle.
+# Restore every managed node's /etc/icinga-ansible plus per-endpoint Icinga 2 identity.
 #
 # restore_mode=existing:
 #   Roll an existing cluster back to the selected bundle. The current CA must match the backup CA;
@@ -19,6 +19,7 @@
   vars_files:
     - "{{ playbook_dir }}/../group_vars/all.yml"
   vars:
+    _restore_all_nodes: "{{ groups['all_hosts'] | default([]) | unique | list }}"
     _restore_nodes: >-
       {{
         ((groups['master'] | default([]))
@@ -60,7 +61,7 @@
     - name: Require the same logical topology as the backup
       ansible.builtin.assert:
         that:
-          - _restore_metadata.schema | int == 2
+          - _restore_metadata.schema | int == 3
           - _restore_metadata.timestamp == restore_backup_ts
           - _restore_metadata.database_type == icinga_database_type
           - _restore_metadata.master_zone_name == icinga_master_zone_name
@@ -71,6 +72,49 @@
         fail_msg: >-
           Inventory hiện tại khác logical topology của backup. Được phép đổi ansible_host/IP nhưng
           phải giữ nguyên tên và thứ tự master/satellite/client/Galera, database type và master zone.
+
+    - name: Check every expected full node-config archive
+      ansible.builtin.stat:
+        path: >-
+          {{ node_config_controller_backup_dir }}/etc-icinga-ansible-{{ item }}-{{ restore_backup_ts }}.tar.gz
+      loop: "{{ _restore_all_nodes }}"
+      register: _restore_node_config_archives
+
+    - name: Reject a missing or empty full node-config archive
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.size | int > 0
+        fail_msg: "Thiếu full node-config archive của {{ item.item }}."
+      loop: "{{ _restore_node_config_archives.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: List full node-config archive members before extracting anywhere
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -tzf
+          - >-
+            {{ node_config_controller_backup_dir }}/etc-icinga-ansible-{{ item }}-{{ restore_backup_ts }}.tar.gz
+      loop: "{{ _restore_all_nodes }}"
+      register: _restore_node_config_members
+      changed_when: false
+      check_mode: false
+
+    - name: Reject unsafe full node-config archives
+      ansible.builtin.assert:
+        that:
+          - item.stdout_lines | length > 0
+          - item.stdout_lines | select('match', '^/') | list | length == 0
+          - item.stdout_lines | select('search', '(^|/)\.\.(/|$)') | list | length == 0
+          - item.stdout_lines | reject('match', '^node-config(/|$)') | list | length == 0
+          - "'node-config/etc/icinga-ansible/' in item.stdout_lines"
+        fail_msg: "Full node-config archive của {{ item.item }} không an toàn hoặc sai layout."
+      loop: "{{ _restore_node_config_members.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     - name: Check every expected endpoint archive
       ansible.builtin.stat:
@@ -133,6 +177,146 @@
           - _restore_pki_archive.stat.isreg
           - _restore_pki_archive.stat.size | int > 0
         fail_msg: "Thiếu PKI archive của full bundle {{ restore_backup_ts }}."
+
+- name: Restore the complete per-node /etc/icinga-ansible tree
+  hosts: all_hosts
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _restore_full_config_name: "etc-icinga-ansible-{{ inventory_hostname }}-{{ restore_backup_ts }}.tar.gz"
+    _restore_full_config_archive: "/tmp/{{ _restore_full_config_name }}"
+    _restore_full_config_stage: "/tmp/icinga-restore-config-{{ inventory_hostname }}-{{ restore_backup_ts }}"
+    _restore_safety_dir: "/var/backups/icinga-ansible-pre-restore"
+    _restore_service_containers: >-
+      {{
+        (['icingaweb2-director-daemon', 'icingaweb2', 'icingadb', 'icingadb-redis', 'icinga2']
+         if inventory_hostname in (groups['master'] | default([])) else [])
+        + (['icinga2']
+           if inventory_hostname in ((groups['satellite'] | default([])) + (groups['client'] | default([])))
+           else [])
+        + (['mariadb'] if inventory_hostname in (groups['galera'] | default([])) else [])
+      }}
+  tasks:
+    - name: Inspect current full node config tree
+      ansible.builtin.stat:
+        path: "{{ icinga_etc_dir }}"
+      register: _restore_current_full_config
+
+    - name: Require an existing config tree in existing mode
+      ansible.builtin.assert:
+        that:
+          - _restore_current_full_config.stat.exists
+          - _restore_current_full_config.stat.isdir
+        fail_msg: "restore_mode=existing nhưng {{ inventory_hostname }} thiếu {{ icinga_etc_dir }}."
+      when: restore_mode == 'existing'
+
+    - name: Inspect service containers before replacing bind-mounted config
+      community.docker.docker_container_info:
+        name: "{{ item }}"
+      loop: "{{ _restore_service_containers }}"
+      register: _restore_full_config_containers
+
+    - name: Require no pre-existing service container in clean mode
+      ansible.builtin.assert:
+        that:
+          - >-
+            _restore_full_config_containers.results
+            | selectattr('exists', 'defined')
+            | selectattr('exists')
+            | list | length == 0
+        fail_msg: >-
+          restore_mode=clean nhưng {{ inventory_hostname }} đã có service container. Dùng VM sạch
+          hoặc restore_mode=existing; playbook không ghi đè một runtime đã deploy.
+      when: restore_mode == 'clean'
+
+    - name: Stop service containers before replacing bind-mounted config
+      community.docker.docker_container:
+        name: "{{ item.item }}"
+        state: stopped
+      loop: "{{ _restore_full_config_containers.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.exists | default(false)
+
+    - name: Stage, validate and install the complete node config
+      block:
+        - name: Recreate clean full-config staging directory
+          ansible.builtin.file:
+            path: "{{ _restore_full_config_stage }}"
+            state: "{{ item }}"
+            mode: "0700"
+          loop: [absent, directory]
+
+        - name: Copy verified full-config archive from deployment node
+          ansible.builtin.copy:
+            src: "{{ node_config_controller_backup_dir }}/{{ _restore_full_config_name }}"
+            dest: "{{ _restore_full_config_archive }}"
+            mode: "0600"
+
+        - name: Extract full-config archive into staging
+          ansible.builtin.unarchive:
+            src: "{{ _restore_full_config_archive }}"
+            dest: "{{ _restore_full_config_stage }}"
+            remote_src: true
+
+        - name: Verify the staged config root
+          ansible.builtin.stat:
+            path: "{{ _restore_full_config_stage }}/node-config/etc/icinga-ansible"
+          register: _restore_staged_full_config
+
+        - name: Require a valid staged config root
+          ansible.builtin.assert:
+            that:
+              - _restore_staged_full_config.stat.exists
+              - _restore_staged_full_config.stat.isdir
+
+        - name: Create local rollback directory for existing-cluster restore
+          ansible.builtin.file:
+            path: "{{ _restore_safety_dir }}"
+            state: directory
+            mode: "0700"
+          when: restore_mode == 'existing'
+
+        - name: Preserve current complete config before overwriting it
+          ansible.builtin.command:
+            argv:
+              - tar
+              - --numeric-owner
+              - -C
+              - "{{ icinga_etc_dir | dirname }}"
+              - -czf
+              - "{{ _restore_safety_dir }}/etc-icinga-ansible-{{ inventory_hostname }}-before-{{ restore_backup_ts }}.tar.gz"
+              - "{{ icinga_etc_dir | basename }}"
+          when: restore_mode == 'existing'
+
+        - name: Restrict the local rollback archive
+          ansible.builtin.file:
+            path: >-
+              {{ _restore_safety_dir }}/etc-icinga-ansible-{{ inventory_hostname }}-before-{{ restore_backup_ts }}.tar.gz
+            mode: "0600"
+          when: restore_mode == 'existing'
+
+        - name: Replace the complete node config tree from backup
+          ansible.builtin.shell: |
+            set -euo pipefail
+            rm -rf -- {{ icinga_etc_dir | quote }}
+            test -d {{ icinga_etc_dir | dirname | quote }}
+            cp -a -- \
+              {{ (_restore_full_config_stage + '/node-config/etc/icinga-ansible') | quote }} \
+              {{ icinga_etc_dir | quote }}
+          args:
+            executable: /bin/bash
+      always:
+        - name: Remove full-config staging files
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ _restore_full_config_stage }}"
+            - "{{ _restore_full_config_archive }}"
 
 - name: Validate and restore the cluster CA
   hosts: "{{ (groups['master'] | first) | default('invalid-ca-host') }}"
@@ -290,10 +474,10 @@
     - name: Require clean endpoint paths in clean mode
       ansible.builtin.assert:
         that:
-          - _restore_current_node_state.results | selectattr('stat.exists') | list | length == 0
+          - not (_restore_current_node_state.results[1].stat.exists | default(false))
         fail_msg: >-
-          restore_mode=clean nhưng {{ inventory_hostname }} đã có config/certificate. Không ghi đè
-          một node đã deploy; dùng VM sạch hoặc restore_mode=existing.
+          restore_mode=clean nhưng {{ inventory_hostname }} đã có certificate runtime. Config /etc vừa
+          được phục hồi từ bundle là hợp lệ; certificate chỉ được phép đến từ node-state archive.
       when: restore_mode == 'clean'
 
     - name: Require complete endpoint state in existing mode

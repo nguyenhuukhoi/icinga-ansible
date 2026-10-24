@@ -22,13 +22,18 @@ terraform/*.auto.tfvars
 ansible/inventory/multinode
 
 # ===== Không push lên public repo (2026-09) — theo yêu cầu người dùng =====
-# monitoring/: kết quả thật của lab (IP/credential hạ tầng OpenStack thật) — không phải phần
-# generic của tool.
+# Chỉ track hai operator package monitoring đã review; script/kết quả lab khác vẫn không commit.
+# Hai package không chứa credential: secret được đọc lúc chạy và chỉ ghi vào /etc trên node đích.
 # scripts/: script vận hành riêng của lab này.
 # terraform/: module Terraform riêng của lab này (đã có rule chi tiết ở trên, thêm rule trùm cả
 # thư mục cho chắc — chỉ .tmp/ mới chứa key thật, nhưng cả thư mục này gắn với hạ tầng cụ thể của
 # lab, không phải phần generic của tool).
-/monitoring/
+/monitoring/*
+!/monitoring/README.md
+!/monitoring/openstack-director/
+!/monitoring/openstack-director/**
+!/monitoring/openstack-file/
+!/monitoring/openstack-file/**
 /scripts/
 /terraform/
 

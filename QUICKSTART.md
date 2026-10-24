@@ -116,29 +116,53 @@ bản ưu tiên.
 
 ## 5. Nội dung monitoring do operator quản lý
 
-Ansible không sinh và không vận chuyển object monitoring. Chọn Director hoặc một quy trình static
-DSL hoàn toàn độc lập với project.
+Role hạ tầng không sinh và không vận chuyển object monitoring. Hai package operator dưới
+`monitoring/` chỉ chạy khi bạn chủ động gọi playbook; `deploy`, `reconfigure`, thêm hoặc xóa node
+không tự chạy chúng.
 
 ### Director
 
 Bật `director` trong `enable_icingaweb2_modules`. Ansible chỉ tạo DB, migrate schema và enable
 module trên `ca_host` (host đầu tiên trong `[master]`, thường là `master1`). Các master khác
 vẫn phục vụ Icinga DB Web nhưng không có module, resource DB, config hay daemon Director.
-Operator truy cập Web UI của master1, tự chạy Kickstart rồi tự tạo
-Host/Service/CheckCommand; Ansible không import hoặc reconcile object Director.
+Operator truy cập Web UI của master1 để quản lý thủ công. Với baseline hiện tại, chạy package
+`monitoring/openstack-director`: Director quản lý 6 Host dùng `check_icmp` và 18 Service CPU/RAM/disk
+dùng `check_by_ssh`; Nova/Cinder/Neutron không nằm trong Director.
 
 ### Static DSL
 
-Static DSL nằm ngoài phạm vi quản lý của project. Ansible không render, reconcile hoặc phân phối file
-trong `zones.d`. Đặc biệt, `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node không còn
-là nguồn cấu hình và nội dung đặt tại đó sẽ bị bỏ qua. Operator phải dùng quy trình triển khai riêng
-nếu không dùng Director. Tool vẫn chạy `icinga2 daemon -C` trên config hiệu lực trước thay đổi runtime;
-lỗi cú pháp trong nội dung operator vì vậy sẽ dừng deploy/reconfigure an toàn.
+Static DSL nằm ngoài role hạ tầng. `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node
+không phải nguồn cấu hình. Package `monitoring/openstack-file` trích ba credential service lúc chạy,
+ghi plugin/`clouds.yaml` lên cả hai master, chỉ ghi object Nova/Cinder/Neutron vào
+`zones.d/<master-zone>` của master1, rồi để Icinga native config-sync sang master2.
 
 Credential API là local trên từng master. Role tạo thư mục
 `/etc/icinga-ansible/icinga2/secrets/` ngay trong cây config chính thức đã được mount RW vào container;
-không cần volume riêng và Ansible không render, merge hoặc phân phối file bên trong. `remove-*` và
-`destroy` xóa toàn bộ config của target, gồm cả credential local, nên phải backup riêng.
+không cần volume riêng. Core role không render file bên trong; operator package nói trên mới ghi
+`clouds.yaml`. `remove-*` và `destroy` xóa toàn bộ config của target, gồm cả credential local, nên phải
+chạy `backup-full` trước.
+
+### Triển khai baseline OpenStack
+
+Inventory cần có nhóm `[linuxfabrik_targets]` cho 6 node OpenStack và SSH key quản trị để provision.
+Sau khi cài đúng Linuxfabrik v8.0.0 trên các target, chạy:
+
+```bash
+ansible-playbook -i "$INV" monitoring/openstack-director/provision-targets.yml
+ansible-playbook -i "$INV" monitoring/openstack-director/kickstart-director.yml  # lần đầu/topology đổi
+ansible-playbook -i "$INV" monitoring/openstack-director/apply-monitoring.yml
+
+ansible-playbook -i "$INV" monitoring/openstack-file/stage-static-config.yml \
+  -e @/etc/icinga-ansible/globals.yml -e @/etc/icinga-ansible/passwords.yml
+
+./tools/icinga-ansible check -i "$INV"
+./tools/icinga-ansible verify-monitoring -i "$INV" \
+  -e monitoring_expected_service_count=21
+```
+
+`apply-monitoring.yml` force-run và kiểm tra 6 Host ICMP cùng 18 Service SSH. Package static test API
+Nova/Cinder/Neutron từ từng master, validate config trước reload và chờ ba object sync sang cả hai
+master. Chi tiết biến, đường dẫn và mô hình bảo mật nằm trong [`monitoring/README.md`](monitoring/README.md).
 
 ## 6. Thêm, sửa và xoá node
 
@@ -361,9 +385,10 @@ Copy **cả cây thư mục**, không chỉ file DB, sang storage ngoài deploym
 `cluster-*.json`. Với external DB, DBA phải backup/restore database bằng quy trình riêng;
 `backup-full` vẫn backup inventory, node-state và CA/PKI.
 
-`backup-full` backup nguyên cây Icinga 2 của từng endpoint, nên có `zones.d`, `secrets`, custom plugin,
-certificate và `icingadb.env` trên master. Nội dung nằm ngoài các cây đã nêu vẫn phải lưu trong
-Git/vault/storage riêng; backup không thay thế source control.
+`backup-full` backup nguyên `/etc/icinga-ansible` của mọi managed node và backup riêng identity
+Icinga 2 của từng endpoint, nên có `zones.d`, `secrets`, custom plugin, certificate và `icingadb.env`
+trên master. Nội dung nằm ngoài các cây đã nêu vẫn phải lưu trong Git/vault/storage riêng; backup
+không thay thế source control.
 
 Ví dụ copy off-site không xóa generation cũ ở đích:
 
@@ -443,7 +468,10 @@ Dựng runtime tạm, restore physical database, khôi phục environment ID r�
   -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
 
 ./tools/icinga-ansible deploy -i "$INV"
+./tools/icinga-ansible restore-director -i "$INV" -e confirm=yes
 ./tools/icinga-ansible check  -i "$INV"
+./tools/icinga-ansible verify-monitoring -i "$INV" \
+  -e monitoring_expected_service_count=21
 ```
 
 `restore-web` yêu cầu tên các master mới khớp tên master trong bundle. Nếu đổi tên hoặc thêm master
@@ -451,7 +479,14 @@ so với thời điểm backup, không đổi tên archive để ép restore; h�
 mới rồi chuyển thủ công phần cần giữ sau khi review.
 
 `zones.d`, plugin và credential đã trở lại từ node archive; `deploy` giữ chúng và chỉ hội tụ phần hạ
-tầng do role quản lý. Director database trở lại nhưng operator vẫn tự quản lý/deploy object Director.
+tầng do role quản lý. `restore-director` chỉ publish lại object đã có trong Director DB; nó không tạo
+hoặc sửa nội dung monitoring. `verify-monitoring` chờ đúng số service có kết quả live `OK` trên cả hai
+master; thay `21` bằng baseline thật của cụm.
+
+Nếu IP master đổi, phải đổi cả allowlist nằm trên các target bên ngoài cụm Icinga: monitoring key
+`from=`, TCP wrappers (`/etc/hosts.allow` khi có `sshd: ALL`), firewall và security group. Full backup
+không và không nên tự sửa các máy được monitor. `restore-director` tự reconcile endpoint API của
+Director theo `ansible_host` mới trước khi publish object.
 
 #### Trường hợp server sạch dùng lại đúng IP cũ
 
@@ -474,8 +509,9 @@ ansible -i "$INV" all_hosts -m ping
 ```
 
 Sau đó chạy nguyên thứ tự ở trên: `restore-config`, `bootstrap-servers`, `restore-node-state` mode
-`clean`, `pull`, deploy tạm, `mariadb-recovery`, `recover-db-only`, `restore-web`, deploy cuối và
-`check`. Cùng IP không thay thế việc restore CA, certificate hay environment ID.
+`clean`, `pull`, deploy tạm, `mariadb-recovery`, `recover-db-only`, `restore-web`, deploy cuối,
+`restore-director`, `check` và `verify-monitoring`. Cùng IP không thay thế việc restore CA,
+certificate hay environment ID.
 
 Bài destructive regression ngày 2026-10-24 đã xóa và dựng lại 2 master + 3 Galera bằng đúng năm IP
 cũ, rồi lặp lại trên năm IP mới. Cả hai lần đều xác nhận CA/cert, environment ID, Icinga API, Web

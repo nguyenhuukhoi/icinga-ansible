@@ -1,0 +1,131 @@
+---
+# Re-publish the Director configuration stored in the restored Director DB.
+# A clean master has no runtime API package under /var/lib/icinga2, so create a
+# minimal valid package/stage before asking Director for its first deployment.
+
+- name: Restore the active Director deployment from its database
+  hosts: "{{ (groups['master'] | first) | default('invalid-ca-host') }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Require an explicit restore acknowledgement
+      ansible.builtin.assert:
+        that:
+          - confirm | default('') == 'yes'
+          - "'director' in (enable_icingaweb2_modules | default([]))"
+        fail_msg: >-
+          restore-director publishes the configuration currently stored in the restored Director DB.
+          Director must be enabled and -e confirm=yes is required.
+
+    - name: Read the restored Director API endpoint
+      ansible.builtin.command:
+        argv: [docker, exec, icingaweb2, icingacli, director, endpoint, show, "{{ ca_host }}", --json]
+      register: _restored_director_endpoint_raw
+      changed_when: false
+      no_log: true
+
+    - name: Parse the restored Director API endpoint
+      ansible.builtin.set_fact:
+        _restored_director_endpoint: "{{ _restored_director_endpoint_raw.stdout | from_json }}"
+      no_log: true
+
+    - name: Reconcile the Director API endpoint after an IP change
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - icingaweb2
+          - icingacli
+          - director
+          - endpoint
+          - set
+          - "{{ ca_host }}"
+          - --host
+          - "{{ hostvars[ca_host].ansible_host | default(ca_host) }}"
+      when: >-
+        (_restored_director_endpoint.host | string)
+        != (hostvars[ca_host].ansible_host | default(ca_host) | string)
+      changed_when: true
+      no_log: true
+
+    - name: Wait until the local Icinga API is ready and read config packages
+      ansible.builtin.uri:
+        url: https://127.0.0.1:5665/v1/config/packages
+        method: GET
+        user: director
+        password: "{{ icinga2_director_api_user_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      register: _director_packages
+      retries: 30
+      delay: 5
+      until: _director_packages.status | default(0) == 200
+      no_log: true
+
+    - name: Detect whether the Director runtime package survived
+      ansible.builtin.set_fact:
+        _director_package_exists: >-
+          {{ 'director' in (_director_packages.json.results | map(attribute='name') | list) }}
+
+    - name: Create the missing Director runtime package
+      ansible.builtin.uri:
+        url: https://127.0.0.1:5665/v1/config/packages/director
+        method: POST
+        user: director
+        password: "{{ icinga2_director_api_user_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Accept: application/json
+        status_code: 200
+      when: not _director_package_exists
+      no_log: true
+
+    - name: Create a valid first stage for a new runtime package
+      ansible.builtin.uri:
+        url: https://127.0.0.1:5665/v1/config/stages/director
+        method: POST
+        user: director
+        password: "{{ icinga2_director_api_user_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Accept: application/json
+        body_format: json
+        body:
+          files:
+            conf.d/bootstrap.conf: "// bootstrap stage; replaced by restored Director DB deployment\n"
+        status_code: 200
+      when: not _director_package_exists
+      no_log: true
+
+    - name: Wait until Icinga accepts the bootstrap reload
+      ansible.builtin.command:
+        argv: [docker, exec, icinga2, icinga2, daemon, -C]
+      register: _director_bootstrap_validation
+      retries: 30
+      delay: 2
+      until: _director_bootstrap_validation.rc == 0
+      changed_when: false
+
+    - name: Publish all objects from the restored Director database
+      ansible.builtin.command:
+        argv: [docker, exec, icingaweb2, icingacli, director, config, deploy, --force, --wait, "30"]
+      register: _director_deploy
+      retries: 20
+      delay: 3
+      until: _director_deploy.rc == 0
+      changed_when: true
+
+    - name: Require Director to be healthy after publishing restored objects
+      ansible.builtin.command:
+        argv: [docker, exec, icingaweb2, icingacli, director, health, check]
+      register: _director_health
+      retries: 20
+      delay: 3
+      until: _director_health.rc == 0
+      changed_when: false

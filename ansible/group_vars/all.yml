@@ -64,6 +64,11 @@ pki_controller_backup_dir: "{{ icinga_config_backup_dir }}/pki"
 # deliberately separate from the controller desired-state archive: generated topology is reconciled
 # from the selected restore inventory, while operator-owned zones.d/secrets/plugins are preserved.
 node_state_controller_backup_dir: "{{ icinga_config_backup_dir }}/nodes"
+# Complete per-node /etc/icinga-ansible snapshots. These are different from the
+# endpoint identity archives above: every managed node (including Galera) gets
+# one, so local RW bind-mount content and operator-created files survive a full
+# cluster rebuild.
+node_config_controller_backup_dir: "{{ icinga_config_backup_dir }}/node-config"
 
 # --- Suy diễn topology từ inventory -------------------------------------------
 master_count:    "{{ groups['master'] | default([]) | length }}"

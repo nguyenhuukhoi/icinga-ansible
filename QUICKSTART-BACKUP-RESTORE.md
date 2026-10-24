@@ -23,6 +23,8 @@ Một generation hoàn chỉnh có:
 
 - `config-*`: `globals.yml`, `passwords.yml` và override trên máy điều khiển;
 - `inventory-*` và `cluster-*`: inventory, logical topology, IP lúc backup và image version;
+- `node-config/etc-icinga-ansible-<node>-*`: nguyên cây `/etc/icinga-ansible` của **mọi** managed node,
+  kể cả Galera; mọi file bind-mount RW và file operator tự tạo đều được giữ;
 - `nodes/icinga2-<node>-*`: config/cert/identity của mọi master, satellite và client, gồm
   `zones.d`, `secrets`, custom plugin và `icingadb.env` trên master;
 - `pki/pki-*`: CA certificate và private key;
@@ -44,6 +46,7 @@ cd /opt/icinga-ansible
 source /path/to/venv/bin/activate
 BACKUP_ROOT=/var/backups/icinga-ansible-config
 BACKUP_TS="$(cat "$BACKUP_ROOT/LATEST_COMPLETE")"
+MONITORING_SERVICE_COUNT=21            # đổi theo tổng số service object thật của bạn
 
 cd "$BACKUP_ROOT"
 sha256sum --strict -c "manifest-$BACKUP_TS.sha256"
@@ -68,6 +71,9 @@ CONFIRM=yes-i-really-really-mean-it ./tools/icinga-ansible restore-config \
   -e restore_mode=existing -e restore_backup_ts="$BACKUP_TS" \
   -e confirm=yes-i-really-really-mean-it
 
+# restore-node-state để các service dừng; dựng runtime tạm trước khi restore DB
+./tools/icinga-ansible deploy -i "$INV"
+
 ./tools/icinga-ansible mariadb-recovery -i "$INV" \
   -e recovery_mode=restore-backup -e restore_backup_tag=full \
   -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
@@ -76,7 +82,10 @@ CONFIRM=yes-i-really-really-mean-it ./tools/icinga-ansible restore-config \
 ./tools/icinga-ansible restore-web -i "$INV" \
   -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
 ./tools/icinga-ansible deploy -i "$INV"
+./tools/icinga-ansible restore-director -i "$INV" -e confirm=yes
 ./tools/icinga-ansible check  -i "$INV"
+./tools/icinga-ansible verify-monitoring -i "$INV" \
+  -e monitoring_expected_service_count="$MONITORING_SERVICE_COUNT"
 ```
 
 ## 4. Trường hợp 2: VM sạch, cùng IP và topology
@@ -114,7 +123,10 @@ Sau deploy tạm, restore dữ liệu và hội tụ lần cuối:
 ./tools/icinga-ansible restore-web -i "$INV" \
   -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
 ./tools/icinga-ansible deploy -i "$INV"
+./tools/icinga-ansible restore-director -i "$INV" -e confirm=yes
 ./tools/icinga-ansible check  -i "$INV"
+./tools/icinga-ansible verify-monitoring -i "$INV" \
+  -e monitoring_expected_service_count="$MONITORING_SERVICE_COUNT"
 ```
 
 ## 5. Trường hợp 3: VM sạch, IP mới nhưng cùng topology
@@ -133,6 +145,16 @@ ansible -i "$INV" all_hosts -m ping
 
 Sau đó chạy nguyên chuỗi của trường hợp 2 từ `restore-config`. `restore-node-state` kiểm tra logical
 topology nhưng cho phép IP đổi; lần `deploy` đầu sẽ render lại `zones.conf` bằng IP trong inventory mới.
+Kết thúc bằng `restore-director`, `check` và `verify-monitoring` đúng như trường hợp 2.
+
+Trước `verify-monitoring`, cập nhật mọi allowlist **trên hệ thống được monitor** sang IP master mới:
+
+- `from="..."` của monitoring key trong `authorized_keys`;
+- `/etc/hosts.allow` nếu target dùng `sshd: ALL` trong `/etc/hosts.deny`;
+- firewall/security group/ACL mạng liên quan.
+
+Các file này nằm trên OpenStack target, không thuộc full backup của cụm Icinga. `restore-director` tự
+đổi endpoint API của Director từ IP `master[0]` cũ sang `ansible_host` mới; operator không sửa DB tay.
 
 ## 6. Xác minh bắt buộc
 
@@ -150,6 +172,15 @@ ansible -i "$INV" icinga -b -a 'docker exec icinga2 icinga2 daemon -C'
 Hai master phải có cùng environment ID; Galera phải `Primary`, `Synced`, `wsrep_ready=ON` và đủ số
 node. Director chỉ tồn tại trên `master[0]`. Web login, Icinga API và Icinga DB heartbeat/config sync
 đều được `check` kiểm tra thật.
+
+`restore-director` không tạo check mới: nó publish lại đúng object đã có trong Director DB được restore.
+`verify-monitoring` cũng không quản lý content; nó chờ check thật chạy lại, rồi yêu cầu đủ số lượng và
+tất cả state `OK` trên **từng master**. Trong bài test hiện tại, 21 object gồm 18 CPU/RAM/disk
+(3 check × 6 OpenStack host) từ Director và 3 OpenStack service từ `zones.d`.
+
+Bài destructive regression ngày 2026-10-24 đã chạy đủ ba case với generation `20261024-030008`:
+restore cụm hiện tại, xóa/dựng 5 VM sạch cùng IP, rồi xóa/dựng 5 VM sạch khác IP. Cả ba case đều có
+cluster check `failed=0` và `21/21` monitoring service `OK` trên hai master.
 
 Với `external_db`, bundle không chứa database: DBA phải backup/restore DB ngoài và xác minh schema/user/
 grant riêng. Không chạy `mariadb-recovery` cho external DB.

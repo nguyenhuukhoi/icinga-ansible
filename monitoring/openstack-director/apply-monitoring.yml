@@ -1,0 +1,126 @@
+---
+- name: Apply file-backed OpenStack objects through the Director REST API
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - /etc/icinga-ansible/globals.yml
+  vars:
+    _director_rendered_objects: /tmp/icinga-openstack-director-objects.json
+  tasks:
+    - name: Render, apply and remove the inventory-specific Director objects
+      block:
+        - name: Render Director objects from inventory
+          ansible.builtin.template:
+            src: director-objects.json.j2
+            dest: "{{ _director_rendered_objects }}"
+            mode: "0600"
+
+        - name: Upsert Host and Service Apply Rule objects
+          ansible.builtin.command:
+            argv:
+              - python3
+              - "{{ playbook_dir }}/apply-director.py"
+              - "{{ _director_rendered_objects }}"
+          register: director_apply
+          changed_when: "'created' in director_apply.stdout or 'updated' in director_apply.stdout"
+      always:
+        - name: Remove rendered Director objects
+          ansible.builtin.file:
+            path: "{{ _director_rendered_objects }}"
+            state: absent
+      environment:
+        ICINGA_DIRECTOR_URL: >-
+          http://{{ hostvars[groups['master'] | first].ansible_host | default(groups['master'] | first) }}:8080/director
+        ICINGA_DIRECTOR_MASTER: >-
+          {{ hostvars[groups['master'] | first].ansible_host | default(groups['master'] | first) }}
+        ICINGA_DIRECTOR_SSH_KEY: >-
+          {{ hostvars[groups['master'] | first].ansible_ssh_private_key_file | default(lookup('env', 'HOME') ~ '/.ssh/id_ed25519') }}
+
+    - name: Show object reconciliation result
+      ansible.builtin.debug:
+        var: director_apply.stdout_lines
+
+- name: Deploy the reconciled Director configuration
+  hosts: "{{ groups['master'] | first }}"
+  gather_facts: false
+  become: true
+  vars_files:
+    - /etc/icinga-ansible/globals.yml
+  vars:
+    _legacy_static_hosts: >-
+      /etc/icinga-ansible/icinga2/zones.d/{{ icinga_master_zone_name }}/openstack-hosts.conf
+  tasks:
+    - name: Check for the retired static OpenStack host file
+      ansible.builtin.stat:
+        path: "{{ _legacy_static_hosts }}"
+      register: _legacy_static_hosts_stat
+
+    - name: Preserve the retired static host file for transactional rollback
+      ansible.builtin.slurp:
+        src: "{{ _legacy_static_hosts }}"
+      register: _legacy_static_hosts_backup
+      when: _legacy_static_hosts_stat.stat.exists
+      no_log: true
+
+    - name: Replace legacy static hosts transactionally with Director hosts
+      block:
+        - name: Remove the retired static OpenStack host file
+          ansible.builtin.file:
+            path: "{{ _legacy_static_hosts }}"
+            state: absent
+
+        - name: Validate and deploy through Director
+          ansible.builtin.command:
+            argv: [docker, exec, icingaweb2, icingacli, director, config, deploy, --force, --wait, "60"]
+          register: director_deploy
+          changed_when: "'has been deployed' in director_deploy.stdout"
+      rescue:
+        - name: Restore the static host file after a failed Director deployment
+          ansible.builtin.copy:
+            content: "{{ _legacy_static_hosts_backup.content | b64decode }}"
+            dest: "{{ _legacy_static_hosts }}"
+            owner: "5665"
+            group: "5665"
+            mode: "0640"
+          when: _legacy_static_hosts_stat.stat.exists
+          no_log: true
+
+        - name: Stop after rolling back the failed Director migration
+          ansible.builtin.fail:
+            msg: >-
+              Director deployment failed. The retired static host file was restored; inspect the
+              Director deployment startup log before retrying.
+
+    - name: Show Director deployment result
+      ansible.builtin.debug:
+        var: director_deploy.stdout_lines
+
+- name: Verify every deployed service check
+  hosts: "{{ groups['master'] | first }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Verify live checks and always remove the verifier
+      block:
+        - name: Stage the live verifier
+          ansible.builtin.copy:
+            src: verify-live.py
+            dest: /var/tmp/verify-icinga-openstack-live.py
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Force and validate every Director-managed Host and Service check
+          ansible.builtin.command:
+            argv: "{{ ['python3', '/var/tmp/verify-icinga-openstack-live.py'] + groups['linuxfabrik_targets'] }}"
+          register: live_verify
+          changed_when: false
+
+        - name: Show live results
+          ansible.builtin.debug:
+            var: live_verify.stdout_lines
+      always:
+        - name: Remove the live verifier
+          ansible.builtin.file:
+            path: /var/tmp/verify-icinga-openstack-live.py
+            state: absent

@@ -1,0 +1,150 @@
+---
+- name: Prepare the monitoring SSH identity on the deployment node
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ssh_dir: /etc/icinga-ansible/config/icinga2/ssh
+    key_path: "{{ ssh_dir }}/id_monitor"
+    target_addresses: >-
+      {{ groups['linuxfabrik_targets']
+         | map('extract', hostvars)
+         | map(attribute='ansible_host')
+         | list }}
+  tasks:
+    - name: Create the operator SSH directory
+      ansible.builtin.file:
+        path: "{{ ssh_dir }}"
+        state: directory
+        owner: "{{ lookup('env', 'USER') }}"
+        mode: "0700"
+      become: true
+
+    - name: Generate a dedicated Ed25519 monitoring key
+      ansible.builtin.command:
+        argv: [ssh-keygen, -q, -t, ed25519, -N, '', -C, icinga-openstack-monitor, -f, "{{ key_path }}"]
+        creates: "{{ key_path }}"
+
+    - name: Pin the target Ed25519 host keys
+      ansible.builtin.command:
+        argv: "{{ ['ssh-keyscan', '-T', '5', '-t', 'ed25519'] + target_addresses }}"
+      register: keyscan
+      changed_when: false
+
+    - name: Store the pinned host keys
+      ansible.builtin.copy:
+        dest: "{{ ssh_dir }}/known_hosts"
+        content: "{{ keyscan.stdout }}\n"
+        owner: "{{ lookup('env', 'USER') }}"
+        mode: "0600"
+
+    - name: Read the dedicated key and trust file for the master nodes
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ key_path }}"
+        - "{{ ssh_dir }}/known_hosts"
+      register: _monitor_ssh_files
+      no_log: true
+
+    - name: Keep protected SSH material as in-memory facts
+      ansible.builtin.set_fact:
+        _monitor_private_key_b64: "{{ _monitor_ssh_files.results[0].content }}"
+        _monitor_known_hosts_b64: "{{ _monitor_ssh_files.results[1].content }}"
+      no_log: true
+
+- name: Install the dedicated SSH identity on every possible Icinga executor
+  hosts: master
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Create the protected runtime SSH directory
+      ansible.builtin.file:
+        path: /etc/icinga-ansible/icinga2/ssh
+        state: directory
+        owner: "5665"
+        group: "5665"
+        mode: "0700"
+
+    - name: Install the private key and pinned target host keys
+      ansible.builtin.copy:
+        content: "{{ item.content | b64decode }}"
+        dest: "{{ item.dest }}"
+        owner: "5665"
+        group: "5665"
+        mode: "0600"
+      loop:
+        - content: "{{ hostvars['localhost']._monitor_private_key_b64 }}"
+          dest: /etc/icinga-ansible/icinga2/ssh/id_monitor
+        - content: "{{ hostvars['localhost']._monitor_known_hosts_b64 }}"
+          dest: /etc/icinga-ansible/icinga2/ssh/known_hosts
+      no_log: true
+
+- name: Install restricted checks on all OpenStack nodes
+  hosts: linuxfabrik_targets
+  gather_facts: false
+  become: true
+  vars:
+    monitor_sources: >-
+      {{ groups['master'] | map('extract', hostvars) | map(attribute='ansible_host') | join(',') }}
+    public_key_path: /etc/icinga-ansible/config/icinga2/ssh/id_monitor.pub
+    linuxfabrik_plugin_checksums:
+      cpu-usage: 6f14ba4746a20becfbaf5c382c4b2e8db1426ea48d324165121a7505bca705cc
+      memory-usage: 3beb3551778ae6aa0d456da9f26dba89b4cfb7e6f16c7a73e94ae704cc2182b1
+      disk-usage: 11350c12cce98728b346f215acc5067d68cb7d91e85f05b002b41a7c95635bdc
+  tasks:
+    - name: Read the pinned Linuxfabrik plugin checksums
+      ansible.builtin.shell: >-
+        test -x {{ ('/usr/lib64/nagios/plugins/' ~ item.key) | quote }} &&
+        sha256sum {{ ('/usr/lib64/nagios/plugins/' ~ item.key) | quote }}
+      args:
+        executable: /bin/bash
+      loop: "{{ linuxfabrik_plugin_checksums | dict2items }}"
+      register: _linuxfabrik_plugins
+      changed_when: false
+      failed_when: false
+
+    - name: Verify the pinned Linuxfabrik plugin artifacts
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - (item.stdout.split() | first | default('')) == item.item.value
+        fail_msg: >-
+          {{ item.item.key }} is missing, not executable, or is not the approved Linuxfabrik v8.0.0
+          artifact. Install the pinned release before provisioning SSH checks.
+      loop: "{{ _linuxfabrik_plugins.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+
+    - name: Ensure the unprivileged monitoring account exists
+      ansible.builtin.user:
+        name: icinga-monitor
+        system: true
+        create_home: true
+        home: /var/lib/icinga-monitor
+        shell: /bin/bash
+
+    - name: Create its SSH directory
+      ansible.builtin.file:
+        path: /var/lib/icinga-monitor/.ssh
+        state: directory
+        owner: icinga-monitor
+        group: icinga-monitor
+        mode: "0700"
+
+    - name: Install the forced-command dispatcher
+      ansible.builtin.copy:
+        src: icinga-remote-check
+        dest: /usr/local/sbin/icinga-remote-check
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Restrict the monitoring key to both Icinga masters and one dispatcher
+      ansible.builtin.copy:
+        dest: /var/lib/icinga-monitor/.ssh/authorized_keys
+        owner: icinga-monitor
+        group: icinga-monitor
+        mode: "0600"
+        content: >-
+          from="{{ monitor_sources }}",restrict,command="/usr/local/sbin/icinga-remote-check"
+          {{ lookup('file', public_key_path) | trim }}

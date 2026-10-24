@@ -98,8 +98,8 @@ DB ops:
                       seed giống nhau lên mọi master và xoá Redis state tạm (-e confirm=yes)
 
 Backup/restore toàn hệ thống (dựng lại hạ tầng mới sau sự cố mất hết — design.md mục 10.6):
-  backup-full         Backup inventory/topology + config deployment + DB/PKI/Web + Icinga 2 state
-                      của từng master/satellite/client (zones.d, secrets, plugin, cert, identity),
+  backup-full         Backup inventory/topology + config deployment + DB/PKI/Web + toàn bộ
+                      /etc/icinga-ansible của mọi node + cert/identity từng Icinga endpoint,
                       gom về /var/backups/icinga-ansible-config/ (CỐ Ý ngoài \$CONFIG_DIR — destroy
                       không đụng tới)
   restore-node-state  Khôi phục CA + config/cert/identity từng Icinga endpoint từ backup-full;
@@ -108,10 +108,15 @@ Backup/restore toàn hệ thống (dựng lại hạ tầng mới sau sự cố 
                       giữ nguyên định danh PKI — bỏ qua bước này = deploy tự tạo CA mới hoàn toàn
   restore-web         Khôi phục config Icinga Web riêng của từng master từ backup-full
                       (-e restore_backup_ts=YYYYMMDD-HHMMSS -e confirm=yes), rồi chạy deploy
+  restore-director    Publish object trong Director DB đã restore trở lại Icinga runtime
+                      (-e confirm=yes); tự khởi tạo API package khi master là VM sạch
+  verify-monitoring   Chờ và xác minh object/check result sau DR trên mọi master; truyền
+                      -e monitoring_expected_service_count=N và/hoặc danh sách tên service
   # Custom image (design.md mục 9.6): icinga-ansible KHÔNG tự build — tự build/push bằng cách nào
   # cũng được, rồi khai custom_image_registry + custom_image_overrides trong globals.yml.
   # Full-cluster restore: restore-config -> bootstrap-servers -> restore-node-state -> pull -> deploy
-  # -> mariadb-recovery -> recover-db-only -> restore-web -> deploy -> check. restore-pki chỉ dành
+  # -> mariadb-recovery -> recover-db-only -> restore-web -> deploy -> restore-director
+  # -> check -> verify-monitoring. restore-pki chỉ dành
   # cho luồng CA-only/legacy, không chạy thêm trong full-cluster restore.
 
 Options:
@@ -307,7 +312,8 @@ init_config() {
   echo "Đã restore cấu hình vào $CONFIG_DIR_REAL."
   echo "Tiếp theo: kiểm tra lại $GLOBALS (đổi IP/hostname nếu hạ tầng mới khác hạ tầng cũ), rồi"
   echo "  bootstrap-servers -> restore-node-state -> pull -> deploy -> mariadb-recovery -> recover-db-only"
-  echo "  -> restore-web -> deploy -> check. Xem QUICKSTART.md mục 7.2 để dùng đúng timestamp/confirm."
+  echo "  -> restore-web -> deploy -> restore-director -> check -> verify-monitoring."
+  echo "  Xem QUICKSTART-BACKUP-RESTORE.md để dùng đúng timestamp/confirm."
   exit 0
 }
 
@@ -446,6 +452,20 @@ case "$COMMAND" in
     cd "$ANSIBLE_DIR"
     "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/restore-node-state.yml" \
       -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
+      "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+
+  restore-director)
+    cd "$ANSIBLE_DIR"
+    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/restore-director.yml" \
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" \
+      "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+
+  verify-monitoring)
+    cd "$ANSIBLE_DIR"
+    "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/verify-monitoring.yml" \
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" \
       "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
 

@@ -1,0 +1,60 @@
+---
+# Content-neutral DR verification. The infrastructure tool does not create or
+# edit monitoring objects; it proves that the operator-owned objects restored
+# into Icinga are present and producing successful results on every master.
+
+- name: Verify restored monitoring objects and live check results
+  hosts: master
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    _expected_count: "{{ monitoring_expected_service_count | default(0) | int }}"
+    _expected_names: "{{ monitoring_expected_service_names | default([]) }}"
+  tasks:
+    - name: Require at least one explicit monitoring expectation
+      ansible.builtin.assert:
+        that:
+          - (_expected_count | int) > 0 or (_expected_names | length) > 0
+        fail_msg: >-
+          Pass -e monitoring_expected_service_count=N and/or
+          -e monitoring_expected_service_names='["host!service", ...]'.
+
+    - name: Wait for restored services to have successful live results
+      ansible.builtin.uri:
+        url: https://127.0.0.1:5665/v1/objects/services?attrs=name&attrs=state&attrs=last_check_result
+        method: GET
+        user: icingadb-web
+        password: "{{ icingadb_web_api_user_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      register: _monitoring_api
+      retries: "{{ monitoring_verify_retries | default(30) | int }}"
+      delay: "{{ monitoring_verify_delay | default(10) | int }}"
+      until: >-
+        (_monitoring_api.status | default(0) == 200)
+        and ((_expected_count | int == 0) or
+             ((_monitoring_api.json.results | default([]) | length) == (_expected_count | int)))
+        and ((_expected_names | difference(
+               _monitoring_api.json.results | default([]) | map(attribute='name') | list
+             ) | length) == 0)
+        and ((_monitoring_api.json.results | default([])
+              | rejectattr('attrs.state', 'equalto', 0) | list | length) == 0)
+      no_log: true
+
+    - name: Keep only non-secret monitoring result fields
+      ansible.builtin.set_fact:
+        _safe_monitoring_results: "{{ _monitoring_api.json.results }}"
+      no_log: true
+
+    - name: Report the restored monitoring result summary
+      ansible.builtin.debug:
+        msg: >-
+          verified={{ _safe_monitoring_results | length }}
+          ok={{ _safe_monitoring_results | selectattr('attrs.state', 'equalto', 0) | list | length }}
+          check_sources={{ _safe_monitoring_results
+            | map(attribute='attrs.last_check_result.check_source')
+            | unique | sort | join(',') }}

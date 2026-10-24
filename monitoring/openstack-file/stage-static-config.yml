@@ -1,0 +1,155 @@
+---
+- name: Build least-privilege OpenStack cloud profiles from active service configs
+  hosts: openstack-controller01
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Extract and retain credentials only as an in-memory fact
+      block:
+        - name: Stage the protected extractor
+          ansible.builtin.copy:
+            src: extract-service-clouds.py
+            dest: /tmp/icinga-extract-service-clouds.py
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Generate protected cloud profiles
+          ansible.builtin.command:
+            argv: [python3, /tmp/icinga-extract-service-clouds.py]
+          changed_when: true
+          no_log: true
+
+        - name: Read generated cloud profiles
+          ansible.builtin.slurp:
+            src: /tmp/icinga-openstack-clouds.json
+          register: _openstack_clouds_raw
+          no_log: true
+
+        - name: Publish protected profiles as an in-memory host fact
+          ansible.builtin.set_fact:
+            _openstack_clouds_b64: "{{ _openstack_clouds_raw.content }}"
+            _openstack_api_address: >-
+              {{ ((_openstack_clouds_raw.content | b64decode | from_json)
+                  .clouds['monitoring-nova'].auth.auth_url)
+                 | regex_replace('^https?://([^/:]+).*$', '\\1') }}
+          no_log: true
+      always:
+        - name: Remove credential staging files
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/icinga-extract-service-clouds.py
+            - /tmp/icinga-openstack-clouds.json
+
+- name: Install local plugin and credential on every possible master executor
+  hosts: master
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Create protected plugin and secret directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "5665"
+        group: "5665"
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: /etc/icinga-ansible/icinga2/custom-plugins, mode: "0750"}
+        - {path: /etc/icinga-ansible/icinga2/secrets, mode: "0700"}
+
+    - name: Install OpenStack service check plugin
+      ansible.builtin.copy:
+        src: check-openstack-service.py
+        dest: /etc/icinga-ansible/icinga2/custom-plugins/check_openstack_service.py
+        owner: "5665"
+        group: "5665"
+        mode: "0750"
+
+    - name: Install protected clouds.yaml on every executor
+      ansible.builtin.copy:
+        content: "{{ hostvars['openstack-controller01']._openstack_clouds_b64 | b64decode }}"
+        dest: /etc/icinga-ansible/icinga2/secrets/clouds.yaml
+        owner: "5665"
+        group: "5665"
+        mode: "0600"
+      no_log: true
+
+    - name: Test all OpenStack service checks locally from each master
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - icinga2
+          - /usr/lib/nagios/custom-plugins/check_openstack_service.py
+          - --cloud
+          - "{{ item.cloud }}"
+          - --service
+          - "{{ item.service }}"
+      loop:
+        - {service: nova, cloud: monitoring-nova}
+        - {service: cinder, cloud: monitoring-cinder}
+        - {service: neutron, cloud: monitoring-neutron}
+      changed_when: false
+
+- name: Install the authoritative object file only on master zero
+  hosts: "{{ groups['master'] | first }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Create the authoritative master-zone directory
+      ansible.builtin.file:
+        path: "/etc/icinga-ansible/icinga2/zones.d/{{ icinga_master_zone_name }}"
+        state: directory
+        owner: "5665"
+        group: "5665"
+        mode: "0750"
+
+    - name: Install OpenStack service objects in zones.d
+      ansible.builtin.template:
+        src: openstack-services.conf.j2
+        dest: >-
+          /etc/icinga-ansible/icinga2/zones.d/{{ icinga_master_zone_name }}/openstack-services.conf
+        owner: "5665"
+        group: "5665"
+        mode: "0640"
+      vars:
+        openstack_api_address: "{{ hostvars['openstack-controller01']._openstack_api_address }}"
+
+    - name: Validate complete Icinga configuration before reload
+      ansible.builtin.command:
+        argv: [docker, exec, icinga2, icinga2, daemon, -C]
+      changed_when: false
+
+    - name: Reload the authoritative master
+      ansible.builtin.command:
+        argv: [docker, kill, --signal, HUP, icinga2]
+      changed_when: true
+
+- name: Verify native zone sync and local execution on every master
+  hosts: master
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Wait for all three synchronized service objects
+      ansible.builtin.uri:
+        url: https://127.0.0.1:5665/v1/objects/services?attrs=name
+        method: GET
+        user: icingadb-web
+        password: "{{ icingadb_web_api_user_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      register: _openstack_zone_objects
+      retries: 20
+      delay: 3
+      until:
+        - >-
+          ['openstack-api!OpenStack Nova Services',
+           'openstack-api!OpenStack Cinder Services',
+           'openstack-api!OpenStack Neutron Agents']
+          | difference(_openstack_zone_objects.json.results | default([]) | map(attribute='name') | list)
+          | length == 0
+      no_log: true

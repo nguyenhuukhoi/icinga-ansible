@@ -10,11 +10,11 @@ Ansible project để triển khai và vận hành **hạ tầng Icinga** trên 
 
 ## Ranh giới quản lý
 
-Project này **không tạo, reconcile hoặc phân phối nội dung monitoring**. Ansible không quản lý
-`Host`, `Service`, `CheckCommand`, `Notification`, apply rule hoặc bất kỳ file nào trong `zones.d`.
-Operator tự quản lý object bằng Icinga Director/Web UI hoặc một quy trình static DSL độc lập ngoài
-project này. Đặt file dưới `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node không có
-tác dụng và `reconfigure` không vận chuyển chúng xuống node.
+Các role hạ tầng **không tạo, reconcile hoặc phân phối nội dung monitoring**. Vì vậy `deploy`,
+`reconfigure` và vòng đời node không tự ý sửa `Host`, `Service`, `CheckCommand`, `Notification`, apply
+rule hay `zones.d`. Hai operator package tách biệt trong [`monitoring/`](monitoring/README.md) triển
+khai đúng baseline OpenStack của dự án khi người vận hành chủ động chạy chúng. Đặt file dưới
+`/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node không có tác dụng.
 
 Với static HA, operator có thể đặt file trực tiếp trong `zones.d/<ZoneName>` trên master đầu tiên;
 Icinga tự config-sync sang master peer. Đây là đồng bộ nội bộ của Icinga, không phải deployment node
@@ -139,14 +139,17 @@ lý khuyến nghị cho monitoring content; backup không biến project thành 
 
 ## Tự quản lý Host/Service/Check
 
-Khuyến nghị dùng Director. Project chỉ enable module trên `ca_host`/master1 và migrate schema; operator tự Kickstart và
-quản lý object trong UI. Ansible không import hoặc reconcile object Director.
+Khuyến nghị dùng Director. Core project chỉ enable module trên `ca_host`/master1 và migrate schema.
+Operator có thể quản lý object trong UI, hoặc chạy package
+[`monitoring/openstack-director`](monitoring/openstack-director/README.md) để reconcile 6 host ICMP và
+18 CPU/RAM/disk checks qua `check_by_ssh`.
 
-Nếu dùng static DSL, hãy quản lý và triển khai bằng quy trình riêng của operator. Project không render
-hoặc phân phối `zones.d`; thư mục xuất hiện trong container vì toàn bộ cây config host được bind-mount
-RW. Trước khi thay đổi runtime, tool chạy `icinga2 daemon -C` trên config hiệu lực để không đưa daemon
-vào trạng thái lỗi. `remove-*`/`destroy` xóa nguyên config của đúng target; hãy chạy `backup-full` và
-vẫn giữ monitoring content trong Git/vault. Sửa file monitoring không yêu cầu chạy `reconfigure`.
+Nếu dùng static DSL, hãy quản lý và triển khai bằng quy trình riêng của operator. Package
+[`monitoring/openstack-file`](monitoring/openstack-file/README.md) là ví dụ đang dùng: nó chỉ ghi file
+nguồn lên master1, để Icinga native config-sync sang master2, và không đi qua deployment/reconfigure.
+Thư mục xuất hiện trong container vì toàn bộ cây config host được bind-mount RW. `remove-*`/`destroy`
+xóa nguyên config của đúng target; hãy chạy `backup-full` và vẫn giữ monitoring content trong
+Git/vault.
 
 Xem [QUICKSTART-BACKUP-RESTORE.md](QUICKSTART-BACKUP-RESTORE.md) để làm theo ba kịch bản full restore;
 mục 6–7 trong [QUICKSTART.md](QUICKSTART.md) có thêm/xóa node và giải thích chi tiết.
