@@ -23,10 +23,12 @@
       "max_check_attempts": 3,
       "assign_filter": "host.vars.openstack_role",
       "vars": {
+        "lfmp_cpu_warn": 80,
+        "lfmp_cpu_crit": 90,
         "by_ssh_logname": "icinga-monitor",
         "by_ssh_identity": "/data/etc/icinga2/ssh/id_monitor",
         "by_ssh_options": ["BatchMode=yes", "StrictHostKeyChecking=yes", "UserKnownHostsFile=/data/etc/icinga2/ssh/known_hosts"],
-        "by_ssh_command": "/usr/lib64/nagios/plugins/cpu-usage -w 80 -c 90"
+        "by_ssh_command": "/usr/lib64/nagios/plugins/cpu-usage -w $lfmp_cpu_warn$ -c $lfmp_cpu_crit$"
       }
     },
     "Linux RAM via SSH": {
@@ -37,10 +39,12 @@
       "max_check_attempts": 3,
       "assign_filter": "host.vars.openstack_role",
       "vars": {
+        "lfmp_memory_warn": 80,
+        "lfmp_memory_crit": 90,
         "by_ssh_logname": "icinga-monitor",
         "by_ssh_identity": "/data/etc/icinga2/ssh/id_monitor",
         "by_ssh_options": ["BatchMode=yes", "StrictHostKeyChecking=yes", "UserKnownHostsFile=/data/etc/icinga2/ssh/known_hosts"],
-        "by_ssh_command": "/usr/lib64/nagios/plugins/memory-usage -w 80 -c 90"
+        "by_ssh_command": "/usr/lib64/nagios/plugins/memory-usage -w $lfmp_memory_warn$ -c $lfmp_memory_crit$"
       }
     },
     "Linux Disk via SSH": {
@@ -51,10 +55,12 @@
       "max_check_attempts": 3,
       "assign_filter": "host.vars.openstack_role",
       "vars": {
+        "lfmp_disk_warn": 85,
+        "lfmp_disk_crit": 95,
         "by_ssh_logname": "icinga-monitor",
         "by_ssh_identity": "/data/etc/icinga2/ssh/id_monitor",
         "by_ssh_options": ["BatchMode=yes", "StrictHostKeyChecking=yes", "UserKnownHostsFile=/data/etc/icinga2/ssh/known_hosts"],
-        "by_ssh_command": "/usr/lib64/nagios/plugins/disk-usage -w 85 -c 95"
+        "by_ssh_command": "/usr/lib64/nagios/plugins/disk-usage -w $lfmp_disk_warn$ -c $lfmp_disk_crit$"
       }
     }
   }

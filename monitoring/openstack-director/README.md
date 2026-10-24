@@ -9,7 +9,16 @@ generate 18 checks:
 
 - CPU, RAM, and disk on every node through native `check_by_ssh` and Linuxfabrik v8.0.0.
 
-Thresholds are in `director-objects.json.j2`: CPU/RAM 80/90%, disk 85/95%. All three run every minute.
+Initial thresholds are CPU/RAM 80/90% and disk 85/95%. `apply-monitoring.yml` exposes six numeric
+Data Fields on the three Apply Services. Change them in Director on master1:
+
+1. Open **Icinga Director → Services → Service Apply Rules**.
+2. Open `Linux CPU via SSH`, `Linux RAM via SSH`, or `Linux Disk via SSH`.
+3. Change the corresponding warning/critical fields and deploy the pending Director configuration.
+
+Warning must remain lower than critical and both must be between 1 and 100; the restricted SSH
+dispatcher rejects invalid values. Later package reconciliation preserves threshold values changed in
+the UI instead of resetting them to the template defaults. All three checks run every minute.
 Nova, Cinder and Neutron are intentionally absent from Director; see `../openstack-file/`.
 
 The `icinga-monitor` SSH account is unprivileged and its key is accepted only from the two Icinga

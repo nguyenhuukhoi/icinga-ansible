@@ -162,7 +162,9 @@ ansible-playbook -i "$INV" monitoring/openstack-file/stage-static-config.yml \
 
 `apply-monitoring.yml` force-run và kiểm tra 6 Host ICMP cùng 18 Service SSH. Package static test API
 Nova/Cinder/Neutron từ từng master, validate config trước reload và chờ ba object sync sang cả hai
-master. Chi tiết biến, đường dẫn và mô hình bảo mật nằm trong [`monitoring/README.md`](monitoring/README.md).
+master. Threshold CPU/RAM/disk hiện thành Data Fields trong từng Service Apply Rule trên Director UI;
+giá trị sửa trên UI được giữ nguyên ở các lần reconcile sau. Chi tiết biến, đường dẫn và mô hình bảo
+mật nằm trong [`monitoring/README.md`](monitoring/README.md).
 
 ## 6. Thêm, sửa và xoá node
 

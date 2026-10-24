@@ -16,6 +16,11 @@ import urllib.request
 BASE_URL = os.environ.get("ICINGA_DIRECTOR_URL", "http://127.0.0.1:8080/director")
 MASTER = os.environ.get("ICINGA_DIRECTOR_MASTER", "127.0.0.1")
 MASTER_KEY = os.environ.get("ICINGA_DIRECTOR_SSH_KEY", os.path.expanduser("~/.ssh/id_ed25519"))
+PRESERVED_SERVICE_VARS = {
+    "lfmp_cpu_warn", "lfmp_cpu_crit",
+    "lfmp_memory_warn", "lfmp_memory_crit",
+    "lfmp_disk_warn", "lfmp_disk_crit",
+}
 
 
 def admin_password(path="/etc/icinga-ansible/passwords.yml"):
@@ -69,6 +74,15 @@ def upsert(kind, name, properties):
     payload = dict(properties)
     payload["object_name"] = name
     status, current = request(kind, name, "GET")
+    if status == 200 and kind == "service":
+        # Thresholds are operator-owned in Director. Keep UI changes when the
+        # inventory-backed package later reconciles structural properties.
+        current_vars = current.get("vars") or {}
+        payload_vars = dict(payload.get("vars") or {})
+        for varname in PRESERVED_SERVICE_VARS:
+            if varname in current_vars and varname in payload_vars:
+                payload_vars[varname] = current_vars[varname]
+        payload["vars"] = payload_vars
     if status == 200 and normalize(current) == normalize(payload):
         print(f"{kind} {name}: unchanged")
         return

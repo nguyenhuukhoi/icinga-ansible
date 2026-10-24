@@ -50,6 +50,50 @@
     _legacy_static_hosts: >-
       /etc/icinga-ansible/icinga2/zones.d/{{ icinga_master_zone_name }}/openstack-hosts.conf
   tasks:
+    - name: Expose warning and critical thresholds in the Director UI
+      block:
+        - name: Stage the threshold field installer
+          ansible.builtin.copy:
+            src: enable-threshold-fields.php
+            dest: /var/tmp/icinga-enable-threshold-fields.php
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Copy the threshold field installer into Icinga Web
+          ansible.builtin.command:
+            argv:
+              - docker
+              - cp
+              - /var/tmp/icinga-enable-threshold-fields.php
+              - icingaweb2:/tmp/icinga-enable-threshold-fields.php
+          changed_when: true
+
+        - name: Create and attach idempotent Director threshold fields
+          ansible.builtin.command:
+            argv: [docker, exec, icingaweb2, php, /tmp/icinga-enable-threshold-fields.php]
+          register: _director_threshold_fields
+          changed_when: >-
+            'Created field' in _director_threshold_fields.stdout
+            or 'Attached' in _director_threshold_fields.stdout
+      always:
+        - name: Remove the threshold field installer
+          ansible.builtin.command:
+            argv:
+              - docker
+              - exec
+              - icingaweb2
+              - rm
+              - -f
+              - /tmp/icinga-enable-threshold-fields.php
+          changed_when: false
+          failed_when: false
+
+        - name: Remove the host-side threshold field installer
+          ansible.builtin.file:
+            path: /var/tmp/icinga-enable-threshold-fields.php
+            state: absent
+
     - name: Check for the retired static OpenStack host file
       ansible.builtin.stat:
         path: "{{ _legacy_static_hosts }}"
@@ -100,6 +144,13 @@
   gather_facts: false
   become: true
   tasks:
+    - name: Wait for the Icinga API after Director deployment
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 5665
+        state: started
+        timeout: 60
+
     - name: Verify live checks and always remove the verifier
       block:
         - name: Stage the live verifier
