@@ -10,156 +10,65 @@
       - ansible_distribution == "Ubuntu"
       - ansible_distribution_version in ["24.04", "26.04"]
     fail_msg: "Chỉ hỗ trợ Ubuntu 24.04 / 26.04 (đang: {{ ansible_distribution }} {{ ansible_distribution_version }})"
-  tags: [bootstrap]
+  tags: [bootstrap, docker_proxy]
 
-# Ansible gathers facts through a non-login shell, so ansible_facts.env does not reliably contain
-# values that PAM would load from /etc/environment for an interactive SSH session. Read the file
-# explicitly before the first network operation; this keeps the documented fallback working on a
-# completely fresh node where direct Internet access is unavailable.
-- name: (bootstrap) Đọc proxy hiện có trực tiếp từ /etc/environment
-  ansible.builtin.command:
-    argv:
-      - /usr/bin/python3
-      - -c
+- name: (bootstrap) Chặn biến proxy cũ để tránh cấu hình bị bỏ qua âm thầm
+  ansible.builtin.assert:
+    that:
+      - proxy_http is not defined
+      - proxy_https is not defined
+      - proxy_no_proxy is not defined
+      - proxy_group_overrides is not defined
+    fail_msg: >-
+      Proxy đã đổi sang thiết kế Kolla-Ansible. Hãy đổi proxy_http/proxy_https/proxy_no_proxy
+      thành docker_http_proxy/docker_https_proxy/docker_no_proxy và xoá proxy_group_overrides.
+      Ba biến mới chỉ cấu hình Docker Engine pull image.
+  tags: [bootstrap, docker_proxy]
+
+- name: (bootstrap) Kiểm tra Docker Engine proxy
+  ansible.builtin.assert:
+    that:
+      - docker_http_proxy is string
+      - docker_https_proxy is string
+      - docker_no_proxy is string
       - >-
-        import json, pathlib;
-        keys={'http_proxy','https_proxy','no_proxy','HTTP_PROXY','HTTPS_PROXY','NO_PROXY'};
-        lines=pathlib.Path('/etc/environment').read_text().splitlines()
-        if pathlib.Path('/etc/environment').exists() else [];
-        pairs=(line.split('=',1) for line in lines if '=' in line and not line.lstrip().startswith('#'));
-        print(json.dumps({k:v.strip().strip('"').strip("'") for k,v in pairs if k.strip() in keys}))
-  register: _managed_environment_file_result
-  changed_when: false
-  no_log: true
-  tags: [bootstrap]
+        (docker_http_proxy | length == 0) or
+        (docker_http_proxy is match('^https?://[^\\s]+$'))
+      - >-
+        (docker_https_proxy | length == 0) or
+        (docker_https_proxy is match('^https?://[^\\s]+$'))
+      - "'\\n' not in docker_no_proxy"
+      - "'\\r' not in docker_no_proxy"
+    fail_msg: >-
+      docker_http_proxy/docker_https_proxy phải rỗng hoặc là URL http(s) không chứa khoảng trắng;
+      docker_no_proxy phải là chuỗi phân cách bằng dấu phẩy.
+  tags: [bootstrap, docker_proxy]
 
-- name: (bootstrap) Dùng proxy /etc/environment làm fallback cho task mạng
-  ansible.builtin.set_fact:
-    _managed_host_environment_file: "{{ _managed_environment_file_result.stdout | from_json }}"
-  no_log: true
-  tags: [bootstrap]
-
-# Materialize this as a host fact. Variables from group_vars may already have been templated while
-# loading the role, before the remote environment file was read.
-- name: (bootstrap) Chốt environment proxy trước tác vụ APT và download
-  ansible.builtin.set_fact:
-    proxy_environment: >-
-      {{ {'http_proxy': (proxy_http_effective
-                         if (proxy_http_effective | default('')) | length > 0
-                         else (_managed_host_environment_file.get('http_proxy', '') or
-                               _managed_host_environment_file.get('HTTP_PROXY', ''))),
-          'https_proxy': (proxy_https_effective
-                          if (proxy_https_effective | default('')) | length > 0
-                          else (_managed_host_environment_file.get('https_proxy', '') or
-                                _managed_host_environment_file.get('HTTPS_PROXY', ''))),
-          'no_proxy': (proxy_no_proxy_effective
-                       if ((proxy_http_effective | default('')) | length > 0 or
-                           (proxy_https_effective | default('')) | length > 0)
-                       else (_managed_host_environment_file.get('no_proxy', '') or
-                             _managed_host_environment_file.get('NO_PROXY', '')))} }}
-  no_log: true
-  tags: [bootstrap]
-
-- name: (bootstrap) Cấu hình APT dùng proxy với timeout hữu hạn
-  ansible.builtin.copy:
-    dest: /etc/apt/apt.conf.d/90icinga-ansible-proxy
-    owner: root
-    group: root
-    mode: "0600"
-    content: |
-      Acquire::http::Proxy "{{ proxy_environment.http_proxy }}";
-      Acquire::https::Proxy "{{ proxy_environment.https_proxy }}";
-      Acquire::Retries "3";
-      Acquire::http::Timeout "30";
-      Acquire::https::Timeout "30";
-      Acquire::ForceIPv4 "true";
-  no_log: true
-  when:
-    - (proxy_environment.http_proxy | default('')) | length > 0
-    - (proxy_environment.https_proxy | default('')) | length > 0
-  tags: [bootstrap]
-
-- name: (bootstrap) Gỡ cấu hình proxy APT khi node không dùng proxy
-  ansible.builtin.file:
-    path: /etc/apt/apt.conf.d/90icinga-ansible-proxy
-    state: absent
-  when:
-    - (proxy_environment.http_proxy | default('')) | length == 0
-    - (proxy_environment.https_proxy | default('')) | length == 0
-  tags: [bootstrap]
-
-# *_effective (group_vars/all.yml): áp dụng proxy_group_overrides theo đúng nhóm vai trò của HOST
-# NÀY (master/satellite/galera/client) — rơi về proxy_http/https/no_proxy global nếu nhóm không có
-# override riêng. Dùng *_effective ở đây (thay vì proxy_http thẳng) để 1 host thuộc nhóm có override
-# riêng (vd satellite ở DC khác, ra Internet qua proxy khác) nhận đúng proxy của NHÓM ĐÓ.
-# mode 0644 GIỮ NGUYÊN (không siết như http-proxy.conf bên dưới) — /etc/environment BẮT BUỘC
-# world-readable để pam_env đọc được cho MỌI user đăng nhập vào host, đây là quy ước chung của Linux,
-# không phải lựa chọn của role này. Hệ quả: nếu proxy_http/proxy_https chứa Basic-Auth credential
-# (dạng "http://user:pass@proxy:3128"), credential đó sẽ world-readable qua file này — hạn chế cố
-# hữu khi dùng /etc/environment cho proxy có auth, không riêng gì icinga-ansible. Cân nhắc dùng
-# proxy không yêu cầu auth (allowlist theo IP nguồn) nếu đây là rủi ro cần tránh.
-- name: (bootstrap) Cấu hình proxy hệ thống (/etc/environment) — khi khai HTTP hoặc HTTPS proxy
-  ansible.builtin.blockinfile:
-    path: /etc/environment
-    create: true
-    mode: "0644"
-    marker: "# {mark} icinga-ansible proxy"
-    block: |
-      http_proxy="{{ proxy_http_effective }}"
-      https_proxy="{{ proxy_https_effective }}"
-      HTTP_PROXY="{{ proxy_http_effective }}"
-      HTTPS_PROXY="{{ proxy_https_effective }}"
-      no_proxy="{{ proxy_no_proxy_effective }}"
-      NO_PROXY="{{ proxy_no_proxy_effective }}"
-  when: >-
-    (proxy_http_effective | default('')) | length > 0 or
-    (proxy_https_effective | default('')) | length > 0
-  tags: [bootstrap]
-
-- name: (bootstrap) Xoá proxy icinga-ansible khỏi /etc/environment khi đã tắt proxy
-  ansible.builtin.blockinfile:
-    path: /etc/environment
-    marker: "# {mark} icinga-ansible proxy"
-    state: absent
-  when:
-    - (proxy_http_effective | default('')) | length == 0
-    - (proxy_https_effective | default('')) | length == 0
-  tags: [bootstrap]
-
-# PAM của Ubuntu nạp /etc/environment cho SSH và sudo, nhưng systemd system service không tự đọc
-# file đó. Dùng EnvironmentFile giữ /etc/environment là MỘT nguồn duy nhất cho operator, đồng thời
-# cho esm-cache.service và Docker daemon dùng đúng nguồn này. Checksum trong drop-in làm thay đổi
-# file khi operator sửa /etc/environment rồi chạy lại bootstrap, nhờ đó handler restart Docker.
-- name: (bootstrap) Đọc checksum /etc/environment
+# Remove files managed by the pre-Kolla-style implementation. Operator-owned
+# proxy configuration outside these exact files/markers is left untouched.
+- name: (bootstrap) Kiểm tra /etc/environment legacy
   ansible.builtin.stat:
     path: /etc/environment
-    checksum_algorithm: sha256
-  register: _system_environment_file
-  tags: [bootstrap]
+  register: _legacy_system_environment
+  tags: [bootstrap, docker_proxy]
 
-- name: (bootstrap) Tạo thư mục systemd drop-in cho Ubuntu Pro ESM cache
+- name: (bootstrap) Gỡ block proxy hệ thống do phiên bản cũ quản lý
+  ansible.builtin.blockinfile:
+    path: /etc/environment
+    marker: "# {mark} icinga-ansible proxy"
+    state: absent
+  when: _legacy_system_environment.stat.exists
+  tags: [bootstrap, docker_proxy]
+
+- name: (bootstrap) Gỡ proxy APT và Ubuntu Pro do phiên bản cũ quản lý
   ansible.builtin.file:
-    path: /etc/systemd/system/esm-cache.service.d
-    state: directory
-    mode: "0755"
-  tags: [bootstrap]
-
-- name: (bootstrap) Cho Ubuntu Pro ESM cache đọc /etc/environment
-  ansible.builtin.copy:
-    dest: /etc/systemd/system/esm-cache.service.d/http-proxy.conf
-    mode: "0600"
-    content: |
-      [Service]
-      # /etc/environment sha256={{ _system_environment_file.stat.checksum | default('missing') }}
-      EnvironmentFile=-/etc/environment
-  register: _ubuntu_pro_proxy_dropin
-  tags: [bootstrap]
-
-- name: (bootstrap) Nạp lại systemd sau khi đổi proxy Ubuntu Pro ESM cache
-  ansible.builtin.systemd_service:
-    daemon_reload: true
-  when: _ubuntu_pro_proxy_dropin.changed
-  tags: [bootstrap]
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/apt.conf.d/90icinga-ansible-proxy
+    - /etc/systemd/system/esm-cache.service.d/http-proxy.conf
+  notify: Reload systemd daemon
+  tags: [bootstrap, docker_proxy]
 
 - name: (bootstrap) Cài chrony + phụ thuộc Docker
   ansible.builtin.apt:
@@ -167,7 +76,6 @@
     update_cache: true
     lock_timeout: 300
     state: present
-  environment: "{{ proxy_environment }}"
   register: _bootstrap_base_packages_result
   retries: 8
   delay: 10
@@ -186,27 +94,56 @@
   register: docker_check
   changed_when: false
   failed_when: false
-  tags: [bootstrap]
+  tags: [bootstrap, docker_proxy]
+
+- name: (bootstrap) Ghi nhận container đang chạy trước khi đổi Docker proxy
+  ansible.builtin.command:
+    argv: [docker, ps, --format, "{{ '{{.Names}}' }}"]
+  register: _docker_running_containers_before_proxy
+  changed_when: false
+  failed_when: false
+  when: docker_check.rc == 0
+  tags: [bootstrap, docker_proxy]
 
 - name: (bootstrap) Tạo thư mục drop-in docker.service.d
   ansible.builtin.file:
     path: /etc/systemd/system/docker.service.d
     state: directory
     mode: "0755"
-  tags: [bootstrap]
+  tags: [bootstrap, docker_proxy]
 
-- name: (bootstrap) Cho Docker daemon đọc /etc/environment
+- name: (bootstrap) Cấu hình Docker Engine proxy như Kolla-Ansible
   ansible.builtin.copy:
     dest: /etc/systemd/system/docker.service.d/http-proxy.conf
+    owner: root
+    group: root
     mode: "0600"
     content: |
       [Service]
-      # /etc/environment sha256={{ _system_environment_file.stat.checksum | default('missing') }}
-      EnvironmentFile=-/etc/environment
+      Environment={{ ('HTTP_PROXY=' ~ docker_http_proxy) | to_json }}
+      Environment={{ ('HTTPS_PROXY=' ~ docker_https_proxy) | to_json }}
+      Environment={{ ('NO_PROXY=' ~ docker_no_proxy) | to_json }}
+  when: >-
+    (docker_http_proxy | default('') | length > 0) or
+    (docker_https_proxy | default('') | length > 0)
   notify:
     - Reload systemd daemon
     - Restart docker
-  tags: [bootstrap]
+    - Restore containers running before Docker restart
+  tags: [bootstrap, docker_proxy]
+
+- name: (bootstrap) Gỡ Docker Engine proxy khi đã tắt trong globals.yml
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d/http-proxy.conf
+    state: absent
+  when:
+    - (docker_http_proxy | default('') | length) == 0
+    - (docker_https_proxy | default('') | length) == 0
+  notify:
+    - Reload systemd daemon
+    - Restart docker
+    - Restore containers running before Docker restart
+  tags: [bootstrap, docker_proxy]
 
 - name: (bootstrap) Cài Docker Engine (bỏ qua nếu đã có)
   when: docker_check.rc != 0
@@ -221,7 +158,6 @@
         url: https://download.docker.com/linux/ubuntu/gpg
         dest: /etc/apt/keyrings/docker.asc
         mode: "0644"
-      environment: "{{ proxy_environment }}"
       register: _bootstrap_docker_key_result
       retries: 8
       delay: 10
@@ -231,7 +167,6 @@
         repo: "deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         filename: docker
         state: present
-      environment: "{{ proxy_environment }}"
       register: _bootstrap_docker_repo_result
       retries: 8
       delay: 10
@@ -242,7 +177,6 @@
         update_cache: true
         lock_timeout: 300
         state: present
-      environment: "{{ proxy_environment }}"
       register: _bootstrap_docker_packages_result
       retries: 8
       delay: 10

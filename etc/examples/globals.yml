@@ -8,31 +8,12 @@
 ###############################################################################
 # Chung
 ###############################################################################
-# Proxy tuỳ chọn. Có thể để trống proxy_http/proxy_https và chỉ khai proxy trong /etc/environment
-# trên từng managed node (cách vận hành đơn giản như host chạy Kolla); playbook tự dùng môi trường đó cho
-# apt/get_url, Docker daemon, Ubuntu Pro ESM cache và container Icinga 2. Chỉ khai ở đây khi muốn
-# Ansible tự ghi /etc/environment hoặc cần proxy_group_overrides theo nhóm.
-# KHÔNG cho traffic nội bộ cluster (10.0.0.0/24, localhost...) đi qua proxy — xem no_proxy.
-proxy_http:  ""       # vd "http://proxy.example.internal:3128"
-proxy_https: ""       # thường trùng proxy_http (proxy HTTP forward-proxy cho cả HTTPS)
-proxy_no_proxy: "localhost,127.0.0.1,::1"   # thêm subnet nội bộ nếu cần, vd ",10.0.0.0/24"
-
-# (tuỳ chọn, 2026-09-13) Override proxy RIÊNG cho từng nhóm vai trò (master/satellite/galera/client)
-# — dùng khi các nhóm nằm ở mạng khác nhau, mỗi mạng ra Internet qua 1 proxy riêng, hoặc 1 nhóm
-# không cần proxy dù nhóm khác cần. Field nào không khai trong 1 nhóm rơi về đúng
-# proxy_http/proxy_https/proxy_no_proxy ở trên (không cần khai đủ cả 3 field mỗi nhóm).
-# Để trống ({}) nếu mọi nhóm dùng chung 1 proxy — hành vi mặc định, không đổi gì so với trước.
-proxy_group_overrides: {}
-# vd:
-# proxy_group_overrides:
-#   satellite:                                          # satellite ở DC/VLAN khác, proxy riêng
-#     http:  "http://proxy-dc2.example.internal:3128"
-#     https: "http://proxy-dc2.example.internal:3128"
-#     no_proxy: "localhost,127.0.0.1,::1,10.1.0.0/24"   # subnet nội bộ RIÊNG của DC2 (khác global)
-#   galera:                                              # DB nội bộ, không qua proxy dù global có khai
-#     http:  ""
-#     https: ""
-#     no_proxy: ""    # KHÔNG bắt buộc — không khai thì rơi về proxy_no_proxy global như 2 field kia
+# Docker Engine proxy, cùng tên biến và phạm vi với Kolla-Ansible. Chỉ Docker
+# daemon dùng các giá trị này để pull image; tool không ghi /etc/environment,
+# không cấu hình APT và không truyền proxy vào container Icinga.
+docker_http_proxy:  ""       # vd "http://proxy.example.internal:3128"
+docker_https_proxy: ""       # thường trùng docker_http_proxy
+docker_no_proxy: "localhost,127.0.0.1,::1"  # thêm subnet/VIP/registry nội bộ
 
 # --- Version image: khai THẲNG tag từng thành phần ---------------------------------------
 # KHÔNG có "bộ phiên bản" gộp sẵn — Icinga phát hành từng thành phần độc lập, không có bundle có

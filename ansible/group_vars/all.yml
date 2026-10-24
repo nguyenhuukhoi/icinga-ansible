@@ -100,72 +100,12 @@ icingaweb2_timezone: "Asia/Ho_Chi_Minh"
 
 # Bật module Director chỉ chuẩn bị DB/schema/module. Người vận hành tự Kickstart và quản lý object.
 
-# --- Proxy (globals override; mặc định dùng /etc/environment của managed node) -
-# proxy_group_overrides (2026-09-13, tuỳ chọn — khai trong globals.yml): override proxy RIÊNG cho
-# từng nhóm vai trò (master/satellite/galera/client) — dùng khi các nhóm nằm ở mạng khác nhau, mỗi
-# mạng ra Internet qua 1 proxy riêng (hoặc 1 nhóm không cần proxy dù nhóm khác cần). Field nào không
-# khai trong 1 nhóm (http/https/no_proxy) rơi về đúng giá trị global proxy_http/https/no_proxy phía
-# trên — không phải "khai 1 field thì phải khai đủ cả 3" theo từng nhóm.
-proxy_group_overrides: {}
-
-# Thứ tự ưu tiên CỐ ĐỊNH — khác cơ chế "override config theo nhóm" ở render_config_item.yml (nơi đó
-# dùng group_names vì tên nhóm override do người dùng tự đặt tuỳ ý). Ở đây chỉ có đúng 4 nhóm VAI TRÒ
-# cố định của chính topology (không ai đặt thêm nhóm khác cho việc này), nên liệt kê tường minh để
-# kết quả LUÔN dự đoán được, không phụ thuộc thứ tự group_names (vốn không đảm bảo — xem design.md
-# mục 4.1). 1 host thuộc nhiều nhóm cùng lúc (hiếm, vd all-in-one thuộc cả master+galera) lấy nhóm
-# đứng TRƯỚC trong danh sách này.
-_proxy_group_priority: [master, satellite, galera, client]
-_proxy_group_match: >-
-  {{ (_proxy_group_priority
-      | select('in', group_names)
-      | select('in', proxy_group_overrides.keys() | list)
-      | list | first) | default('', true) }}
-
-proxy_http_effective: >-
-  {{ (proxy_group_overrides[_proxy_group_match].http | default(proxy_http))
-     if _proxy_group_match | length > 0 else proxy_http }}
-proxy_https_effective: >-
-  {{ (proxy_group_overrides[_proxy_group_match].https | default(proxy_https))
-     if _proxy_group_match | length > 0 else proxy_https }}
-proxy_no_proxy_effective: >-
-  {{ (proxy_group_overrides[_proxy_group_match].no_proxy | default(proxy_no_proxy))
-     if _proxy_group_match | length > 0 else proxy_no_proxy }}
-
-# Một nguồn proxy đơn giản như host Kolla: nếu globals.yml không khai proxy_http thì dùng proxy đã
-# được PAM nạp từ /etc/environment vào facts.env trên managed node. Khi globals.yml có khai proxy,
-# giá trị explicit (kể cả proxy_group_overrides) vẫn ưu tiên và common role ghi nó vào
-# /etc/environment. Không lấy no_proxy mặc định của globals khi đang fallback, vì làm vậy sẽ trộn
-# hai nguồn và có thể làm mất NO_PROXY thực tế của host.
-_managed_host_environment: >-
-  {{ _managed_host_environment_file
-     | default(ansible_facts.env | default({})) }}
-proxy_http_runtime: >-
-  {{ proxy_http_effective
-     if (proxy_http_effective | default('')) | length > 0
-     else (_managed_host_environment.get('http_proxy', '') or
-           _managed_host_environment.get('HTTP_PROXY', '')) }}
-proxy_https_runtime: >-
-  {{ proxy_https_effective
-     if (proxy_https_effective | default('')) | length > 0
-     else (_managed_host_environment.get('https_proxy', '') or
-           _managed_host_environment.get('HTTPS_PROXY', '')) }}
-proxy_no_proxy_runtime: >-
-  {{ proxy_no_proxy_effective
-     if ((proxy_http_effective | default('')) | length > 0 or
-         (proxy_https_effective | default('')) | length > 0)
-     else (_managed_host_environment.get('no_proxy', '') or
-           _managed_host_environment.get('NO_PROXY', '')) }}
-
-# Dùng cho task apt/get_url và env container icinga2. Biến được đánh giá lazy
-# sau gather_facts nên facts.env đã có proxy từ /etc/environment; lúc fact gathering chưa xong,
-# dictionary rỗng {} không ghi đè môi trường mà PAM của SSH/sudo đã nạp.
-proxy_environment: >-
-  {{ {'http_proxy': proxy_http_runtime,
-      'https_proxy': proxy_https_runtime,
-      'no_proxy': proxy_no_proxy_runtime}
-     if ((proxy_http_runtime | default('')) | length > 0 or
-         (proxy_https_runtime | default('')) | length > 0)
-     else {} }}
+# --- Docker Engine proxy (cùng phạm vi và tên biến với Kolla-Ansible) ---------
+# Chỉ Docker daemon dùng ba giá trị này để pull image. Chúng không cấu hình APT,
+# /etc/environment hoặc environment bên trong container.
+docker_http_proxy: ""
+docker_https_proxy: ""
+docker_no_proxy: "localhost,127.0.0.1,::1"
 
 # --- Image helper -------------------------------------------------------------
 # registry_prefix: mirror riêng nếu có (docker_registry), rỗng = public Docker Hub.

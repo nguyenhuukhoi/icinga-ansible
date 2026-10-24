@@ -181,33 +181,35 @@
       Chỉ được dùng đúng tên trong images_upstream: {{ images_upstream.keys() | join(', ') }}.
   when: (custom_image_overrides | default({})) | length > 0
 
-- name: "proxy_group_overrides chỉ được khai đúng tên nhóm vai trò có thật"
-  # Cùng tinh thần validate custom_image_overrides ở trên — tránh gõ nhầm tên nhóm (vd "satelite")
-  # rồi âm thầm không có tác dụng gì (fallback về proxy global, không lỗi, khó phát hiện).
+- name: Chặn biến proxy cũ để tránh cấu hình bị bỏ qua âm thầm
   ansible.builtin.assert:
-    that: >-
-      proxy_group_overrides.keys() | difference(['master', 'satellite', 'galera', 'client']) | length == 0
+    that:
+      - proxy_http is not defined
+      - proxy_https is not defined
+      - proxy_no_proxy is not defined
+      - proxy_group_overrides is not defined
     fail_msg: >-
-      proxy_group_overrides có khoá không hợp lệ:
-      {{ proxy_group_overrides.keys() | difference(['master', 'satellite', 'galera', 'client']) | join(', ') }}.
-      Chỉ được dùng đúng tên nhóm vai trò: master, satellite, galera, client.
-  when: (proxy_group_overrides | default({})) | length > 0
+      Proxy đã đổi sang thiết kế Kolla-Ansible. Hãy đổi proxy_http/proxy_https/proxy_no_proxy
+      thành docker_http_proxy/docker_https_proxy/docker_no_proxy và xoá proxy_group_overrides.
+      Ba biến mới chỉ cấu hình Docker Engine pull image.
 
-- name: "proxy_group_overrides[<nhóm>] chỉ được khai đúng tên field http/https/no_proxy"
-  # BUG THẬT (đọc trước khi xoá check này): check tên NHÓM ở trên (vd chặn "satelite" gõ sai) không
-  # bắt được lỗi gõ sai TÊN FIELD bên trong 1 nhóm (vd "htpp" thay vì "http") — group_vars/all.yml
-  # đọc field qua "proxy_group_overrides[group].http | default(proxy_http, true)", và Jinja trả về
-  # Undefined cho field không tồn tại rồi "default(..., true)" tự âm thầm rơi về giá trị global, KHÔNG
-  # báo lỗi gì — người vận hành tưởng đã đặt proxy riêng cho nhóm nhưng thực ra vẫn dùng global.
+- name: Kiểm tra Docker Engine proxy
   ansible.builtin.assert:
-    that: >-
-      (proxy_group_overrides[item].keys() | difference(['http', 'https', 'no_proxy']) | length) == 0
+    that:
+      - docker_http_proxy is string
+      - docker_https_proxy is string
+      - docker_no_proxy is string
+      - >-
+        (docker_http_proxy | length == 0) or
+        (docker_http_proxy is match('^https?://[^\\s]+$'))
+      - >-
+        (docker_https_proxy | length == 0) or
+        (docker_https_proxy is match('^https?://[^\\s]+$'))
+      - "'\\n' not in docker_no_proxy"
+      - "'\\r' not in docker_no_proxy"
     fail_msg: >-
-      proxy_group_overrides.{{ item }} có field không hợp lệ:
-      {{ proxy_group_overrides[item].keys() | difference(['http', 'https', 'no_proxy']) | join(', ') }}.
-      Chỉ được dùng: http, https, no_proxy (field nào không khai sẽ tự rơi về giá trị proxy_http/
-      proxy_https/proxy_no_proxy toàn cục, không cần khai đủ cả 3).
-  loop: "{{ (proxy_group_overrides | default({})).keys() | list }}"
+      docker_http_proxy/docker_https_proxy phải rỗng hoặc là URL http(s) không chứa khoảng trắng;
+      docker_no_proxy phải là chuỗi phân cách bằng dấu phẩy.
 
 - name: Chặn IDO/PDO — không cho bật ido-mysql / ido-pgsql
   ansible.builtin.assert:

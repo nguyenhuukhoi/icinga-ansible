@@ -34,9 +34,9 @@ Sửa `/etc/icinga-ansible/globals.yml`, tối thiểu kiểm tra:
 - `enable_icingaweb2_modules`;
 - proxy/registry CA nếu môi trường yêu cầu.
 
-Các biến `proxy_http`, `proxy_https`, `proxy_no_proxy` và `proxy_group_overrides` là proxy mạng qua
-environment (APT, download, Docker daemon pull image và Icinga 2 container), không phải cấu hình
-Docker socket và không liên quan `/var/run/docker.sock`.
+Các biến `docker_http_proxy`, `docker_https_proxy` và `docker_no_proxy` hoạt động cùng phạm vi với
+Kolla-Ansible: chỉ cấu hình Docker Engine pull image. Tool không dùng chúng cho APT/download, không
+ghi `/etc/environment`, không truyền vào container và không liên quan `/var/run/docker.sock`.
 
 Có thể mã hoá secret bằng `ansible-vault encrypt /etc/icinga-ansible/passwords.yml` và truyền
 tuỳ chọn Vault qua CLI.

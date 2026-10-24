@@ -7,3 +7,13 @@
   ansible.builtin.service:
     name: docker
     state: restarted
+
+# Docker 29 can leave a fast, cleanly-exiting container stopped while the
+# daemon shuts down even when its restart policy is unless-stopped. Restore
+# exactly the containers that were running before this play; intentionally
+# stopped containers are not touched.
+- name: Restore containers running before Docker restart
+  ansible.builtin.command:
+    argv: [docker, start, "{{ item }}"]
+  loop: "{{ _docker_running_containers_before_proxy.stdout_lines | default([]) }}"
+  changed_when: true

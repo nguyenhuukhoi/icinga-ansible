@@ -210,31 +210,22 @@ Tối thiểu cần xem xét:
 
 Không public MariaDB, Galera hoặc Redis ra Internet. Web production nên đi qua reverse proxy/LB có TLS thay vì public thẳng HTTP 8080.
 
-Nếu các host đi Internet qua proxy, chỉ cần khai HTTP/HTTPS/NO_PROXY trong `/etc/environment` trên
-từng managed node. `globals.yml` có thể để trống proxy. Chỉ dùng `proxy_http`, `proxy_https`,
-`proxy_no_proxy` và `proxy_group_overrides` khi muốn playbook tự quản file này hoặc cần giá trị khác
-nhau cho từng group `master`, `satellite`, `galera`, `client`.
+Proxy trong `globals.yml` có cùng tên và phạm vi với Kolla-Ansible: chỉ Docker Engine dùng để pull
+image. Tool không ghi `/etc/environment`, không cấu hình APT/Ubuntu Pro và không truyền proxy vào
+container Icinga. Nếu bootstrap host cũng cần proxy để cài package hoặc tải Docker repository, hãy
+cấu hình proxy cho APT/host bằng cơ chế hệ điều hành trước khi chạy tool.
 
-Đây là **proxy mạng dạng environment**, không phải Docker socket và không thay đổi
-`/var/run/docker.sock`. Giá trị được dùng cho APT/download, ghi vào `/etc/environment`, truyền cho
-container Icinga 2 và cho Docker daemon đọc để pull image qua HTTP/HTTPS proxy.
-
-Ví dụ `/etc/environment` đã kiểm thử trên lab OpenStack:
-
-```ini
-http_proxy="http://proxy.example.vn:80"
-https_proxy="http://proxy.example.vn:80"
-HTTP_PROXY="http://proxy.example.vn:80"
-HTTPS_PROXY="http://proxy.example.vn:80"
-no_proxy="localhost,127.0.0.1,::1,10.20.0.0/24"
-NO_PROXY="localhost,127.0.0.1,::1,10.20.0.0/24"
+```yaml
+docker_http_proxy: "http://proxy.example.vn:80"
+docker_https_proxy: "http://proxy.example.vn:80"
+docker_no_proxy: "localhost,127.0.0.1,::1,10.20.0.0/24,registry.internal"
 ```
 
-`bootstrap-servers` dùng proxy mà PAM đã nạp từ `/etc/environment` cho các task `apt` và tải
-key/repository. Playbook tạo systemd drop-in `EnvironmentFile=-/etc/environment` cho cả Docker và
-Ubuntu Pro ESM cache, nên operator vẫn chỉ duy trì một file. Sau khi sửa file, chạy lại
-`bootstrap-servers`, rồi dùng `systemctl cat docker.service` và `systemctl cat esm-cache.service`
-xác nhận cả hai drop-in có `EnvironmentFile=-/etc/environment` trên từng node.
+`bootstrap-servers` ghi riêng `/etc/systemd/system/docker.service.d/http-proxy.conf`, reload systemd
+và restart Docker khi giá trị thay đổi. Sau đó dùng `systemctl show docker --property=Environment`
+để xác nhận. Các biến cũ `proxy_http`, `proxy_https`, `proxy_no_proxy`, `proxy_group_overrides` bị
+chặn có thông báo rõ ràng để tránh cấu hình cũ bị bỏ qua âm thầm.
+
 Lệnh `pull` luôn kiểm tra lại digest và retry tối đa 8 lần, cách nhau 10 giây, cho từng image. Retry này
 xử lý lỗi tạm thời 429/5xx từ registry/CDN; nếu hết retry vẫn lỗi thì không có runtime nào bị thay đổi.
 Trong lab, truy cập Docker Hub trực tiếp bị timeout, đi qua proxy nhận phản hồi registry hợp lệ; pull đủ

@@ -1011,13 +1011,20 @@
     argv: "{{ _ic_validate_argv }}"
   changed_when: false
 
+- name: Đọc environment của container để gỡ proxy legacy đúng một lần
+  community.docker.docker_container_info:
+    name: icinga2
+  register: _ic_existing_container
+
 - name: Ghi nhận node setup đã thay đổi runtime/PKI trong lượt chạy này
   ansible.builtin.set_fact:
     _ic_node_setup_changed: >-
       {{ ((_ca_host_node_setup | default({})).changed | default(false)) or
          ((_master2_node_setup | default({})).changed | default(false)) or
          ((_satellite_node_setup | default({})).changed | default(false)) or
-         ((_client_node_setup | default({})).changed | default(false)) }}
+         ((_client_node_setup | default({})).changed | default(false)) or
+         (((((_ic_existing_container.container | default({}, true)).Config | default({})).Env | default([]))
+           | select('match', '^(http_proxy|https_proxy|no_proxy)=') | list | length) > 0) }}
 
 - name: Khởi động container icinga2 (host network, mount /data)
   community.docker.docker_container:
@@ -1040,16 +1047,6 @@
     # /data giữ runtime/PKI; /data/etc/icinga2 bị mount lồng bằng nguyên cây config chính thức RW.
     # Nhờ vậy file do operator hoặc Icinga tự tạo trong cây config đều tồn tại trực tiếp trên host.
     volumes: "{{ _ic_dynamic_volumes }}"
-    # Proxy ra Internet cho plugin/operator integration chạy trong container —
-    # mạng lab bắt buộc qua proxy công ty cho MỌI traffic ra ngoài, kể cả container (đã xác nhận:
-    # generic internet 1.1.1.1 direct từ trong container TREO hẳn dù network_mode=host + cùng
-    # resolv.conf với host, trong khi qua "-x proxy" thì OK ngay; host tự curl direct lại OK — khác
-    # biệt do rule mạng/host chỉ áp dụng transparent-proxy cho tiến trình host, không áp dụng cho
-    # container). Trước đây `proxy_environment` chỉ dùng cho bootstrap (apt/Docker daemon) — giờ
-    # gắn thêm vào container icinga2 để script gọi ra ngoài tự
-    # đi qua proxy mà không cần tự cấu hình trong từng script. Khi globals không khai proxy, biến
-    # này lấy từ /etc/environment qua facts.env; nếu host không có proxy thì vẫn là {}.
-    env: "{{ proxy_environment }}"
     # So sánh strict để gỡ mọi per-file mount còn sót từ layout cũ và bảo đảm container chỉ dùng
     # đúng các mount nguyên cây hiện tại. Thay đổi file trong cây config được handler restart daemon.
     comparisons:
