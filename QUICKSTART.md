@@ -343,8 +343,9 @@ membership Galera; thêm/xóa Galera cần kế hoạch quorum, SST/IST và back
 
 ## 7. Backup, destroy và khôi phục
 
-Ba quy trình copy/paste ngắn (restore cụm hiện tại, VM sạch cùng IP, VM sạch khác IP) nằm tại
-[QUICKSTART-BACKUP-RESTORE.md](QUICKSTART-BACKUP-RESTORE.md). Phần dưới giải thích chi tiết.
+Mục này là tài liệu chính, có đủ ba quy trình: restore trên hệ thống hiện tại, VM sạch cùng IP và
+VM sạch khác IP. [QUICKSTART-BACKUP-RESTORE.md](QUICKSTART-BACKUP-RESTORE.md) chỉ là checklist rút gọn;
+khi hai tài liệu có khác biệt, làm theo file này.
 
 ### 7.1. Tạo và xác minh full backup
 
@@ -398,25 +399,83 @@ Ví dụ copy off-site không xóa generation cũ ở đích:
 rsync -a "$BACKUP_ROOT/" backup-host:/srv/backup/icinga/prod/
 ```
 
-### 7.2. Dựng lại cụm mới từ full backup
+### 7.2. Trường hợp 1: restore trên hệ thống hiện tại
 
-Quy trình dưới đây áp dụng khi mất toàn bộ service node và dựng lại topology 2 master + 3 Galera
-trên VM/IP mới. Dùng đúng version code và MariaDB đã tạo backup; chỉ upgrade sau khi restore PASS.
-
-Trước khi bắt đầu, đưa nguyên cây backup từ storage ngoài về đúng layout, clone revision code ghi
-trong `cluster-*.json`, tạo venv và cài collection. Giải nén `inventory-*.tar.gz`; nếu IP đổi, chỉ sửa
-`ansible_host`. Phải giữ nguyên tên logic, thứ tự và membership group để node archive ánh xạ đúng.
+Dùng luồng này khi các VM và topology vẫn còn, nhưng cần đưa toàn bộ config, CA/PKI, identity endpoint,
+Web và database về đúng generation backup. `restore_mode=existing` chỉ chấp nhận khi CA đang chạy khớp
+CA trong bundle. Trước khi ghi đè, tool tự lưu node-state hiện tại vào
+`/var/backups/icinga-ansible-pre-restore/` trên từng endpoint.
 
 ```bash
 cd /opt/icinga-ansible
 source /path/to/venv/bin/activate
-INV=ansible/inventory/restore-cluster
+INV=ansible/inventory/my-cluster
 BACKUP_ROOT=/var/backups/icinga-ansible-config
 BACKUP_TS="$(cat "$BACKUP_ROOT/LATEST_COMPLETE")"
+MONITORING_SERVICE_COUNT=21    # thay bằng baseline thật
 
 cd "$BACKUP_ROOT"
 sha256sum --strict -c "manifest-$BACKUP_TS.sha256"
 cd /opt/icinga-ansible
+
+CONFIRM=yes-i-really-really-mean-it ./tools/icinga-ansible restore-config \
+  --config-backup "$BACKUP_ROOT/config-$BACKUP_TS.tar.gz"
+
+./tools/icinga-ansible restore-node-state -i "$INV" \
+  -e restore_mode=existing -e restore_backup_ts="$BACKUP_TS" \
+  -e confirm=yes-i-really-really-mean-it
+
+# restore-node-state để service dừng; dựng runtime tạm trước khi restore DB.
+./tools/icinga-ansible deploy -i "$INV"
+
+./tools/icinga-ansible mariadb-recovery -i "$INV" \
+  -e recovery_mode=restore-backup -e restore_backup_tag=full \
+  -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
+
+./tools/icinga-ansible recover-db-only -i "$INV" -e confirm=yes
+./tools/icinga-ansible restore-web -i "$INV" \
+  -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
+
+./tools/icinga-ansible deploy -i "$INV"
+./tools/icinga-ansible restore-director -i "$INV" -e confirm=yes
+./tools/icinga-ansible check -i "$INV"
+./tools/icinga-ansible verify-monitoring -i "$INV" \
+  -e monitoring_expected_service_count="$MONITORING_SERVICE_COUNT"
+```
+
+Không chạy `bootstrap-servers` trong case này. Nếu CA hiện tại không khớp bundle, dừng lại: hoặc chọn
+đúng generation của chính cluster đó, hoặc dựng VM sạch theo case 2/3; không ép `restore_mode=existing`.
+
+### 7.3. Trường hợp 2: VM sạch, cùng IP và topology
+
+Quy trình dưới đây áp dụng khi dựng lại toàn bộ topology 2 master + 3 Galera trên VM sạch nhưng giữ
+nguyên hostname logic, membership và IP. Dùng đúng version code, container image và MariaDB đã tạo
+backup; chỉ upgrade sau khi restore PASS.
+
+Trước khi bắt đầu, đưa nguyên cây backup từ storage ngoài về đúng layout, clone revision code ghi
+trong `cluster-*.json`, tạo venv và cài collection. Tắt/xóa hoàn toàn VM cũ và bảo đảm không có hai VM
+dùng cùng IP. Phải giữ nguyên tên logic, thứ tự và membership group để node archive ánh xạ đúng.
+
+```bash
+cd /opt/icinga-ansible
+source /path/to/venv/bin/activate
+BACKUP_ROOT=/var/backups/icinga-ansible-config
+BACKUP_TS="$(cat "$BACKUP_ROOT/LATEST_COMPLETE")"
+MONITORING_SERVICE_COUNT=21    # thay bằng baseline thật
+
+mkdir -p restore-inventory
+tar -xzf "$BACKUP_ROOT/inventory-$BACKUP_TS.tar.gz" -C restore-inventory
+INV=restore-inventory/my-cluster    # thay bằng tên inventory vừa giải nén
+
+cd "$BACKUP_ROOT"
+sha256sum --strict -c "manifest-$BACKUP_TS.sha256"
+cd /opt/icinga-ansible
+
+# VM sạch có SSH host key mới; thay danh sách bằng IP thật trong inventory.
+for ip in 10.0.0.11 10.0.0.12 10.0.0.21 10.0.0.22 10.0.0.23; do
+  ssh-keygen -f ~/.ssh/known_hosts -R "$ip"
+  ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/monitoring-lab-key ubuntu@"$ip" true
+done
 ```
 
 Khôi phục desired state trên deployment node. Nếu `/etc/icinga-ansible` đang có dữ liệu, bắt buộc
@@ -473,7 +532,7 @@ Dựng runtime tạm, restore physical database, khôi phục environment ID r�
 ./tools/icinga-ansible restore-director -i "$INV" -e confirm=yes
 ./tools/icinga-ansible check  -i "$INV"
 ./tools/icinga-ansible verify-monitoring -i "$INV" \
-  -e monitoring_expected_service_count=21
+  -e monitoring_expected_service_count="$MONITORING_SERVICE_COUNT"
 ```
 
 `restore-web` yêu cầu tên các master mới khớp tên master trong bundle. Nếu đổi tên hoặc thêm master
@@ -485,41 +544,39 @@ tầng do role quản lý. `restore-director` chỉ publish lại object đã c�
 hoặc sửa nội dung monitoring. `verify-monitoring` chờ đúng số service có kết quả live `OK` trên cả hai
 master; thay `21` bằng baseline thật của cụm.
 
-Nếu IP master đổi, phải đổi cả allowlist nằm trên các target bên ngoài cụm Icinga: monitoring key
-`from=`, TCP wrappers (`/etc/hosts.allow` khi có `sshd: ALL`), firewall và security group. Full backup
-không và không nên tự sửa các máy được monitor. `restore-director` tự reconcile endpoint API của
-Director theo `ansible_host` mới trước khi publish object.
-
-#### Trường hợp server sạch dùng lại đúng IP cũ
-
-Quy trình restore không thay đổi, nhưng phải xử lý identity hạ tầng trước khi bootstrap. Chỉ tái sử
-dụng IP sau khi server cũ đã tắt/xóa hoàn toàn và Neutron không còn port cũ giữ địa chỉ; tuyệt đối
-không để hai máy cùng dùng một IP. Nên tạo trước port mới với đúng fixed IP rồi gắn port đó vào VM
-mới để khóa địa chỉ trong suốt quá trình dựng lại.
-
-Giữ nguyên inventory hostname (`master1`, `master2`, `galera1`...) và `ansible_host`; không cần sửa
-inventory nếu topology và IP đều giữ nguyên. Vì VM sạch có SSH host key mới, xóa key cũ rồi chỉ chấp
-nhận key mới ở lần kết nối đầu:
-
-```bash
-for ip in 10.0.0.11 10.0.0.12 10.0.0.21 10.0.0.22 10.0.0.23; do
-  ssh-keygen -f ~/.ssh/known_hosts -R "$ip"
-  ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/monitoring-lab-key ubuntu@"$ip" true
-done
-
-ansible -i "$INV" all_hosts -m ping
-```
-
-Sau đó chạy nguyên thứ tự ở trên: `restore-config`, `bootstrap-servers`, `restore-node-state` mode
-`clean`, `pull`, deploy tạm, `mariadb-recovery`, `recover-db-only`, `restore-web`, deploy cuối,
-`restore-director`, `check` và `verify-monitoring`. Cùng IP không thay thế việc restore CA,
-certificate hay environment ID.
-
 Bài destructive regression ngày 2026-10-24 đã xóa và dựng lại 2 master + 3 Galera bằng đúng năm IP
 cũ, rồi lặp lại trên năm IP mới. Cả hai lần đều xác nhận CA/cert, environment ID, Icinga API, Web
 login, Icinga DB heartbeat/config sync, Director chỉ master1 và Galera 3/3 healthy.
 
-#### Trường hợp chỉ import database ứng dụng vào cụm mới
+### 7.4. Trường hợp 3: VM sạch, khác IP nhưng cùng topology
+
+Thực hiện toàn bộ case 2, nhưng sau khi giải nén inventory và **trước** `bootstrap-servers`, tạo bản
+inventory DR rồi chỉ đổi `ansible_host`. Giữ nguyên inventory hostname (`master1`, `master2`...), thứ
+tự và membership các group `master`, `satellite`, `client`, `galera`, `icinga_master_zone_name` và
+`icinga_database_type`.
+
+```bash
+cp restore-inventory/my-cluster restore-inventory/my-cluster-new-ip
+INV=restore-inventory/my-cluster-new-ip
+$EDITOR "$INV"                         # chỉ đổi ansible_host
+ansible-inventory -i "$INV" --graph
+ansible -i "$INV" all_hosts -m ping
+```
+
+Sau đó chạy đúng chuỗi lệnh trong case 2, bắt đầu từ `restore-config`. `restore-node-state` kiểm tra
+logical topology nhưng cho phép IP đổi; lần `deploy` đầu sẽ render lại `zones.conf` theo IP mới.
+`restore-director` tự reconcile endpoint API sang `ansible_host` của `master[0]` mới trước khi publish.
+
+Trước `verify-monitoring`, cập nhật allowlist nằm **trên các hệ thống được monitor** sang IP master mới:
+
+- `from="..."` của monitoring key trong `authorized_keys`;
+- `/etc/hosts.allow` nếu target dùng `sshd: ALL` trong `/etc/hosts.deny`;
+- firewall, security group và ACL mạng liên quan.
+
+Các file trên target OpenStack không thuộc full backup của cluster Icinga và tool không tự sửa chúng.
+Chỉ coi restore thành công sau khi `check` không có host lỗi và `verify-monitoring` đạt đủ baseline.
+
+### 7.5. Trường hợp chỉ import database ứng dụng vào cụm mới
 
 Luồng này dựng Galera sạch, giữ nguyên system DB của cụm mới và chỉ mang theo:
 
@@ -695,7 +752,7 @@ Regression thật ngày 2026-10-23 đã dựng cụm mới 2 master + 3 Galera, 
 ba schema ứng dụng, phục hồi environment ID và chạy full `check` với `failed=0`. Chi tiết và checksum
 nằm ở mục 14.8 và 19.4 của `OPERATIONS-RUNBOOK-VI.md`.
 
-### 7.3. Kiểm tra sau restore
+### 7.6. Kiểm tra sau restore
 
 Tối thiểu phải xác nhận:
 
@@ -728,7 +785,7 @@ ssh ubuntu@"$CA_IP" \
 Chỉ xóa hạ tầng cũ hoặc backup generation cũ sau khi toàn bộ checklist PASS và đã tạo một
 `backup-full` baseline mới từ cluster vừa phục hồi.
 
-### 7.4. Destroy rồi deploy lại cùng cluster
+### 7.7. Destroy rồi deploy lại cùng cluster
 
 Nếu chỉ cần xóa runtime nhưng vẫn giữ deployment node, config và inventory hiện tại:
 
