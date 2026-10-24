@@ -130,8 +130,8 @@ icingaweb2_timezone: "Asia/Ho_Chi_Minh"           # timezone hiển thị mặc 
 
 # Module Icinga Web 2 muốn bật (chỉ quyết định BẬT CÁI NÀO, không quyết định version)
 enable_icingaweb2_modules:
-  - "icingadb"                                   # BẮT BUỘC
-  # - "director"                                 # bật sau khi verify core (cần DB + migration)
+  - "icingadb"
+#  - "director"                                 # tùy chọn; nếu bật, chỉ chạy trên ca_host/master1
 
 # Ansible chỉ enable/migrate Director. Operator tự Kickstart và quản lý object trong Web UI.
 

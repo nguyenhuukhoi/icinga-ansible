@@ -7,19 +7,19 @@
 # Deployment node SSH tới toàn bộ master/satellite; không host nào dùng connection=local.
 
 [all_hosts]
-master1 ansible_host=10.0.0.11
-master2 ansible_host=10.0.0.12
-sat01   ansible_host=10.0.0.13
-sat02   ansible_host=10.0.0.14
+icinga-master01    ansible_host=10.0.0.11
+icinga-master02    ansible_host=10.0.0.12
+icinga-satellite01 ansible_host=10.0.0.13
+icinga-satellite02 ansible_host=10.0.0.14
 
 # ===== Vai trò Icinga =====
 [master]
-master1
-master2
+icinga-master01
+icinga-master02
 
 [satellite]
-sat01
-sat02
+icinga-satellite01
+icinga-satellite02
 
 [client]
 

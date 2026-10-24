@@ -4,34 +4,34 @@
 # không phải standalone).
 # Mô hình multi-master luôn dùng deployment node TÁCH RIÊNG, không nằm trong inventory này.
 # Deployment node SSH tới toàn bộ master/satellite/Galera; không host nào dùng connection=local.
-# satellite_zones (zone gồm sat01+sat02) khai trong /etc/icinga-ansible/globals.yml.
+# satellite_zones (zone gồm icinga-satellite01+icinga-satellite02) khai trong /etc/icinga-ansible/globals.yml.
 # Xem thêm "ha-2master-galera3" (cùng 3 node Galera, KHÔNG có satellite) nếu không cần zone con.
 
 [all_hosts]
-master1 ansible_host=10.0.0.11
-master2 ansible_host=10.0.0.12
-sat01   ansible_host=10.0.0.13
-sat02   ansible_host=10.0.0.14
-galera1 ansible_host=10.0.0.15
-galera2 ansible_host=10.0.0.16
-galera3 ansible_host=10.0.0.17
+icinga-master01    ansible_host=10.0.0.11
+icinga-master02    ansible_host=10.0.0.12
+icinga-satellite01 ansible_host=10.0.0.13
+icinga-satellite02 ansible_host=10.0.0.14
+galera01           ansible_host=10.0.0.15
+galera02           ansible_host=10.0.0.16
+galera03           ansible_host=10.0.0.17
 
 # ===== Vai trò Icinga =====
 [master]
-master1
-master2
+icinga-master01
+icinga-master02
 
 [satellite]
-sat01
-sat02
+icinga-satellite01
+icinga-satellite02
 
 [client]
 
 # ===== Database — 3 node lẻ -> Galera cluster THẬT (không phải standalone) =====
 [galera]
-galera1
-galera2
-galera3
+galera01
+galera02
+galera03
 
 [icinga:children]
 master

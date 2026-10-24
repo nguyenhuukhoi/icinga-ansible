@@ -48,24 +48,24 @@ Copy một file trong `ansible/inventory/` rồi sửa. Mỗi host có vai trò 
 
 ```ini
 [all_hosts]
-master1 ansible_host=10.0.0.11 ansible_user=ubuntu
-master2 ansible_host=10.0.0.12 ansible_user=ubuntu
-galera1 ansible_host=10.0.0.21 ansible_user=ubuntu
-galera2 ansible_host=10.0.0.22 ansible_user=ubuntu
-galera3 ansible_host=10.0.0.23 ansible_user=ubuntu
+icinga-master01 ansible_host=10.0.0.11 ansible_user=ubuntu
+icinga-master02 ansible_host=10.0.0.12 ansible_user=ubuntu
+galera01 ansible_host=10.0.0.21 ansible_user=ubuntu
+galera02 ansible_host=10.0.0.22 ansible_user=ubuntu
+galera03 ansible_host=10.0.0.23 ansible_user=ubuntu
 
 [master]
-master1
-master2
+icinga-master01
+icinga-master02
 
 [satellite]
 
 [client]
 
 [galera]
-galera1
-galera2
-galera3
+galera01
+galera02
+galera03
 
 [icinga:children]
 master
@@ -99,7 +99,7 @@ Role mount nguyên thư mục config với `rw`; không mount rời từng file:
 | Service | Host | Container |
 |---|---|---|
 | Icinga 2 | `/etc/icinga-ansible/icinga2/` | `/data/etc/icinga2/` |
-| Icinga Web 2 (Director chỉ trên `ca_host`/master1) | `/etc/icinga-ansible/icingaweb2/` | `/data/etc/icingaweb2/` |
+| Icinga Web 2 (Director chỉ trên `ca_host`/`icinga-master01`) | `/etc/icinga-ansible/icingaweb2/` | `/data/etc/icingaweb2/` |
 | Icinga DB | `/etc/icinga-ansible/icingadb/` | `/etc/icingadb/` |
 | Redis | `/etc/icinga-ansible/icingadb-redis/` | `/usr/local/etc/redis/` |
 | MariaDB/Galera | `/etc/icinga-ansible/mariadb/` | `/etc/mysql/conf.d/` |
@@ -123,9 +123,9 @@ không tự chạy chúng.
 ### Director
 
 Bật `director` trong `enable_icingaweb2_modules`. Ansible chỉ tạo DB, migrate schema và enable
-module trên `ca_host` (host đầu tiên trong `[master]`, thường là `master1`). Các master khác
+module trên `ca_host` (host đầu tiên trong `[master]`, ví dụ `icinga-master01`). Các master khác
 vẫn phục vụ Icinga DB Web nhưng không có module, resource DB, config hay daemon Director.
-Operator truy cập Web UI của master1 để quản lý thủ công. Với baseline hiện tại, chạy package
+Operator truy cập Web UI của `ca_host` để quản lý thủ công. Với baseline hiện tại, chạy package
 `monitoring/openstack-director`: Director quản lý 6 Host dùng `check_icmp` và 18 Service CPU/RAM/disk
 dùng `check_by_ssh`; Nova/Cinder/Neutron không nằm trong Director.
 
@@ -134,7 +134,7 @@ dùng `check_by_ssh`; Nova/Cinder/Neutron không nằm trong Director.
 Static DSL nằm ngoài role hạ tầng. `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node
 không phải nguồn cấu hình. Package `monitoring/openstack-file` trích ba credential service lúc chạy,
 ghi plugin/`clouds.yaml` lên cả hai master, chỉ ghi object Nova/Cinder/Neutron vào
-`zones.d/<master-zone>` của master1, rồi để Icinga native config-sync sang master2.
+`zones.d/<master-zone>` của `icinga-master01`, rồi để Icinga native config-sync sang `icinga-master02`.
 
 Credential API là local trên từng master. Role tạo thư mục
 `/etc/icinga-ansible/icinga2/secrets/` ngay trong cây config chính thức đã được mount RW vào container;
@@ -191,7 +191,7 @@ cp -a "$INV" "$INV.before-$(date +%Y%m%d-%H%M%S)"
 ### 6.1. Thêm master thứ hai
 
 Project hỗ trợ tối đa hai master. Nếu inventory đã có hai master, `prechecks` sẽ chặn việc thêm
-master thứ ba. Tên logic của node, ví dụ `master2`, phải ổn định dù IP có thể thay đổi.
+master thứ ba. Tên logic của node, ví dụ `icinga-master02`, phải ổn định dù IP có thể thay đổi.
 
 1. Tạo VM mới và xác nhận deployment node SSH/sudo được vào VM.
 2. Thêm node vào cả `[all_hosts]` và `[master]`. Giữ master đang làm CA ở dòng đầu tiên.
@@ -204,25 +204,25 @@ Ví dụ inventory sau khi sửa:
 
 ```ini
 [all_hosts]
-master1 ansible_host=10.0.0.11 ansible_user=ubuntu
-master2 ansible_host=10.0.0.12 ansible_user=ubuntu
+icinga-master01 ansible_host=10.0.0.11 ansible_user=ubuntu
+icinga-master02 ansible_host=10.0.0.12 ansible_user=ubuntu
 
 [master]
-master1
-master2
+icinga-master01
+icinga-master02
 ```
 
 Thực hiện:
 
 ```bash
-ansible -i "$INV" master2 -m ping
-./tools/icinga-ansible bootstrap-servers -i "$INV" --limit master2
+ansible -i "$INV" icinga-master02 -m ping
+./tools/icinga-ansible bootstrap-servers -i "$INV" --limit icinga-master02
 ./tools/icinga-ansible prechecks         -i "$INV"
 ./tools/icinga-ansible add-master        -i "$INV"
 ./tools/icinga-ansible check             -i "$INV"
 ```
 
-Không dùng `add-master --limit master2`: node mới có thể lên nhưng master/satellite cũ vẫn giữ
+Không dùng `add-master --limit icinga-master02`: node mới có thể lên nhưng master/satellite cũ vẫn giữ
 topology cũ.
 
 ### 6.2. Thêm một hoặc hai satellite
@@ -234,26 +234,26 @@ Ví dụ thêm hai node HA trong cùng zone:
 
 ```ini
 [all_hosts]
-satellite1 ansible_host=10.0.0.31 ansible_user=ubuntu
-satellite2 ansible_host=10.0.0.32 ansible_user=ubuntu
+icinga-satellite01 ansible_host=10.0.0.31 ansible_user=ubuntu
+icinga-satellite02 ansible_host=10.0.0.32 ansible_user=ubuntu
 
 [satellite]
-satellite1
-satellite2
+icinga-satellite01
+icinga-satellite02
 ```
 
 ```yaml
 satellite_zones:
   - name: "openstack-zone"
-    members: ["satellite1", "satellite2"]
+    members: ["icinga-satellite01", "icinga-satellite02"]
     parent: "master"
 ```
 
 Thực hiện:
 
 ```bash
-ansible -i "$INV" 'satellite1:satellite2' -m ping
-./tools/icinga-ansible bootstrap-servers -i "$INV" --limit 'satellite1,satellite2'
+ansible -i "$INV" 'icinga-satellite01:icinga-satellite02' -m ping
+./tools/icinga-ansible bootstrap-servers -i "$INV" --limit 'icinga-satellite01,icinga-satellite02'
 ./tools/icinga-ansible prechecks         -i "$INV"
 ./tools/icinga-ansible add-node          -i "$INV"
 ./tools/icinga-ansible check             -i "$INV"
@@ -271,14 +271,14 @@ nó không xóa VM.
 ```bash
 # 1. Target vẫn phải còn trong [all_hosts] và [satellite].
 ./tools/icinga-ansible remove-node -i "$INV" \
-  -e target_host=satellite2 -e confirm=yes
+  -e target_host=icinga-satellite02 -e confirm=yes
 
 # 2. Chỉ sau khi lệnh trên thành công:
-#    - xóa satellite2 khỏi [satellite] và [all_hosts];
-#    - xóa satellite2 khỏi satellite_zones[].members;
+#    - xóa icinga-satellite02 khỏi [satellite] và [all_hosts];
+#    - xóa icinga-satellite02 khỏi satellite_zones[].members;
 #    - nếu zone hết member, xóa cả zone.
-$EDITOR "$INV"
-$EDITOR /etc/icinga-ansible/globals.yml
+nano "$INV"
+sudo nano /etc/icinga-ansible/globals.yml
 
 # 3. Hội tụ toàn bộ endpoint còn lại. Không dùng --limit.
 ./tools/icinga-ansible prechecks   -i "$INV"
@@ -300,7 +300,7 @@ forks:
 
 ```bash
 ./tools/icinga-ansible remove-node -i "$INV" \
-  -e target_host=satellite1,satellite2 -e confirm=yes
+  -e target_host=icinga-satellite01,icinga-satellite02 -e confirm=yes
 # Sau khi PASS mới xóa cả hai khỏi inventory/satellite_zones rồi reconfigure toàn cụm còn lại.
 ```
 
@@ -310,12 +310,12 @@ Không được xóa master cuối cùng. `master[0]` là `ca_host`, vì vậy p
 này. Quy trình thông thường chỉ xóa master thứ hai:
 
 ```bash
-# 1. master2 vẫn còn trong inventory.
+# 1. icinga-master02 vẫn còn trong inventory.
 ./tools/icinga-ansible remove-master -i "$INV" \
-  -e target_host=master2 -e confirm=yes
+  -e target_host=icinga-master02 -e confirm=yes
 
-# 2. Sau khi thành công, xóa master2 khỏi [master] và [all_hosts].
-$EDITOR "$INV"
+# 2. Sau khi thành công, xóa icinga-master02 khỏi [master] và [all_hosts].
+nano "$INV"
 
 # 3. Cập nhật topology trên tất cả endpoint còn lại.
 ./tools/icinga-ansible prechecks   -i "$INV"
@@ -491,8 +491,8 @@ satellite cũ, xóa chúng khỏi `satellite_zones`; nếu thêm satellite mới
 trước khi chạy precheck. Không chạy `init-config` hoặc `genpwd`, vì làm vậy sẽ đổi secret cũ.
 
 ```bash
-$EDITOR "$INV"
-$EDITOR /etc/icinga-ansible/globals.yml
+nano "$INV"
+sudo nano /etc/icinga-ansible/globals.yml
 ansible-inventory -i "$INV" --graph
 ansible -i "$INV" all_hosts -m ping
 ```
@@ -546,19 +546,20 @@ master; thay `21` bằng baseline thật của cụm.
 
 Bài destructive regression ngày 2026-10-24 đã xóa và dựng lại 2 master + 3 Galera bằng đúng năm IP
 cũ, rồi lặp lại trên năm IP mới. Cả hai lần đều xác nhận CA/cert, environment ID, Icinga API, Web
-login, Icinga DB heartbeat/config sync, Director chỉ master1 và Galera 3/3 healthy.
+login, Icinga DB heartbeat/config sync, Director chỉ `ca_host` và Galera 3/3 healthy.
 
 ### 7.4. Trường hợp 3: VM sạch, khác IP nhưng cùng topology
 
 Thực hiện toàn bộ case 2, nhưng sau khi giải nén inventory và **trước** `bootstrap-servers`, tạo bản
-inventory DR rồi chỉ đổi `ansible_host`. Giữ nguyên inventory hostname (`master1`, `master2`...), thứ
+inventory DR rồi chỉ đổi `ansible_host`. Giữ nguyên inventory hostname (`icinga-master01`,
+`icinga-master02`...), thứ
 tự và membership các group `master`, `satellite`, `client`, `galera`, `icinga_master_zone_name` và
 `icinga_database_type`.
 
 ```bash
 cp restore-inventory/my-cluster restore-inventory/my-cluster-new-ip
 INV=restore-inventory/my-cluster-new-ip
-$EDITOR "$INV"                         # chỉ đổi ansible_host
+nano "$INV"                            # chỉ đổi ansible_host
 ansible-inventory -i "$INV" --graph
 ansible -i "$INV" all_hosts -m ping
 ```
@@ -596,8 +597,8 @@ source /path/to/venv/bin/activate
 
 SOURCE_INV=inventory-source
 TARGET_INV=inventory-new
-SOURCE_DB_HOST=galera1       # galera[0] trong inventory nguồn
-TARGET_DB_HOST=galera1       # galera[0] trong inventory đích
+SOURCE_DB_HOST=galera01      # galera[0] trong inventory nguồn
+TARGET_DB_HOST=galera01      # galera[0] trong inventory đích
 BACKUP_ROOT=/var/backups/icinga-ansible-config/logical
 DUMP_TS="$(date +%Y%m%d-%H%M%S)"
 DUMP_FILE="icinga-app-db-$DUMP_TS.sql.gz"
@@ -746,7 +747,7 @@ Giới hạn của DB-only restore:
 4. Icinga DB xem runtime config hiện tại là nguồn sự thật. Host/Service vừa import có thể bị xóa khỏi
    current state nếu cụm mới chưa có monitoring config tương ứng; dữ liệu lịch sử vẫn còn.
 5. Với Director, schema `director` mang object/config về nhưng operator vẫn phải kiểm tra Kickstart và
-   tự deploy chúng. Director chỉ chạy trên master1.
+   tự deploy chúng. Director chỉ chạy trên `ca_host`.
 
 Regression thật ngày 2026-10-23 đã dựng cụm mới 2 master + 3 Galera, giữ system DB đích, import đúng
 ba schema ứng dụng, phục hồi environment ID và chạy full `check` với `failed=0`. Chi tiết và checksum

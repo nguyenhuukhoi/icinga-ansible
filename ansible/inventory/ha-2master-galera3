@@ -5,16 +5,16 @@
 # Deployment node SSH tới toàn bộ master/Galera; không host nào dùng connection=local.
 
 [all_hosts]
-master1 ansible_host=10.0.0.11
-master2 ansible_host=10.0.0.12
-galera1 ansible_host=10.0.0.15
-galera2 ansible_host=10.0.0.16
-galera3 ansible_host=10.0.0.17
+icinga-master01 ansible_host=10.0.0.11
+icinga-master02 ansible_host=10.0.0.12
+galera01        ansible_host=10.0.0.15
+galera02        ansible_host=10.0.0.16
+galera03        ansible_host=10.0.0.17
 
 # ===== Vai trò Icinga =====
 [master]
-master1
-master2
+icinga-master01
+icinga-master02
 
 [satellite]
 
@@ -22,9 +22,9 @@ master2
 
 # ===== Database — 3 node lẻ -> Galera cluster THẬT (không phải standalone) =====
 [galera]
-galera1
-galera2
-galera3
+galera01
+galera02
+galera03
 
 [icinga:children]
 master
