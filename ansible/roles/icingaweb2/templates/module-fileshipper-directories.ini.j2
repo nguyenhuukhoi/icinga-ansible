@@ -1,0 +1,8 @@
+; Managed by icinga-ansible. Source files remain operator-owned.
+{% for directory in fileshipper_directories %}
+[{{ directory.name }}]
+source = {{ directory.source }}
+target = {{ directory.target }}
+extensions = {{ directory.extensions | default('.conf') }}
+
+{% endfor %}

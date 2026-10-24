@@ -5,14 +5,15 @@ Ansible project để triển khai và vận hành **hạ tầng Icinga** trên 
 - Icinga 2 master/satellite/client topology, PKI và API;
 - Icinga DB, Redis và Icinga Web 2;
 - MariaDB standalone hoặc Galera 3+ node;
-- Director module/schema trên `ca_host`/master1 (tuỳ chọn), backup/restore và rolling upgrade;
+- Director và FileShipper trên `ca_host` (tuỳ chọn), backup/restore và rolling upgrade;
 - vòng đời node: thêm, cấu hình lại và xoá master/satellite/client.
 
 ## Ranh giới quản lý
 
-Các role hạ tầng **không tạo, reconcile hoặc phân phối nội dung monitoring**. Vì vậy `deploy`,
+Các role hạ tầng **không tạo hoặc reconcile nội dung monitoring**. FileShipper là transport tuỳ chọn:
+nó chỉ đưa file operator-owned vào package khi operator chủ động Director deploy. Vì vậy `deploy`,
 `reconfigure` và vòng đời node không tự ý sửa `Host`, `Service`, `CheckCommand`, `Notification`, apply
-rule hay `zones.d`. Hai operator package tách biệt trong [`monitoring/`](monitoring/README.md) triển
+rule hay file nguồn. Hai operator package tách biệt trong [`monitoring/`](monitoring/README.md) triển
 khai đúng baseline OpenStack của dự án khi người vận hành chủ động chạy chúng. Đặt file dưới
 `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node không có tác dụng.
 
@@ -139,10 +140,15 @@ lý khuyến nghị cho monitoring content; backup không biến project thành 
 
 ## Tự quản lý Host/Service/Check
 
-Khuyến nghị dùng Director. Core project chỉ enable module trên `ca_host`/master1 và migrate schema.
+Khuyến nghị dùng Director. Core project chỉ enable module trên `ca_host` và migrate schema.
 Operator có thể quản lý object trong UI, hoặc chạy package
 [`monitoring/openstack-director`](monitoring/openstack-director/README.md) để reconcile 6 host ICMP và
 18 CPU/RAM/disk checks qua `check_by_ssh`.
+
+FileShipper có thể được bật cùng Director để ship DSL operator-owned mà vẫn có lịch sử deployment.
+File nguồn nằm tại `/etc/icinga-ansible/icingaweb2/fileshipper/director-global/` trên `ca_host`; xem
+phần “FileShipper trong Docker” của [QUICKSTART.md](QUICKSTART.md) để cài, thử thêm/sửa/xóa và dùng
+Import Source.
 
 Nếu dùng static DSL, hãy quản lý và triển khai bằng quy trình riêng của operator. Package
 [`monitoring/openstack-file`](monitoring/openstack-file/README.md) là ví dụ đang dùng: nó chỉ ghi file

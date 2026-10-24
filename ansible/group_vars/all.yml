@@ -22,6 +22,7 @@ module_catalog:
   icingadb:        { type: B, needs: [resource_icingadb, redis] }
   incubator:       { type: A }
   director:        { type: C, db: director, requires: [incubator] }
+  fileshipper:     { type: A, requires: [director, incubator] }
 
 # --- Thư mục state trên host (data — KHÔNG tái sinh được, đừng lẫn với config) ------
 icinga_base_dir: "/var/lib/icinga-ansible"
@@ -99,6 +100,26 @@ satellite_zones: []
 icingaweb2_timezone: "Asia/Ho_Chi_Minh"
 
 # Bật module Director chỉ chuẩn bị DB/schema/module. Người vận hành tự Kickstart và quản lý object.
+
+# --- Director FileShipper ----------------------------------------------------
+# Module code được pin theo exact upstream commit và bind-mount read-only vào image Icinga Web 2.
+# File DSL của operator nằm trong cây config Web persistent trên host, vì vậy backup-full có mang theo.
+fileshipper_version: "1.3.0"
+fileshipper_revision: "bfa8a14e0df540de32d4b3b59c0bd1e557c84fd4"
+fileshipper_archive_url: >-
+  https://github.com/Icinga/icingaweb2-module-fileshipper/archive/{{ fileshipper_revision }}.tar.gz
+fileshipper_archive_checksum: "sha256:76deb197b5daf2637f394bc9ca2679e46a0812619ffad87813bacacf67f981dd"
+fileshipper_module_dir: >-
+  {{ icinga_base_dir }}/icingaweb2/modules/fileshipper-{{ fileshipper_version }}-{{ fileshipper_revision[:12] }}
+fileshipper_container_source_dir: "/data/etc/icingaweb2/fileshipper"
+fileshipper_directories:
+  - name: "operator-config"
+    source: "{{ fileshipper_container_source_dir }}/director-global"
+    target: "zones.d/director-global/fileshipper"
+    extensions: ".conf"
+fileshipper_import_directories:
+  - name: "operator-imports"
+    basedir: "{{ fileshipper_container_source_dir }}/imports"
 
 # --- Docker Engine proxy (cùng phạm vi và tên biến với Kolla-Ansible) ---------
 # Chỉ Docker daemon dùng ba giá trị này để pull image. Chúng không cấu hình APT,

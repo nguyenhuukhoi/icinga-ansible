@@ -13,19 +13,20 @@
     web_legacy_etc: "{{ icinga_base_dir }}/icingaweb2/data/etc/icingaweb2"
     web_etc: "{{ icinga_etc_dir }}/icingaweb2"
     web_uid: "33"        # www-data trong image
-    web_run: >-
-      docker run --rm
-      -v {{ icinga_base_dir }}/icingaweb2/data:/data:rw
-      -v {{ icinga_etc_dir }}/icingaweb2:/data/etc/icingaweb2:rw
-      --entrypoint icingacli {{ images.icingaweb2 }}
 
 # Director is deliberately single-node. ca_host is the first host in the [master]
-# inventory group (normally master1) and is also where the Icinga CA lives.
+# inventory group (normally icinga-master01) and is also where the Icinga CA lives.
 - name: Xác định Director có được bật trên master hiện tại
   ansible.builtin.set_fact:
     _director_enabled_here: >-
       {{ inventory_hostname == ca_host and
          'director' in (enable_icingaweb2_modules | default([])) }}
+
+- name: Xác định FileShipper có được bật trên master hiện tại
+  ansible.builtin.set_fact:
+    _fileshipper_enabled_here: >-
+      {{ inventory_hostname == ca_host and
+         'fileshipper' in (enable_icingaweb2_modules | default([])) }}
 
 - name: Tạo cây config Icinga Web 2 chính thức trên host
   ansible.builtin.file:
@@ -34,7 +35,10 @@
     owner: "{{ web_uid }}"
     group: "{{ web_uid }}"
     mode: "0770"
-  loop: ["", "modules/icingadb", "enabledModules"]
+  loop: >-
+    {{ ['', 'modules/icingadb', 'enabledModules']
+       + (['modules/fileshipper', 'fileshipper/director-global', 'fileshipper/imports']
+          if _fileshipper_enabled_here | bool else []) }}
 
 - name: Kiểm tra đã migrate cây config Web cũ trong /data chưa
   ansible.builtin.stat:
@@ -312,20 +316,94 @@
   notify: Reload icingaweb2
 
 # ---------- Module (loại A/B/C) ----------
+- name: Tạo thư mục cache module Icinga Web 2 trên CA host
+  ansible.builtin.file:
+    path: "{{ fileshipper_module_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: _fileshipper_enabled_here | bool
+
+- name: Tải archive FileShipper đã pin trên deployment node
+  ansible.builtin.get_url:
+    url: "{{ fileshipper_archive_url }}"
+    dest: "/tmp/icingaweb2-module-fileshipper-{{ fileshipper_revision }}.tar.gz"
+    checksum: "{{ fileshipper_archive_checksum }}"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: _fileshipper_enabled_here | bool
+
+- name: Giải nén FileShipper vào cache versioned trên CA host
+  ansible.builtin.unarchive:
+    src: "/tmp/icingaweb2-module-fileshipper-{{ fileshipper_revision }}.tar.gz"
+    dest: "{{ fileshipper_module_dir }}"
+    extra_opts: [--strip-components=1]
+    creates: "{{ fileshipper_module_dir }}/module.info"
+    owner: root
+    group: root
+  when: _fileshipper_enabled_here | bool
+
+- name: Đọc metadata FileShipper đã cài
+  ansible.builtin.slurp:
+    path: "{{ fileshipper_module_dir }}/module.info"
+  register: _fileshipper_module_info
+  when: _fileshipper_enabled_here | bool
+
+- name: Xác nhận đúng version FileShipper đã pin
+  ansible.builtin.assert:
+    that:
+      - "('Version: ' ~ fileshipper_version) in (_fileshipper_module_info.content | b64decode)"
+      - "'Depends: director' in (_fileshipper_module_info.content | b64decode)"
+    fail_msg: "Artifact FileShipper không khớp version/dependency đã pin."
+  when: _fileshipper_enabled_here | bool
+
+- name: Render directories.ini cho FileShipper
+  ansible.builtin.template:
+    src: module-fileshipper-directories.ini.j2
+    dest: "{{ web_etc }}/modules/fileshipper/directories.ini"
+    owner: "{{ web_uid }}"
+    group: "{{ web_uid }}"
+    mode: "0660"
+  when: _fileshipper_enabled_here | bool
+  notify: Reload icingaweb2
+
+- name: Render imports.ini cho FileShipper
+  ansible.builtin.template:
+    src: module-fileshipper-imports.ini.j2
+    dest: "{{ web_etc }}/modules/fileshipper/imports.ini"
+    owner: "{{ web_uid }}"
+    group: "{{ web_uid }}"
+    mode: "0660"
+  when: _fileshipper_enabled_here | bool
+  notify: Reload icingaweb2
+
+- name: Tạo lệnh icingacli one-off với đúng module mount
+  ansible.builtin.set_fact:
+    web_run: >-
+      docker run --rm
+      -v {{ web_data }}:/data:rw
+      -v {{ web_etc }}:/data/etc/icingaweb2:rw
+      {% if _fileshipper_enabled_here | bool %}-v {{ fileshipper_module_dir }}:/usr/share/icingaweb2/modules/fileshipper:ro{% endif %}
+      --entrypoint icingacli {{ images.icingaweb2 }}
+
 # Tự giải phụ thuộc (2026-07-22, trước là TODO): đọc "requires" từ module_catalog
 # (group_vars/all.yml) — khai "director" trong globals.yml tự kéo theo "incubator" mà KHÔNG
 # cần liệt kê tay. Trước đây "incubator" chỉ chạy được nhờ MAY MẮN (image tự bật sẵn theo default,
 # không phải Ansible chủ động đảm bảo) — trên volume/node hoàn toàn mới, nếu image không tự bật,
 # "director" sẽ gãy (thiếu autoload các package gipfl/* nó cần, xem bug daemon ở "Khởi động container
 # icingaweb2-director-daemon" bên dưới). Dùng biến RIÊNG (_effective_icingaweb2_modules) chỉ cho việc
-# "enable module nào". Director và dependency của nó chỉ được thêm trên ca_host/master1;
+# "enable module nào". Director và dependency của nó chỉ được thêm trên ca_host/icinga-master01;
 # các module khác vẫn được bật trên mọi master như khai báo trong globals.yml.
 - name: "Tự giải phụ thuộc module: khởi tạo bằng danh sách khai trong globals.yml"
   ansible.builtin.set_fact:
     _effective_icingaweb2_modules: >-
       {{ (enable_icingaweb2_modules | default([]))
          if inventory_hostname == ca_host
-         else (enable_icingaweb2_modules | default([]) | reject('equalto', 'director') | list) }}
+         else (enable_icingaweb2_modules | default([])
+               | reject('equalto', 'director')
+               | reject('equalto', 'fileshipper') | list) }}
 
 - name: "Tự giải phụ thuộc module: thêm requires từ module_catalog (vd director → incubator)"
   ansible.builtin.set_fact:
@@ -358,6 +436,16 @@
     - "{{ web_etc }}/enabledModules/director"
     - "{{ web_etc }}/modules/director"
   when: not (_director_enabled_here | bool)
+  notify: Reload icingaweb2
+
+- name: Gỡ module và config FileShipper khỏi master không chạy FileShipper
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ web_etc }}/enabledModules/fileshipper"
+    - "{{ web_etc }}/modules/fileshipper"
+  when: not (_fileshipper_enabled_here | bool)
   notify: Reload icingaweb2
 
 - name: (loại B) Render config module Icinga DB Web (resource DB + Redis, override-aware)
@@ -407,9 +495,10 @@
 # Các template vẫn seed một lần (force:false), nên lần reconfigure sau không ghi đè chỉnh sửa từ UI.
 - name: Xây danh sách volume Icinga Web 2
   ansible.builtin.set_fact:
-    _web_volumes:
-      - "{{ web_data }}:/data:rw"
-      - "{{ web_etc }}:/data/etc/icingaweb2:rw"
+    _web_volumes: >-
+      {{ [web_data ~ ':/data:rw', web_etc ~ ':/data/etc/icingaweb2:rw']
+         + ([fileshipper_module_dir ~ ':/usr/share/icingaweb2/modules/fileshipper:ro']
+            if _fileshipper_enabled_here | bool else []) }}
 
 # ---------- Chạy Apache2 + Icinga Web 2 ----------
 # Image serve Apache trên 8080 (không phải 80). Host network -> bind 8080 trên host.
@@ -486,7 +575,7 @@
 # nên chạy để tắt cảnh báo + có Job hoạt động khi cần.
 # Container RIÊNG (không nhét vào icingaweb2) — đúng tinh thần "1 tiến trình dài hạn = 1 container"
 # của dự án, có healthcheck/restart_policy độc lập.
-# Chỉ chạy trên ca_host/master1 theo thiết kế single-node Director. Master khác vẫn chạy
+# Chỉ chạy trên ca_host/icinga-master01 theo thiết kế single-node Director. Master khác vẫn chạy
 # Icinga Web 2/Icinga DB Web nhưng không enable module, không giữ resource DB và không chạy daemon.
 #
 # BUG THẬT ĐÃ GẶP (2026-07-22): chạy thẳng `icingacli director daemon run` crash-loop

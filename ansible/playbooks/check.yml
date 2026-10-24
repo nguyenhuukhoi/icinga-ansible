@@ -34,6 +34,11 @@
             path: "{{ icinga_etc_dir }}/icingaweb2/enabledModules/director"
           register: _non_ca_director_module
 
+        - name: Kiểm tra module FileShipper không còn enable
+          ansible.builtin.stat:
+            path: "{{ icinga_etc_dir }}/icingaweb2/enabledModules/fileshipper"
+          register: _non_ca_fileshipper_module
+
         - name: Kiểm tra config module Director không còn tồn tại
           ansible.builtin.stat:
             path: "{{ icinga_etc_dir }}/icingaweb2/modules/director/config.ini"
@@ -50,6 +55,7 @@
             that:
               - not (_non_ca_director_daemon.exists | default(false))
               - not (_non_ca_director_module.stat.exists | default(false))
+              - not (_non_ca_fileshipper_module.stat.exists | default(false))
               - not (_non_ca_director_config.stat.exists | default(false))
               - "'[director_db]' not in (_non_ca_web_resources.content | b64decode)"
             fail_msg: >-
@@ -210,6 +216,30 @@
         that:
           - "'/authentication/login' not in (_web_admin_login.location | default(''))"
         fail_msg: "Icinga Web 2 nhận POST nhưng từ chối credential admin."
+
+    - name: FileShipper phải có code, config và source directory trong cả hai container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ item }}"
+          - /bin/bash
+          - -ec
+          - >-
+            php -r 'exit(version_compare(PHP_VERSION, "8.2.0", ">=") ? 0 : 1);' &&
+            test -f /usr/share/icingaweb2/modules/fileshipper/module.info &&
+            test -e /data/etc/icingaweb2/enabledModules/fileshipper &&
+            test -r /data/etc/icingaweb2/modules/fileshipper/directories.ini &&
+            test -r /data/etc/icingaweb2/modules/fileshipper/imports.ini &&
+            test -d /data/etc/icingaweb2/fileshipper/director-global &&
+            test -d /data/etc/icingaweb2/fileshipper/imports
+      loop:
+        - icingaweb2
+        - icingaweb2-director-daemon
+      changed_when: false
+      when:
+        - inventory_hostname == ca_host
+        - "'fileshipper' in (enable_icingaweb2_modules | default([]))"
 
     - name: Icinga DB heartbeat phải mới và config sync phải có dữ liệu
       # MYSQL_PWD (environment), KHÔNG -p<password> trên cmdline — D4: "no_log" chỉ che log Ansible,

@@ -131,9 +131,13 @@ icingaweb2_timezone: "Asia/Ho_Chi_Minh"           # timezone hiển thị mặc 
 # Module Icinga Web 2 muốn bật (chỉ quyết định BẬT CÁI NÀO, không quyết định version)
 enable_icingaweb2_modules:
   - "icingadb"
-#  - "director"                                 # tùy chọn; nếu bật, chỉ chạy trên ca_host/master1
+#  - "director"                                 # tùy chọn; nếu bật, chỉ chạy trên ca_host
+#  - "fileshipper"                              # tùy chọn; cần director, chỉ chạy trên ca_host
 
 # Ansible chỉ enable/migrate Director. Operator tự Kickstart và quản lý object trong Web UI.
+# Khi bật fileshipper, file DSL đặt trên ca_host tại:
+# /etc/icinga-ansible/icingaweb2/fileshipper/director-global/*.conf
+# Module đưa file vào package Director khi operator chủ động Deploy; role không tự tạo object monitoring.
 
 ###############################################################################
 # Database

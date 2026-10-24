@@ -232,10 +232,57 @@
   ansible.builtin.assert:
     that: >-
       (enable_icingaweb2_modules | default([]))
-      | difference(['icingadb', 'director']) | length == 0
+      | difference(['icingadb', 'director', 'fileshipper']) | length == 0
     fail_msg: >-
-      enable_icingaweb2_modules chỉ hỗ trợ 'icingadb' và 'director'; module không hỗ trợ:
-      {{ (enable_icingaweb2_modules | default([])) | difference(['icingadb', 'director']) | join(', ') }}.
+      enable_icingaweb2_modules chỉ hỗ trợ 'icingadb', 'director' và 'fileshipper'; module không hỗ trợ:
+      {{ (enable_icingaweb2_modules | default([]))
+         | difference(['icingadb', 'director', 'fileshipper']) | join(', ') }}.
+
+- name: FileShipper chỉ được bật cùng Director
+  ansible.builtin.assert:
+    that: "'director' in (enable_icingaweb2_modules | default([]))"
+    fail_msg: "Module 'fileshipper' cần module 'director'; hãy bật cả hai trong enable_icingaweb2_modules."
+  when: "'fileshipper' in (enable_icingaweb2_modules | default([]))"
+
+- name: Kiểm tra pin và danh sách directory của FileShipper
+  ansible.builtin.assert:
+    that:
+      - fileshipper_revision is match('^[0-9a-f]{40}$')
+      - fileshipper_archive_checksum is match('^sha256:[0-9a-f]{64}$')
+      - icinga_image_versions.icingaweb2 is version('2.12.5', '>=')
+      - fileshipper_directories is sequence
+      - fileshipper_directories is not string
+      - fileshipper_directories | length > 0
+    fail_msg: >-
+      FileShipper cần exact Git commit, SHA256 archive và ít nhất một directory mapping hợp lệ.
+  when: "'fileshipper' in (enable_icingaweb2_modules | default([]))"
+
+- name: Kiểm tra base directory import của FileShipper
+  ansible.builtin.assert:
+    that:
+      - item.name is match('^[A-Za-z0-9_. -]+$')
+      - item.basedir is match('^/data/etc/icingaweb2/fileshipper(/|$)')
+      - "'..' not in item.basedir"
+    fail_msg: "Import directory FileShipper không hợp lệ: {{ item | to_json }}"
+  loop: "{{ fileshipper_import_directories | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default('missing-name') }}"
+  when: "'fileshipper' in (enable_icingaweb2_modules | default([]))"
+
+- name: Kiểm tra từng directory mapping của FileShipper
+  ansible.builtin.assert:
+    that:
+      - item.name is match('^[A-Za-z0-9_.-]+$')
+      - item.source is match('^/data/etc/icingaweb2/fileshipper(/|$)')
+      - item.target is match('^zones\\.d/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+$')
+      - "'..' not in item.source"
+      - "'..' not in item.target"
+      - (item.extensions | default('.conf')) is match('^\\.[A-Za-z0-9]+( \\.[A-Za-z0-9]+)*$')
+    fail_msg: "Directory mapping FileShipper không hợp lệ: {{ item | to_json }}"
+  loop: "{{ fileshipper_directories | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default('missing-name') }}"
+  when: "'fileshipper' in (enable_icingaweb2_modules | default([]))"
 
 - name: External DB phải khai host
   ansible.builtin.assert:

@@ -1,0 +1,6 @@
+; Managed by icinga-ansible. Only these base directories are selectable in Director.
+{% for directory in fileshipper_import_directories %}
+[{{ directory.name }}]
+basedir = "{{ directory.basedir }}"
+
+{% endfor %}

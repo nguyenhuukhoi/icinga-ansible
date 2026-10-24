@@ -3,8 +3,9 @@
 ## 1. Phạm vi
 
 Project quản lý hạ tầng chạy Icinga: node, container, topology, PKI, API, Icinga DB, Redis, Web và
-database. Project không sở hữu Host, Service, CheckCommand, apply rule hoặc Notification và không
-vận chuyển/validate static DSL. Nội dung monitoring hoàn toàn thuộc operator.
+database. Project không sở hữu Host, Service, CheckCommand, apply rule hoặc Notification. Static DSL
+hoàn toàn thuộc operator; module FileShipper tuỳ chọn chỉ cho Director vận chuyển nguyên văn file khi
+operator chủ động deploy.
 
 ## 2. Thành phần
 
@@ -40,8 +41,9 @@ Input archive chỉ dùng để restore vẫn giữ read-only theo nguyên tắc
 cố ý che cây config cũ. Deploy đầu tiên sau nâng cấp chỉ migrate file còn thiếu từ cây cũ, không ghi
 đè file đã có dưới `/etc/icinga-ansible`.
 
-Role không render, reconcile hoặc phân phối `zones.d`. Thư mục có mặt trong container vì toàn bộ cây
-config host được bind-mount RW. Trước khi thay đổi runtime, role chạy `icinga2 daemon -C` trên config
+Role không render hoặc reconcile `zones.d`. Luồng direct-to-core do operator tự phân phối; FileShipper
+chỉ thêm file vào package Director khi operator chủ động deploy. Thư mục có mặt trong container vì
+toàn bộ cây config host được bind-mount RW. Trước khi thay đổi runtime, role chạy `icinga2 daemon -C` trên config
 hiệu lực, nên lỗi cú pháp operator vẫn dừng deploy an toàn. Migration layout cũ chỉ copy cục bộ một
 lần trên chính node để tránh mất dữ liệu. `remove-*`/`destroy` xóa nguyên config của target được chỉ
 định; nội dung operator phải có backup/pipeline riêng.
@@ -83,8 +85,9 @@ PKI vẫn bắt buộc trước mọi thay đổi phá huỷ.
 
 ### 9.2. Config monitoring
 
-Role không quản lý hay đồng bộ `zones.d`. Operator tự triển khai static DSL trực tiếp lên master đầu
-tiên bằng pipeline riêng hoặc quản lý object qua Director. Với static HA, config đặt trong
+Role không quản lý hay đồng bộ trực tiếp `zones.d`. Operator tự triển khai static DSL lên master đầu
+tiên bằng pipeline riêng, quản lý object qua Director, hoặc dùng FileShipper để Director đóng gói
+file operator-owned. Với static HA, config đặt trong
 `zones.d/<ZoneName>` trên master đầu tiên được **Icinga** config-sync sang master peer; đây không phải
 deployment node ghi đè monitoring config. Cây config được mount nguyên thư mục chỉ bảo đảm nội dung
 đã có trên node tồn tại bền vững.
@@ -123,5 +126,7 @@ thông thường. External DB cần change plan riêng của DBA.
 
 ## 14. Nội dung operator
 
-Director chỉ được enable/migrate; Kickstart và object management do operator thực hiện. Static DSL
-phải được triển khai bằng một quy trình độc lập ngoài project.
+Director chỉ được enable/migrate; Kickstart và object management do operator thực hiện. FileShipper
+tuỳ chọn được pin checksum và mount read-only vào `/usr/share/icingaweb2/modules/fileshipper`; nguồn
+DSL/import nằm trong cây Web persistent. Role tạo mapping nhưng không tạo/reconcile nội dung nguồn,
+và chỉ Director deployment do operator kích hoạt mới publish thay đổi.
