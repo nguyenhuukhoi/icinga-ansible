@@ -220,19 +220,14 @@ dùng `check_by_ssh`; Nova/Cinder/Neutron không nằm trong Director.
 
 ### FileShipper trong Docker
 
-FileShipper có hai chức năng khác nhau:
-
-- đưa file Icinga DSL thuần vào package do Director deploy (`directories.ini`);
-- đọc CSV/JSON/XML/YAML/XLSX làm Import Source (`imports.ini`), sau đó operator tự tạo Sync Rule.
-
-Project cài module FileShipper 1.3.0 đã pin commit/checksum, chỉ trên `ca_host` cùng Director. Mở cấu
-hình bằng `nano` trên deployment node:
+FileShipper được cài trên `ca_host` cùng Director. Ví dụ duy nhất dưới đây import một file CSV. Mở
+config trên deployment node:
 
 ```bash
 sudo nano /etc/icinga-ansible/globals.yml
 ```
 
-Bật đủ ba module rồi áp dụng lại hạ tầng:
+Bật module:
 
 ```yaml
 enable_icingaweb2_modules:
@@ -248,90 +243,49 @@ INV=ansible/inventory/my-cluster
 ./tools/icinga-ansible check       -i "$INV"
 ```
 
-Role tạo sẵn mapping sau trên `ca_host`:
-
-| Mục đích | Host | Trong container `icingaweb2` |
-|---|---|---|
-| DSL nguồn | `/etc/icinga-ansible/icingaweb2/fileshipper/director-global/` | `/data/etc/icingaweb2/fileshipper/director-global/` |
-| Dữ liệu import | `/etc/icinga-ansible/icingaweb2/fileshipper/imports/` | `/data/etc/icingaweb2/fileshipper/imports/` |
-| File shipping config | `/etc/icinga-ansible/icingaweb2/modules/fileshipper/directories.ini` | `/data/etc/icingaweb2/modules/fileshipper/directories.ini` |
-| Import allow-list | `/etc/icinga-ansible/icingaweb2/modules/fileshipper/imports.ini` | `/data/etc/icingaweb2/modules/fileshipper/imports.ini` |
-
-Sau khi đã Kickstart Director và có global zone `director-global`, tạo một file thử trực tiếp trên
-`ca_host`:
+Role đã tự cấu hình base directory tên `operator-imports`; không sửa `imports.ini`. SSH vào `ca_host`
+và đặt file CSV vào thư mục trên host:
 
 ```bash
-sudo nano /etc/icinga-ansible/icingaweb2/fileshipper/director-global/commands.conf
+sudo nano /etc/icinga-ansible/icingaweb2/fileshipper/imports/hosts.csv
 ```
 
-Nội dung tối thiểu:
+Ví dụ nội dung:
 
-```icinga2
-object CheckCommand "fileshipper-dummy" {
-  command = [ PluginDir + "/check_dummy" ]
-  arguments = {
-    "-e" = "$fileshipper_state$"
-    "-s" = "$fileshipper_message$"
-  }
-}
+```csv
+object_name,address,display_name
+server01,10.0.0.10,Server 01
 ```
 
-File trên xuất hiện ngay trong container nhờ mount cả cây config RW. Nó **chưa** có trong Icinga 2
-cho đến khi Director deploy. Có thể bấm `Icinga Director > Activity Log > Deploy`, hoặc chạy trên
-`ca_host`:
+Sau đó vào `Icinga Director > Automation > Import sources > Add`, chọn:
 
-```bash
-sudo docker exec icingaweb2 icingacli director config deploy --force --wait 60
-sudo docker exec icinga2 icinga2 daemon -C
-sudo docker exec icinga2 icinga2 object list --type CheckCommand --name fileshipper-dummy
-```
+- loại `Import from files`;
+- base directory `operator-imports`;
+- file `hosts.csv` và định dạng CSV.
 
-Sửa file rồi deploy lại để cập nhật. Muốn xóa object, xóa file nguồn và deploy lại:
+Lưu Import Source, kiểm tra Preview rồi tạo Sync Rule để map `object_name`, `address` và
+`display_name` vào Host template/object của bạn. File thật luôn nằm trên `ca_host`; `/data/...` chỉ
+là đường dẫn container do bind mount tạo ra.
 
-```bash
-sudo rm /etc/icinga-ansible/icingaweb2/fileshipper/director-global/commands.conf
-sudo docker exec icingaweb2 icingacli director config deploy --force --wait 60
-```
+FileShipper cũng hỗ trợ ship file Icinga DSL `.conf`, nhưng Quickstart không đưa thêm ví dụ thứ hai.
+Xem [tài liệu FileShipper chính thức](https://icinga.com/docs/icinga-director/latest/fileshipper/).
 
-File được ship vào `zones.d/director-global/fileshipper` trong package Director; không ghi trực tiếp
-vào `/etc/icinga-ansible/icinga2/zones.d`. Director lưu lịch sử deployment và Icinga tự config-sync
-global zone sang master còn lại. Nếu `ca_host` tắt, check đã deploy vẫn tiếp tục chạy trên master còn
-lại; chỉ thao tác Director/UI/deploy mới tạm thời không dùng được.
+### OpenStack service bằng file config (Static DSL)
 
-Để import dữ liệu, chép file vào thư mục `imports/`, vào
-`Icinga Director > Automation > Import sources > Add > Import from files`, chọn base directory
-`operator-imports`, định dạng và file, sau đó tạo Sync Rule theo quy trình Director. CSV/JSON không
-cần extension PHP bổ sung. XML/YAML/XLSX lần lượt cần `php-xml`, `php-yaml`, `php-zip`; nếu dùng các
-định dạng này hãy build một image Icinga Web 2 bất biến có extension tương ứng rồi khai qua
-`custom_image_overrides`, không cài package thủ công trong container đang chạy.
+Static DSL chỉ có nghĩa là viết object Icinga trực tiếp trong file `.conf`, không qua Director hoặc
+FileShipper. Project dùng cách này cho Nova, Cinder và Neutron; CPU/RAM/disk vẫn do Director quản lý.
 
-Muốn thêm nhiều nguồn/đích, override `fileshipper_directories` hoặc
-`fileshipper_import_directories` trong `globals.yml`. `source`/`basedir` phải nằm dưới
-`/data/etc/icingaweb2/fileshipper`; `target` phải nằm dưới `zones.d/<zone>/...`. Không sửa trực tiếp
-hai file INI do role render vì `reconfigure` sẽ đưa chúng về giá trị trong `globals.yml`.
+Playbook `monitoring/openstack-file/stage-static-config.yml` tự thực hiện toàn bộ:
 
-Archive module được deployment node tải qua HTTPS rồi copy sang `ca_host`; các biến
-`docker_http_proxy`/`docker_https_proxy` không áp dụng cho lần tải này. Nếu cần proxy, export
-`HTTPS_PROXY` trong shell chạy Ansible; nếu dùng mirror nội bộ, override đồng thời
-`fileshipper_archive_url` và `fileshipper_archive_checksum`.
+1. đặt plugin và `clouds.yaml` trên cả hai master;
+2. đặt file object OpenStack vào `zones.d/<master-zone>` trên master đầu tiên;
+3. validate và reload Icinga;
+4. để Icinga cluster tự config-sync file sang master còn lại.
 
-Tài liệu upstream: [cài FileShipper](https://icinga.com/docs/icinga-director/latest/fileshipper/doc/02-Installation/),
-[Import Source](https://icinga.com/docs/icinga-director/latest/fileshipper/doc/03-ImportSource/) và
-[plain config shipping](https://icinga.com/docs/icinga-director/latest/fileshipper/doc/04-FileShipping/).
-
-### Static DSL
-
-Luồng static DSL ghi thẳng vào Icinga 2 vẫn nằm ngoài role hạ tầng; FileShipper ở trên là luồng riêng
-qua package Director. `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node không phải
-nguồn cấu hình. Package `monitoring/openstack-file` trích ba credential service lúc chạy,
-ghi plugin/`clouds.yaml` lên cả hai master, chỉ ghi object Nova/Cinder/Neutron vào
-`zones.d/<master-zone>` của `icinga-master01`, rồi để Icinga native config-sync sang `icinga-master02`.
-
-Credential API là local trên từng master. Role tạo thư mục
-`/etc/icinga-ansible/icinga2/secrets/` ngay trong cây config chính thức đã được mount RW vào container;
-không cần volume riêng. Core role không render file bên trong; operator package nói trên mới ghi
-`clouds.yaml`. `remove-*` và `destroy` xóa toàn bộ config của target, gồm cả credential local, nên phải
-chạy `backup-full` trước.
+Không tự tạo file trong `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node vì thư mục
+đó không được đồng bộ tự động. Credential API nằm local tại
+`/etc/icinga-ansible/icinga2/secrets/clouds.yaml` trên từng master và được mount vào container cùng cây
+config Icinga 2. Chạy `backup-full` trước `remove-*` hoặc `destroy` để giữ lại credential/config này.
 
 ### Triển khai baseline OpenStack
 
