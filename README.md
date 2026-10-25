@@ -4,6 +4,7 @@ Ansible project để triển khai và vận hành **hạ tầng Icinga** trên 
 
 - Icinga 2 master/satellite/client topology, PKI và API;
 - Icinga DB, Redis và Icinga Web 2;
+- HTTPS trực tiếp cho Icinga Web 2 bằng PEM/fullchain operator cung cấp;
 - MariaDB standalone hoặc Galera 3+ node;
 - Director và FileShipper trên `ca_host` (tuỳ chọn), backup/restore và rolling upgrade;
 - vòng đời node: thêm, cấu hình lại và xoá master/satellite/client.
@@ -157,7 +158,7 @@ Thư mục xuất hiện trong container vì toàn bộ cây config host đượ
 xóa nguyên config của đúng target; hãy chạy `backup-full` và vẫn giữ monitoring content trong
 Git/vault.
 
-Xem [QUICKSTART-BACKUP-RESTORE.md](QUICKSTART-BACKUP-RESTORE.md) để làm theo ba kịch bản full restore;
-mục 6–7 trong [QUICKSTART.md](QUICKSTART.md) có thêm/xóa node và giải thích chi tiết.
+Xem mục 6–7 trong [QUICKSTART.md](QUICKSTART.md) để thêm/xóa node và làm theo ba kịch bản full
+backup/restore từng bước.
 [OPERATIONS-RUNBOOK-VI.md](OPERATIONS-RUNBOOK-VI.md) là runbook vận hành/sự cố đầy đủ. Ranh giới kỹ
 thuật nằm ở [design.md](design.md); giới hạn còn lại được ghi tại [TODO.md](TODO.md).

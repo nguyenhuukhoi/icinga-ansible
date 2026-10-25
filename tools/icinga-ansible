@@ -114,8 +114,8 @@ Backup/restore toàn hệ thống (dựng lại hạ tầng mới sau sự cố 
                       -e monitoring_expected_service_count=N và/hoặc danh sách tên service
   # Custom image (design.md mục 9.6): icinga-ansible KHÔNG tự build — tự build/push bằng cách nào
   # cũng được, rồi khai custom_image_registry + custom_image_overrides trong globals.yml.
-  # Full-cluster restore: restore-config -> bootstrap-servers -> restore-node-state -> pull -> deploy
-  # -> mariadb-recovery -> recover-db-only -> restore-web -> deploy -> restore-director
+  # Full-cluster restore: restore-config -> bootstrap-servers -> restore-node-state -> pull
+  # -> mariadb-recovery -> deploy -> recover-db-only -> restore-web -> deploy -> restore-director
   # -> check -> verify-monitoring. restore-pki chỉ dành
   # cho luồng CA-only/legacy, không chạy thêm trong full-cluster restore.
 
@@ -311,9 +311,9 @@ init_config() {
   trap - EXIT
   echo "Đã restore cấu hình vào $CONFIG_DIR_REAL."
   echo "Tiếp theo: kiểm tra lại $GLOBALS (đổi IP/hostname nếu hạ tầng mới khác hạ tầng cũ), rồi"
-  echo "  bootstrap-servers -> restore-node-state -> pull -> deploy -> mariadb-recovery -> recover-db-only"
+  echo "  bootstrap-servers -> restore-node-state -> pull -> mariadb-recovery -> deploy -> recover-db-only"
   echo "  -> restore-web -> deploy -> restore-director -> check -> verify-monitoring."
-  echo "  Xem QUICKSTART-BACKUP-RESTORE.md để dùng đúng timestamp/confirm."
+  echo "  Xem QUICKSTART.md mục 7.2-7.4 để dùng đúng timestamp/confirm."
   exit 0
 }
 
@@ -431,7 +431,8 @@ case "$COMMAND" in
     # -e recovery_mode=restore-backup|recover-cluster -e confirm=yes (xem design.md 10.4).
     cd "$ANSIBLE_DIR"
     "$ANSIBLE_PLAYBOOK" -i "$INVENTORY" "$ANSIBLE_DIR/playbooks/mariadb-recovery.yml" \
-      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+      -e "@$GLOBALS" -e "controller_config_dir=$CONFIG_DIR" -e "deploy_config_dir=$DEPLOY_CONFIG_DIR" \
+      "${VAULT_ARGS[@]}" "${PASSWORD_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   recover-db-only)
     # Chạy SAU mariadb-recovery restore-backup khi chỉ còn DB backup, không còn CA/PKI/runtime

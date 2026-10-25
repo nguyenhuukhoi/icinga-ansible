@@ -70,7 +70,8 @@
 
 - name: (postcheck) Web login trả HTTP 200/302 trên mọi master
   ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ icingaweb2_http_port }}/authentication/login"
+    url: "{{ icingaweb2_web_scheme }}://127.0.0.1:{{ icingaweb2_web_port }}/authentication/login"
+    validate_certs: false
     status_code: [200, 302]
   register: _pc_http
   retries: 18

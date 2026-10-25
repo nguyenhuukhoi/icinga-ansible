@@ -21,9 +21,13 @@
 # ---------- Xác định đường dẫn (độc lập với main.yml — restore không đi qua main.yml) ----------
 - name: Xác định mode + đường dẫn MariaDB
   ansible.builtin.set_fact:
+    mariadb_cluster_mode: "{{ (groups['galera'] | length | int) >= 3 and (groups['galera'] | length | int) % 2 == 1 }}"
     mariadb_bootstrap_host: "{{ groups['galera'][0] }}"
     mariadb_etc: "{{ icinga_etc_dir }}/mariadb"
     mariadb_data: "{{ icinga_base_dir }}/mariadb/data"
+
+- name: Reconcile MariaDB/Galera config theo inventory hiện tại trước khi restore
+  ansible.builtin.include_tasks: _configure.yml
 
 # Toàn bộ đoạn xác định file backup CHỈ chạy trên node bootstrap (file backup nằm trên đĩa của đúng
 # node đó — xem backup.yml: chỉ galera[0] chạy backup). Các host khác đọc lại kết quả qua
@@ -187,7 +191,7 @@
 - name: Kiểm tra gzip và stream backup đọc được trước khi dừng MariaDB
   ansible.builtin.shell: |
     set -euo pipefail
-    validate_dir=$(mktemp -d {{ (mariadb_data ~ '/../restore-validate.XXXXXX') | quote }})
+    validate_dir=$(mktemp -d {{ ((mariadb_data | dirname) ~ '/restore-validate.XXXXXX') | quote }})
     trap 'rm -rf "$validate_dir"' EXIT
     gzip -t {{ _restore_backup_found.files[0].path | quote }}
     gzip -cd {{ _restore_backup_found.files[0].path | quote }} |
@@ -204,24 +208,41 @@
 # validated. A typo/missing/corrupt backup must not cause avoidable monitoring
 # downtime. Icinga DB must still be stopped before MariaDB is touched because it
 # otherwise writes while Galera is being bootstrapped and SST is in progress.
-- name: Dừng icingadb daemon trên các master ngay trước khi restore DB
+- name: Kiểm tra icingadb daemon trên các master ngay trước khi restore DB
+  community.docker.docker_container_info:
+    name: icingadb
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['master'] }}"
+  register: _restore_icingadb_container_info
+  run_once: true
+
+- name: Dừng icingadb daemon đang tồn tại ngay trước khi restore DB
   community.docker.docker_container:
     name: icingadb
     state: stopped
-  delegate_to: "{{ item }}"
-  loop: "{{ groups['master'] }}"
+  delegate_to: "{{ item.item }}"
+  loop: "{{ _restore_icingadb_container_info.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.exists | default(false)
   run_once: true
 
 # ---------- Dừng toàn bộ container mariadb trên [galera] ----------
-- name: Dừng container mariadb (mọi node galera)
+- name: Kiểm tra container mariadb trên mọi node Galera
+  community.docker.docker_container_info:
+    name: mariadb
+  register: _restore_mariadb_container_info
+
+- name: Dừng container mariadb đang tồn tại trên mọi node Galera
   community.docker.docker_container:
     name: mariadb
     state: stopped
+  when: _restore_mariadb_container_info.exists | default(false)
 
 # ---------- Prepare + copy-back TRÊN NODE BOOTSTRAP ----------
 - name: Tạo thư mục staging (prepare bản backup)
   ansible.builtin.file:
-    path: "{{ mariadb_data }}/../restore-staging"
+    path: "{{ mariadb_data | dirname }}/restore-staging"
     state: "{{ item }}"
     mode: "0700"
   loop: [absent, directory]
@@ -231,7 +252,7 @@
   ansible.builtin.shell: >
     docker run --rm
     -v {{ (_restore_backup_found.files[0].path | dirname) }}:/backup:ro
-    -v {{ mariadb_data }}/../restore-staging:/staging
+    -v {{ mariadb_data | dirname }}/restore-staging:/staging
     {{ images.mariadb }}
     bash -c "gunzip -c /backup/{{ _restore_backup_found.files[0].path | basename }} | mbstream -x -C /staging && mariabackup --prepare --target-dir=/staging"
   args:
@@ -249,7 +270,7 @@
 - name: mariabackup --copy-back vào datadir + chown mysql
   ansible.builtin.shell: >
     docker run --rm
-    -v {{ mariadb_data }}/../restore-staging:/staging
+    -v {{ mariadb_data | dirname }}/restore-staging:/staging
     -v {{ mariadb_data }}:/var/lib/mysql
     {{ images.mariadb }}
     bash -c "mariabackup --copy-back --target-dir=/staging --datadir=/var/lib/mysql && chown -R mysql:mysql /var/lib/mysql"
@@ -259,7 +280,7 @@
 
 - name: Dọn thư mục staging
   ansible.builtin.file:
-    path: "{{ mariadb_data }}/../restore-staging"
+    path: "{{ mariadb_data | dirname }}/restore-staging"
     state: absent
   when: inventory_hostname == mariadb_bootstrap_host
 

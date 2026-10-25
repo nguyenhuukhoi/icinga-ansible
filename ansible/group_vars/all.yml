@@ -99,6 +99,24 @@ satellite_zones: []
 # Default cho user Việt Nam — override trong globals.yml nếu cần múi giờ khác.
 icingaweb2_timezone: "Asia/Ho_Chi_Minh"
 
+# --- HTTPS cho Icinga Web 2 -------------------------------------------------
+# Certificate/key là input trên deployment node dưới controller_config_dir/config/icingaweb2/tls.
+# Một PEM gộp được hỗ trợ bằng cách khai cùng tên cho certificate_file và private_key_file.
+icingaweb2_https_enabled: false
+icingaweb2_https_port: 443
+icingaweb2_https_redirect_http: true
+icingaweb2_https_server_name: ""
+icingaweb2_https_certificate_file: "server.pem"
+icingaweb2_https_private_key_file: "server.pem"
+icingaweb2_https_source_dir: "{{ controller_config_dir }}/config/icingaweb2/tls"
+icingaweb2_https_certificate_source: >-
+  {{ icingaweb2_https_source_dir }}/{{ icingaweb2_https_certificate_file }}
+icingaweb2_https_private_key_source: >-
+  {{ icingaweb2_https_source_dir }}/{{ icingaweb2_https_private_key_file }}
+icingaweb2_web_scheme: "{{ 'https' if icingaweb2_https_enabled | bool else 'http' }}"
+icingaweb2_web_port: >-
+  {{ icingaweb2_https_port if icingaweb2_https_enabled | bool else icingaweb2_http_port }}
+
 # Bật module Director chỉ chuẩn bị DB/schema/module. Người vận hành tự Kickstart và quản lý object.
 
 # --- Director FileShipper ----------------------------------------------------

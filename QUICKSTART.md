@@ -87,7 +87,8 @@ source /path/to/venv/bin/activate
 ./tools/icinga-ansible post-deploy       -i ansible/inventory/my-cluster
 ```
 
-Web mặc định tại `http://<master>:8080/authentication/login`. User và password nằm trong
+Web mặc định tại `http://<master>:8080/authentication/login`. Khi bật HTTPS, URL chuyển sang
+`https://<icingaweb2_https_server_name>:443/authentication/login`. User và password nằm trong
 `/etc/icinga-ansible/passwords.yml`.
 
 Sau deploy, nên chạy lại `reconfigure` một lần để kiểm tra idempotency và `check` lần nữa.
@@ -118,6 +119,85 @@ trên, nên tồn tại sau khi recreate container và nằm trong `backup-full`
 `/var/lib/icinga-ansible` chứa runtime/data và artifact module read-only có thể tải lại; config nguồn
 vẫn nằm dưới `/etc/icinga-ansible`. Lần deploy đầu sau khi nâng cấp thiết kế này sẽ migrate file còn
 thiếu từ cây config cũ trong `/var/lib` sang `/etc`, giữ file đang có trong `/etc` làm bản ưu tiên.
+
+### 4.2. Bật HTTPS bằng file PEM có sẵn
+
+HTTPS được terminate trực tiếp bởi Apache trong container `icingaweb2`, không cần thêm nginx và
+không cài package vào container đang chạy. Source certificate/key nằm trên deployment node; role
+validate rồi copy vào cây config persistent của từng master.
+
+Nếu một file PEM chứa cả certificate và private key, kiểm tra mà không in nội dung bí mật:
+
+```bash
+grep '^-----BEGIN' /path/to/server.pem
+openssl x509 -in /path/to/server.pem -noout -subject -issuer -dates
+openssl pkey -in /path/to/server.pem -passin pass: -noout
+```
+
+Kết quả `grep` phải có `BEGIN CERTIFICATE` và `BEGIN PRIVATE KEY` (hoặc `BEGIN RSA PRIVATE KEY`).
+Private key phải không mã hoá để Apache khởi động không tương tác. Nếu PEM chỉ chứa certificate,
+cần thêm file private key tương ứng và khai hai tên file khác nhau.
+
+Đặt file trên **deployment node**:
+
+```bash
+sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 0700 \
+  /etc/icinga-ansible/config/icingaweb2/tls
+sudo cp /path/to/server.pem /etc/icinga-ansible/config/icingaweb2/tls/server.pem
+sudo chown "$(id -un):$(id -gn)" /etc/icinga-ansible/config/icingaweb2/tls/server.pem
+chmod 0600 /etc/icinga-ansible/config/icingaweb2/tls/server.pem
+```
+
+Mở globals bằng `nano`:
+
+```bash
+sudo nano /etc/icinga-ansible/globals.yml
+```
+
+Với một PEM gộp:
+
+```yaml
+icingaweb2_https_enabled: true
+icingaweb2_https_port: 443
+icingaweb2_https_redirect_http: true
+icingaweb2_https_server_name: "icinga.example.com"
+icingaweb2_https_certificate_file: "server.pem"
+icingaweb2_https_private_key_file: "server.pem"
+```
+
+Với certificate và key tách riêng, đặt cả hai trong cùng thư mục rồi khai:
+
+```yaml
+icingaweb2_https_certificate_file: "fullchain.pem"
+icingaweb2_https_private_key_file: "private-key.pem"
+```
+
+`icingaweb2_https_server_name` phải có trong SAN của certificate. Với HA/VIP, dùng DNS mà người dùng
+thực sự truy cập và certificate bao phủ DNS đó. Sau đó áp dụng cho cụm mới hoặc cụm đang chạy:
+
+```bash
+INV=ansible/inventory/my-cluster
+./tools/icinga-ansible prechecks    -i "$INV"
+./tools/icinga-ansible reconfigure -i "$INV"
+./tools/icinga-ansible check       -i "$INV"
+./tools/icinga-ansible post-deploy -i "$INV"
+```
+
+Không cần `destroy`. Web container được recreate tuần tự từng master; database, Director object và
+monitoring config không bị xoá. Khi `redirect_http: true`, cổng 8080 chỉ trả redirect sang HTTPS.
+
+File sau triển khai:
+
+| Vị trí | Certificate/key hiệu lực |
+|---|---|
+| Deployment node | `/etc/icinga-ansible/config/icingaweb2/tls/` |
+| Host master | `/etc/icinga-ansible/icingaweb2/tls/` |
+| Container | `/data/etc/icingaweb2/tls/` |
+
+`backup-full` giữ cả source controller và bản effective trên từng master. `check` xác nhận login qua
+HTTPS, certificate container đang phục vụ khớp file effective và redirect HTTP đúng đích. Nếu dùng
+CA nội bộ, máy người dùng vẫn phải trust CA đó; health check cố ý không thay thế việc quản lý trust
+store trên trình duyệt.
 
 ## 5. Nội dung monitoring do operator quản lý
 
@@ -269,7 +349,8 @@ ansible-playbook -i "$INV" monitoring/openstack-file/stage-static-config.yml \
 
 `apply-monitoring.yml` force-run và kiểm tra 6 Host ICMP cùng 18 Service SSH. Package static test API
 Nova/Cinder/Neutron từ từng master, validate config trước reload và chờ ba object sync sang cả hai
-master. Threshold CPU/RAM/disk hiện thành Data Fields trong từng Service Apply Rule trên Director UI;
+master. Threshold CPU/RAM/disk hiện thành Custom Variables (Director 1.12 `director_property`, thay cho Data
+Fields cũ) trong từng Service Apply Rule, liệt kê ở **Icinga Director -> Custom Variables**;
 giá trị sửa trên UI được giữ nguyên ở các lần reconcile sau. Chi tiết biến, đường dẫn và mô hình bảo
 mật nằm trong [`monitoring/README.md`](monitoring/README.md).
 
@@ -450,9 +531,8 @@ membership Galera; thêm/xóa Galera cần kế hoạch quorum, SST/IST và back
 
 ## 7. Backup, destroy và khôi phục
 
-Mục này là tài liệu chính, có đủ ba quy trình: restore trên hệ thống hiện tại, VM sạch cùng IP và
-VM sạch khác IP. [QUICKSTART-BACKUP-RESTORE.md](QUICKSTART-BACKUP-RESTORE.md) chỉ là checklist rút gọn;
-khi hai tài liệu có khác biệt, làm theo file này.
+Mục này là tài liệu duy nhất để thực hiện full backup/restore, gồm đủ ba quy trình: restore trên hệ
+thống hiện tại, VM sạch cùng IP và VM sạch khác IP.
 
 ### 7.1. Tạo và xác minh full backup
 
@@ -532,13 +612,14 @@ CONFIRM=yes-i-really-really-mean-it ./tools/icinga-ansible restore-config \
   -e restore_mode=existing -e restore_backup_ts="$BACKUP_TS" \
   -e confirm=yes-i-really-really-mean-it
 
-# restore-node-state để service dừng; dựng runtime tạm trước khi restore DB.
-./tools/icinga-ansible deploy -i "$INV"
+# restore-node-state để application dừng. Pull image nhưng chưa deploy runtime.
+./tools/icinga-ansible pull -i "$INV"
 
 ./tools/icinga-ansible mariadb-recovery -i "$INV" \
   -e recovery_mode=restore-backup -e restore_backup_tag=full \
   -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
 
+./tools/icinga-ansible deploy -i "$INV"
 ./tools/icinga-ansible recover-db-only -i "$INV" -e confirm=yes
 ./tools/icinga-ansible restore-web -i "$INV" \
   -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
@@ -618,11 +699,10 @@ deploy đầu tiên:
 `restore-node-state` từ chối VM đã có CA/cert/config trong mode `clean`, xác minh manifest, CA/key,
 certificate từng endpoint và logical topology trước khi ghi dữ liệu.
 
-Dựng runtime tạm, restore physical database, khôi phục environment ID rồi restore Web:
+Pull image, restore physical database trước, sau đó dựng runtime tạm để khôi phục environment ID và Web:
 
 ```bash
 ./tools/icinga-ansible pull   -i "$INV"
-./tools/icinga-ansible deploy -i "$INV"
 
 ./tools/icinga-ansible mariadb-recovery -i "$INV" \
   -e recovery_mode=restore-backup \
@@ -630,6 +710,7 @@ Dựng runtime tạm, restore physical database, khôi phục environment ID r�
   -e restore_backup_ts="$BACKUP_TS" \
   -e confirm=yes
 
+./tools/icinga-ansible deploy -i "$INV"
 ./tools/icinga-ansible recover-db-only -i "$INV" -e confirm=yes
 
 ./tools/icinga-ansible restore-web -i "$INV" \
@@ -651,9 +732,10 @@ tầng do role quản lý. `restore-director` chỉ publish lại object đã c�
 hoặc sửa nội dung monitoring. `verify-monitoring` chờ đúng số service có kết quả live `OK` trên cả hai
 master; thay `21` bằng baseline thật của cụm.
 
-Bài destructive regression ngày 2026-10-24 đã xóa và dựng lại 2 master + 3 Galera bằng đúng năm IP
-cũ, rồi lặp lại trên năm IP mới. Cả hai lần đều xác nhận CA/cert, environment ID, Icinga API, Web
-login, Icinga DB heartbeat/config sync, Director chỉ `ca_host` và Galera 3/3 healthy.
+Bài destructive regression ngày 2026-10-25 với generation `20261025-000725` đã chạy đủ restore hiện
+tại, 5 VM sạch cùng IP và 5 VM sạch khác IP. Cả ba case full `check` PASS, gồm HTTPS certificate/login/
+redirect. Case khác IP còn xác nhận Director tự đổi endpoint, Galera tự render địa chỉ mới và `21/21`
+monitoring service `OK` trên cả hai master sau khi cập nhật allowlist ngoài cluster.
 
 ### 7.4. Trường hợp 3: VM sạch, khác IP nhưng cùng topology
 
@@ -672,7 +754,8 @@ ansible -i "$INV" all_hosts -m ping
 ```
 
 Sau đó chạy đúng chuỗi lệnh trong case 2, bắt đầu từ `restore-config`. `restore-node-state` kiểm tra
-logical topology nhưng cho phép IP đổi; lần `deploy` đầu sẽ render lại `zones.conf` theo IP mới.
+logical topology nhưng cho phép IP đổi. `mariadb-recovery` render lại `server.cnf`/địa chỉ Galera theo
+inventory mới trước khi bootstrap DB; lần `deploy` đầu render lại `zones.conf` theo IP mới.
 `restore-director` tự reconcile endpoint API sang `ansible_host` của `master[0]` mới trước khi publish.
 
 Trước `verify-monitoring`, cập nhật allowlist nằm **trên các hệ thống được monitor** sang IP master mới:

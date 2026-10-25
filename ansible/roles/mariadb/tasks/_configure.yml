@@ -1,0 +1,38 @@
+---
+# Render the effective MariaDB/Galera configuration independently from the
+# container lifecycle. Restore needs this too: a full node backup may contain
+# the old wsrep addresses when the same logical topology is rebuilt on new IPs.
+- name: Tạo thư mục config trên target node
+  ansible.builtin.file:
+    path: "{{ mariadb_etc }}"
+    state: directory
+    mode: "0755"
+
+- name: Xác định nguồn config server.cnf (override per-host > per-group > per-service > template)
+  ansible.builtin.set_fact:
+    _mariadb_cfg_src: >-
+      {{ (q('first_found', dict(
+            files=[deploy_config_dir + '/mariadb/' + inventory_hostname + '/server.cnf']
+                  + (group_names | reject('in', ['all', 'ungrouped', 'all_hosts'])
+                                  | map('regex_replace', '^(.*)$', deploy_config_dir + '/mariadb/group_\1/server.cnf')
+                                  | list)
+                  + [deploy_config_dir + '/mariadb/server.cnf'],
+            skip=true)) | first) | default('', true) }}
+
+- name: Copy override server.cnf (nếu có)
+  ansible.builtin.copy:
+    src: "{{ _mariadb_cfg_src }}"
+    dest: "{{ mariadb_etc }}/server.cnf"
+    mode: "0644"
+  when: _mariadb_cfg_src | length > 0
+  no_log: true
+  notify: Reload mariadb
+
+- name: Render template mặc định server.cnf (không có override)
+  ansible.builtin.template:
+    src: server.cnf.j2
+    dest: "{{ mariadb_etc }}/server.cnf"
+    mode: "0644"
+  when: _mariadb_cfg_src | length == 0
+  no_log: true
+  notify: Reload mariadb

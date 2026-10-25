@@ -490,6 +490,72 @@
   ansible.builtin.include_tasks: module-director.yml
   when: _director_enabled_here | bool
 
+# ---------- HTTPS Apache ----------------------------------------------------
+- name: Tạo thư mục HTTPS persistent trên host
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ web_etc }}/tls", mode: "0700" }
+    - { path: "{{ web_etc }}/apache2", mode: "0755" }
+  when: icingaweb2_https_enabled | bool
+
+- name: Copy certificate/full chain HTTPS từ deployment node
+  ansible.builtin.copy:
+    src: "{{ icingaweb2_https_certificate_source }}"
+    dest: "{{ web_etc }}/tls/certificate.pem"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: "{{ icingaweb2_https_certificate_file == icingaweb2_https_private_key_file }}"
+  when: icingaweb2_https_enabled | bool
+  notify: Reload icingaweb2
+
+- name: Copy private key HTTPS tách riêng từ deployment node
+  ansible.builtin.copy:
+    src: "{{ icingaweb2_https_private_key_source }}"
+    dest: "{{ web_etc }}/tls/private-key.pem"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when:
+    - icingaweb2_https_enabled | bool
+    - icingaweb2_https_certificate_file != icingaweb2_https_private_key_file
+  notify: Reload icingaweb2
+
+- name: Xoá private key tách riêng cũ khi chuyển sang PEM gộp
+  ansible.builtin.file:
+    path: "{{ web_etc }}/tls/private-key.pem"
+    state: absent
+  when:
+    - icingaweb2_https_enabled | bool
+    - icingaweb2_https_certificate_file == icingaweb2_https_private_key_file
+  notify: Reload icingaweb2
+
+- name: Render Apache HTTPS virtual host
+  ansible.builtin.template:
+    src: apache-https.conf.j2
+    dest: "{{ web_etc }}/apache2/icingaweb2-https.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: icingaweb2_https_enabled | bool
+  notify: Reload icingaweb2
+
+- name: Gỡ certificate và Apache HTTPS khỏi managed node khi đã tắt tính năng
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ web_etc }}/tls"
+    - "{{ web_etc }}/apache2/icingaweb2-https.conf"
+  when: not (icingaweb2_https_enabled | bool)
+  notify: Reload icingaweb2
+
 # ---------- Mount nguyên cây config RW ----------
 # Mọi file UI/icingacli tạo thêm đều xuất hiện ngay dưới /etc/icinga-ansible/icingaweb2 trên host.
 # Các template vẫn seed một lần (force:false), nên lần reconfigure sau không ghi đè chỉnh sửa từ UI.
@@ -501,7 +567,8 @@
             if _fileshipper_enabled_here | bool else []) }}
 
 # ---------- Chạy Apache2 + Icinga Web 2 ----------
-# Image serve Apache trên 8080 (không phải 80). Host network -> bind 8080 trên host.
+# Image serve Apache trên 8080 (không phải 80). Khi bật HTTPS, Apache root master nạp cert/bind
+# cổng đặc quyền rồi tự hạ worker xuống www-data; khi tắt vẫn giữ nguyên USER www-data của image.
 # BYPASS entrypoint Go của image (nó tự quản /data + đọc ENV, xung đột config mount sẵn).
 # Chạy thẳng Apache: vhost icingaweb2 + Listen 8080 đã baked trong conf-enabled.
 - name: Tính checksum toàn bộ config web/director trước khi tạo container
@@ -525,12 +592,22 @@
     state: started
     restart_policy: unless-stopped
     network_mode: host
+    user: "{{ 'root' if icingaweb2_https_enabled | bool else omit }}"
     entrypoint:
       - /bin/bash
       - -eo
       - pipefail
       - -c
-      - ". /etc/apache2/envvars; exec apache2 -DFOREGROUND"
+      - >-
+        {% if icingaweb2_https_enabled | bool %}
+        a2enmod ssl headers >/dev/null;
+        {% if icingaweb2_https_redirect_http | bool %}a2dissite 000-default >/dev/null;{% endif %}
+        ln -sfn /data/etc/icingaweb2/apache2/icingaweb2-https.conf
+        /etc/apache2/sites-enabled/icingaweb2-https.conf;
+        {% endif %}
+        . /etc/apache2/envvars;
+        apache2ctl configtest;
+        exec apache2 -DFOREGROUND
     volumes: "{{ _web_volumes }}"
     env:
       ICINGA_ANSIBLE_CONFIG_FINGERPRINT: "{{ _web_config_fingerprint }}"
@@ -550,7 +627,7 @@
         - >-
           exec 3<>/dev/tcp/127.0.0.1/{{ icingaweb2_http_port }} &&
           printf 'GET /authentication/login HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
-          head -1 <&3 | grep -qE 'HTTP/1\.[01] (200|302)'
+          head -1 <&3 | grep -qE 'HTTP/1\.[01] (200|301|302)'
       interval: 20s
       timeout: 5s
       retries: 5

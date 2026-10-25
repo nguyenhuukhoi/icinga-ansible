@@ -430,6 +430,11 @@ Web:
 http://<master1-or-master2>:8080/authentication/login
 ```
 
+Nếu đã bật `icingaweb2_https_enabled`, dùng
+`https://<icingaweb2_https_server_name>:<icingaweb2_https_port>/authentication/login`; cổng 8080
+redirect sang URL này khi `icingaweb2_https_redirect_http: true`. Cách đặt PEM và enable nằm trong
+QUICKSTART mục 4.2.
+
 User/mật khẩu lấy từ `icingaweb2_admin_user` và `icingaweb2_admin_password`.
 
 ### `check` đang xác nhận những gì
@@ -737,7 +742,7 @@ Nếu các node không có majority UUID rõ ràng, dừng để điều tra. Kh
 ### 13.2. Restore physical DB từ một full bundle
 
 Đây chỉ là bước database trong full-cluster restore. Restore DB mới nhất đã được fetch về máy điều
-khiển; quy trình đầy đủ nằm ở mục 14.6 và `QUICKSTART-BACKUP-RESTORE.md`:
+khiển; quy trình đầy đủ nằm ở mục 14.6 và mục 7.2–7.4 trong `QUICKSTART.md`:
 
 ```bash
 ./tools/icinga-ansible mariadb-recovery -i inventory-prod \
@@ -990,14 +995,14 @@ ansible -i "$INV" all_hosts -m ping
   -e restore_mode=clean -e restore_backup_ts="$BACKUP_TS" \
   -e confirm=yes-i-really-really-mean-it
 
-# 6. Dựng runtime tạm rồi restore DB theo đúng timestamp đã verify.
+# 6. Pull image, restore DB trước, rồi mới dựng runtime tạm.
 ./tools/icinga-ansible pull   -i "$INV"
-./tools/icinga-ansible deploy -i "$INV"
 ./tools/icinga-ansible mariadb-recovery -i "$INV" \
   -e recovery_mode=restore-backup \
   -e restore_backup_tag=full \
   -e restore_backup_ts="$BACKUP_TS" \
   -e confirm=yes
+./tools/icinga-ansible deploy -i "$INV"
 
 # 7. Seed lại environment ID cũ trên mọi master và xóa Redis state tạm.
 ./tools/icinga-ansible recover-db-only -i "$INV" -e confirm=yes
@@ -1037,9 +1042,11 @@ chạy lại `check`, rồi tạo một `backup-full` baseline mới.
    `recover-db-only` sau restore DB. IP không phải Icinga DB environment identity.
 6. `zones.d`, plugin và credential đi cùng node-state; không cần stage thủ công lần hai.
 
-Bài destructive regression ngày 2026-10-24 đã xóa/tạo lại 2 master + 3 Galera trên đúng fixed IP cũ,
-rồi lặp lại với năm IP mới. Cả hai case full `check` PASS, Galera 3/3, CA/cert và environment ID giữ
-nguyên, Web/API/Icinga DB heartbeat healthy và Director chỉ chạy trên master1.
+Bài destructive regression ngày 2026-10-25 với generation `20261025-000725` đã chạy restore trên cụm
+hiện tại, xóa/tạo lại 2 master + 3 Galera trên đúng fixed IP cũ, rồi lặp lại với năm IP mới. Cả ba case
+full `check` PASS; HTTPS certificate/login/redirect, Galera 3/3, CA/cert, environment ID và Director đều
+được xác minh. Case IP mới đạt `21/21` monitoring service `OK` trên cả hai master sau khi cập nhật
+allowlist/key trên OpenStack target sang IP executor mới.
 
 ### 14.8. Dựng cụm mới và chỉ import database ứng dụng Icinga
 
@@ -1557,7 +1564,7 @@ trước import; không dừng `icingadb-redis`.
 | Docker pull lỗi 429/5xx/timeout | Docker Hub/CDN, proxy hoặc rate limit | Chạy `pull`; code mới tự retry 8 lần. Nếu vẫn lỗi, kiểm tra Docker daemon proxy và mirror image vào registry nội bộ |
 | Docker pull registry nội bộ lỗi `x509: certificate signed by unknown authority` | Docker daemon chưa có CA của registry | Đặt CA trên deployment node, khai `docker_registry_ca_file` trong `globals.yml`, chạy lại `bootstrap-servers`, rồi `pull` |
 | Icinga DB log `unexpected Redis schema version` | Trộn Icinga 2 `<2.15` với Icinga DB `>=1.4`, hoặc ngược lại | Trả về cặp cùng thế hệ; chạy `prechecks`; không ép bỏ compatibility guard |
-| Web không mở | Dùng nhầm 80/443 | Mặc định dùng `http://host:8080` |
+| Web không mở | Dùng sai HTTP/HTTPS hoặc port | Mặc định `http://host:8080`; khi bật TLS dùng hostname/port trong globals |
 | Web login trả về lại trang login | Credential DB/admin không hội tụ | Chạy `reconfigure`, sau đó `check`; kiểm tra DB restore/passwords.yml |
 | Director còn endpoint/object của node đã xóa | Object Director thuộc operator, Ansible không reconcile | Operator tự xóa/sửa trong Director; thay đổi hạ tầng vẫn sửa inventory + `satellite_zones`, rồi `reconfigure -t icinga2` và `check` |
 | `recover-db-only` báo nhiều environment | DB chứa nhiều ID | Chọn đúng ID bằng `recover_environment_id` |

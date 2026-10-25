@@ -109,6 +109,81 @@
       icingadb_db_name=icingadb. Đổi các giá trị này trước đây chỉ đổi client URL nhưng không đổi
       listener/toàn bộ SQL, nên bị chặn để tránh deploy nửa vời.
 
+- name: Kiểm tra cấu hình HTTPS Icinga Web 2
+  ansible.builtin.assert:
+    that:
+      - icingaweb2_https_port | int >= 1
+      - icingaweb2_https_port | int <= 65535
+      - (icingaweb2_https_port | int) not in [(icingaweb2_http_port | int), (icinga2_api_port | int), (icingadb_redis_port | int)]
+      - icingaweb2_https_server_name is match('^[A-Za-z0-9.-]+$')
+      - icingaweb2_https_server_name | length <= 253
+      - not icingaweb2_https_server_name.startswith('.')
+      - not icingaweb2_https_server_name.endswith('.')
+      - "'..' not in icingaweb2_https_server_name"
+      - icingaweb2_https_certificate_file is match('^[A-Za-z0-9_.-]+$')
+      - icingaweb2_https_private_key_file is match('^[A-Za-z0-9_.-]+$')
+    fail_msg: >-
+      HTTPS cần port không xung đột, server_name hợp lệ và tên file certificate/key chỉ là basename an toàn.
+  when: icingaweb2_https_enabled | bool
+
+- name: Kiểm tra certificate và private key nguồn trên deployment node
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ icingaweb2_https_certificate_source }}"
+    - "{{ icingaweb2_https_private_key_source }}"
+  register: _icingaweb2_tls_sources
+  delegate_to: localhost
+  become: false
+  when: icingaweb2_https_enabled | bool
+
+- name: Xác nhận certificate/key HTTPS tồn tại
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - item.stat.size | int > 0
+    fail_msg: >-
+      File HTTPS {{ item.item }} phải tồn tại trên deployment node và là regular file không rỗng.
+  loop: "{{ _icingaweb2_tls_sources.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: icingaweb2_https_enabled | bool
+
+- name: Private key nguồn không được cấp quyền cho other
+  ansible.builtin.assert:
+    that:
+      - not (_icingaweb2_tls_sources.results[1].stat.mode is match('^...[1-7]$'))
+    fail_msg: >-
+      Private key {{ icingaweb2_https_private_key_source }} đang có quyền cho other; hãy chạy chmod 0640 hoặc 0600.
+  when: icingaweb2_https_enabled | bool
+
+- name: Xác nhận PEM hợp lệ, key không mã hoá, chưa hết hạn và khớp certificate
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cert={{ icingaweb2_https_certificate_source | quote }}
+    key={{ icingaweb2_https_private_key_source | quote }}
+    openssl x509 -in "$cert" -noout -checkend 86400
+    name={{ icingaweb2_https_server_name | quote }}
+    if [[ "$name" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+      openssl x509 -in "$cert" -noout -checkip "$name"
+    else
+      openssl x509 -in "$cert" -noout -checkhost "$name"
+    fi
+    timeout 5 openssl pkey -in "$key" -passin pass: -noout >/dev/null
+    cert_pub=$(openssl x509 -in "$cert" -pubkey -noout |
+      openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
+    key_pub=$(openssl pkey -in "$key" -passin pass: -pubout -outform DER 2>/dev/null |
+      sha256sum | awk '{print $1}')
+    test -n "$cert_pub"
+    test "$cert_pub" = "$key_pub"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  delegate_to: localhost
+  become: false
+  when: icingaweb2_https_enabled | bool
+
 - name: Loại database phải hợp lệ
   ansible.builtin.assert:
     that: icinga_database_type in ['managed_db', 'external']

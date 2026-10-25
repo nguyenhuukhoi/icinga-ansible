@@ -147,12 +147,14 @@
 
     - name: Web login phải trả 200 hoặc 302
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ icingaweb2_http_port }}/authentication/login"
+        url: "{{ icingaweb2_web_scheme }}://127.0.0.1:{{ icingaweb2_web_port }}/authentication/login"
+        validate_certs: false
         status_code: [200, 302]
 
     - name: Khởi tạo session/cookie cho form login
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ icingaweb2_http_port }}/authentication/login"
+        url: "{{ icingaweb2_web_scheme }}://127.0.0.1:{{ icingaweb2_web_port }}/authentication/login"
+        validate_certs: false
         follow_redirects: none
         status_code: 302
       register: _web_login_session
@@ -161,6 +163,7 @@
     - name: Đọc form login sau cookie check
       ansible.builtin.uri:
         url: "{{ _web_login_session.location }}"
+        validate_certs: false
         headers:
           Cookie: "{{ _web_login_session.set_cookie | regex_replace(',\\s*', '; ') }}"
         return_content: true
@@ -182,8 +185,9 @@
 
     - name: Đăng nhập Web bằng tài khoản admin được quản lý
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ icingaweb2_http_port }}/authentication/login"
+        url: "{{ icingaweb2_web_scheme }}://127.0.0.1:{{ icingaweb2_web_port }}/authentication/login"
         method: POST
+        validate_certs: false
         follow_redirects: none
         status_code: [302, 303]
         headers:
@@ -216,6 +220,43 @@
         that:
           - "'/authentication/login' not in (_web_admin_login.location | default(''))"
         fail_msg: "Icinga Web 2 nhận POST nhưng từ chối credential admin."
+
+    - name: Certificate HTTPS đang phục vụ phải khớp file đã triển khai
+      ansible.builtin.shell: |
+        set -euo pipefail
+        expected=$(openssl x509 -in {{ (icinga_etc_dir + '/icingaweb2/tls/certificate.pem') | quote }} \
+          -outform DER | sha256sum | awk '{print $1}')
+        served=$(timeout 10 openssl s_client \
+          -connect 127.0.0.1:{{ icingaweb2_https_port }} \
+          -servername {{ icingaweb2_https_server_name | quote }} </dev/null 2>/dev/null |
+          openssl x509 -outform DER | sha256sum | awk '{print $1}')
+        test -n "$expected"
+        test "$expected" = "$served"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: icingaweb2_https_enabled | bool
+
+    - name: HTTP phải redirect sang URL HTTPS đã khai
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ icingaweb2_http_port }}/authentication/login"
+        follow_redirects: none
+        status_code: [301, 308]
+      register: _web_https_redirect
+      when:
+        - icingaweb2_https_enabled | bool
+        - icingaweb2_https_redirect_http | bool
+
+    - name: Redirect HTTP phải trỏ đúng server HTTPS
+      ansible.builtin.assert:
+        that:
+          - >-
+            _web_https_redirect.location.startswith(
+              'https://' ~ icingaweb2_https_server_name ~
+              ((':' ~ (icingaweb2_https_port | string)) if icingaweb2_https_port | int != 443 else '') ~ '/')
+      when:
+        - icingaweb2_https_enabled | bool
+        - icingaweb2_https_redirect_http | bool
 
     - name: FileShipper phải có code, config và source directory trong cả hai container
       ansible.builtin.command:

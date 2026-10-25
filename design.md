@@ -51,7 +51,9 @@ lần trên chính node để tránh mất dữ liệu. `remove-*`/`destroy` xó
 ## 5. Network
 
 Service dùng Docker host network. Port cluster/API 5665 nối trực tiếp theo endpoint; không đặt VIP ở
-đây. Web mặc định dùng 8080. Reverse proxy/load balancer cho Web nằm ngoài phạm vi của tool.
+đây. Web mặc định dùng HTTP 8080. Khi bật HTTPS, Apache trong container bind cổng TLS (mặc định 443),
+nạp certificate/key theo permission root và có thể redirect 8080 sang HTTPS. Reverse proxy/load
+balancer/VIP bên ngoài vẫn nằm ngoài phạm vi của tool.
 
 ## 6. Invariant và precheck
 
@@ -115,8 +117,10 @@ mới cập nhật `LATEST_COMPLETE`; destroy không xoá backup destination.
 
 `restore-node-state` có hai mode: `existing` chỉ rollback khi CA hiện tại khớp bundle và lưu rollback
 local; `clean` yêu cầu VM chưa có CA/cert/config. Logical hostname, thứ tự group, zone master và loại DB
-phải giống metadata, còn `ansible_host` có thể đổi. Sau node-state phải restore DB, environment ID và
-Web đúng thứ tự trước deploy/check cuối. Quickstart ngắn nằm ở `QUICKSTART-BACKUP-RESTORE.md`.
+phải giống metadata, còn `ansible_host` có thể đổi. `mariadb-recovery` reconcile `server.cnf` theo
+inventory hiện tại trước khi bootstrap DB; sau node-state phải restore DB, deploy runtime tạm, phục hồi
+environment ID và Web đúng thứ tự trước deploy/check cuối. Quy trình thao tác từng bước nằm ở mục 7
+trong `QUICKSTART.md`.
 
 ## 13. Upgrade
 

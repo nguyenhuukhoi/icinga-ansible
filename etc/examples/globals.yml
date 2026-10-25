@@ -128,6 +128,16 @@ icingadb_db_name: "icingadb"
 icingaweb2_http_port: 8080                        # image official serve Apache trên 8080
 icingaweb2_timezone: "Asia/Ho_Chi_Minh"           # timezone hiển thị mặc định trong Web UI (config.ini [global] timezone)
 
+# HTTPS trực tiếp trên Apache trong container. PEM/key nguồn đặt trên deployment node tại
+# /etc/icinga-ansible/config/icingaweb2/tls/. Nếu một PEM chứa cả certificate + private key,
+# giữ cùng tên ở hai biến file. Certificate nên là full chain và SAN phải chứa DNS/VIP truy cập.
+icingaweb2_https_enabled: false
+icingaweb2_https_port: 443
+icingaweb2_https_redirect_http: true
+icingaweb2_https_server_name: "icinga.example.com"
+icingaweb2_https_certificate_file: "server.pem"
+icingaweb2_https_private_key_file: "server.pem"
+
 # Module Icinga Web 2 muốn bật (chỉ quyết định BẬT CÁI NÀO, không quyết định version)
 enable_icingaweb2_modules:
   - "icingadb"
