@@ -110,8 +110,9 @@ Backup/restore toàn hệ thống (dựng lại hạ tầng mới sau sự cố 
                       (-e restore_backup_ts=YYYYMMDD-HHMMSS -e confirm=yes), rồi chạy deploy
   restore-director    Publish object trong Director DB đã restore trở lại Icinga runtime
                       (-e confirm=yes); tự khởi tạo API package khi master là VM sạch
-  verify-monitoring   Chờ và xác minh object/check result sau DR trên mọi master; truyền
-                      -e monitoring_expected_service_count=N và/hoặc danh sách tên service
+  verify-monitoring   Chờ và xác minh host/service check result trên mọi master; truyền count/name
+                      expectation và có thể đặt -e monitoring_verify_not_before_epoch=<unix-epoch>
+                      để loại kết quả xanh cũ trước restore/failover
   # Custom image (design.md mục 9.6): icinga-ansible KHÔNG tự build — tự build/push bằng cách nào
   # cũng được, rồi khai custom_image_registry + custom_image_overrides trong globals.yml.
   # Full-cluster restore: restore-config -> bootstrap-servers -> restore-node-state -> pull

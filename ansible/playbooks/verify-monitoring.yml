@@ -13,14 +13,23 @@
   vars:
     _expected_count: "{{ monitoring_expected_service_count | default(0) | int }}"
     _expected_names: "{{ monitoring_expected_service_names | default([]) }}"
+    _expected_host_count: "{{ monitoring_expected_host_count | default(0) | int }}"
+    _expected_host_names: "{{ monitoring_expected_host_names | default([]) }}"
+    # Zero preserves the historical behaviour. For failover/restore validation,
+    # pass an operation start epoch so an old green result cannot satisfy the gate.
+    _result_not_before_epoch: "{{ monitoring_verify_not_before_epoch | default(0) | int }}"
   tasks:
     - name: Require at least one explicit monitoring expectation
       ansible.builtin.assert:
         that:
-          - (_expected_count | int) > 0 or (_expected_names | length) > 0
+          - >-
+            (_expected_count | int) > 0 or (_expected_names | length) > 0 or
+            (_expected_host_count | int) > 0 or (_expected_host_names | length) > 0
         fail_msg: >-
           Pass -e monitoring_expected_service_count=N and/or
-          -e monitoring_expected_service_names='["host!service", ...]'.
+          -e monitoring_expected_service_names='["host!service", ...]' and optionally
+          -e monitoring_expected_host_count=N and/or
+          -e monitoring_expected_host_names='["host", ...]'.
 
     - name: Wait for restored services to have successful live results
       ansible.builtin.uri:
@@ -43,6 +52,11 @@
              ) | length) == 0)
         and ((_monitoring_api.json.results | default([])
               | rejectattr('attrs.state', 'equalto', 0) | list | length) == 0)
+        and ((_result_not_before_epoch | int == 0) or
+             (((_monitoring_api.json.results | default([])
+                | map(attribute='attrs.last_check_result.execution_end')
+                | map('int') | min | default(0, true)) | int)
+              >= (_result_not_before_epoch | int)))
       no_log: true
 
     - name: Keep only non-secret monitoring result fields
@@ -58,3 +72,46 @@
           check_sources={{ _safe_monitoring_results
             | map(attribute='attrs.last_check_result.check_source')
             | unique | sort | join(',') }}
+          oldest_execution_end={{ _safe_monitoring_results
+            | map(attribute='attrs.last_check_result.execution_end')
+            | map('int') | min | default(0, true) }}
+
+    - name: Wait for restored hosts to have successful live results
+      ansible.builtin.uri:
+        url: https://127.0.0.1:5665/v1/objects/hosts?attrs=name&attrs=state&attrs=last_check_result
+        method: GET
+        user: icingadb-web
+        password: "{{ icingadb_web_api_user_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      register: _monitoring_host_api
+      retries: "{{ monitoring_verify_retries | default(30) | int }}"
+      delay: "{{ monitoring_verify_delay | default(10) | int }}"
+      until: >-
+        (_monitoring_host_api.status | default(0) == 200)
+        and ((_expected_host_count | int == 0) or
+             ((_monitoring_host_api.json.results | default([]) | length) == (_expected_host_count | int)))
+        and ((_expected_host_names | difference(
+               _monitoring_host_api.json.results | default([]) | map(attribute='name') | list
+             ) | length) == 0)
+        and ((_monitoring_host_api.json.results | default([])
+              | rejectattr('attrs.state', 'equalto', 0) | list | length) == 0)
+        and ((_result_not_before_epoch | int == 0) or
+             (((_monitoring_host_api.json.results | default([])
+                | map(attribute='attrs.last_check_result.execution_end')
+                | map('int') | min | default(0, true)) | int)
+              >= (_result_not_before_epoch | int)))
+      no_log: true
+      when: (_expected_host_count | int) > 0 or (_expected_host_names | length) > 0
+
+    - name: Report the restored host result summary
+      ansible.builtin.debug:
+        msg: >-
+          verified_hosts={{ _monitoring_host_api.json.results | length }}
+          ok_hosts={{ _monitoring_host_api.json.results
+            | selectattr('attrs.state', 'equalto', 0) | list | length }}
+          oldest_execution_end={{ _monitoring_host_api.json.results
+            | map(attribute='attrs.last_check_result.execution_end')
+            | map('int') | min | default(0, true) }}
+      when: (_expected_host_count | int) > 0 or (_expected_host_names | length) > 0

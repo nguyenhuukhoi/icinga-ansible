@@ -348,8 +348,14 @@ ansible-playbook -i "$INV" monitoring/openstack-file/stage-static-config.yml \
 
 ./tools/icinga-ansible check -i "$INV"
 ./tools/icinga-ansible verify-monitoring -i "$INV" \
-  -e monitoring_expected_service_count=21
+  -e monitoring_expected_service_count=21 \
+  -e monitoring_expected_host_count=7
 ```
+
+Khi kiểm tra sau restore/failover, ghi lại `date +%s` ngay trước khi gây lỗi hoặc bắt đầu recovery rồi
+truyền `-e monitoring_verify_not_before_epoch=<epoch>`. Gate chỉ PASS khi **mọi** host/service được kỳ vọng
+có state `OK` và `last_check_result.execution_end` không cũ hơn mốc đó; kết quả xanh còn sót lại từ trước
+sự cố không được tính.
 
 `apply-monitoring.yml` force-run và kiểm tra 6 Host ICMP cùng 18 Service SSH. Package static test API
 Nova/Cinder/Neutron từ từng master, validate config trước reload và chờ ba object sync sang cả hai
@@ -532,6 +538,197 @@ membership satellite, sửa đồng thời inventory và `satellite_zones`, sau 
 
 Không đổi `icinga_master_zone_name` trên cluster đã có dữ liệu. Các lệnh node cũng không thay đổi
 membership Galera; thêm/xóa Galera cần kế hoạch quorum, SST/IST và backup riêng.
+
+### 6.6. Định nghĩa “mất node” và phục hồi HA
+
+Trong tài liệu và các fault drill của project này, **mất node** có đúng một nghĩa:
+
+- VM đã bị xóa hoặc không thể phục hồi; và
+- boot volume/data volume cùng toàn bộ state local của node đã mất, hỏng hoặc không thể truy cập lại; và
+- phải tạo một VM sạch để thay thế. Việc VM mới dùng lại cùng tên hoặc cùng IP không làm thay đổi kết luận
+  rằng node cũ đã mất.
+
+Stop container/service, reboot, power-off VM, lỗi OS nhưng disk còn phục hồi được, mất mạng hoặc network
+partition chỉ được gọi là **node tạm thời unavailable**, không gọi là mất node. Không xóa/reorder inventory
+trong lúc chưa phân loại xong sự cố. Trước fault drill hoặc thao tác phá hủy, chạy `backup-full` và sao bundle
+ra storage nằm ngoài cluster.
+
+Chuẩn bị biến dùng chung trên deployment node đã activate Ansible virtualenv:
+
+```bash
+INV=ansible/inventory/my-cluster
+BACKUP_TS=YYYYMMDD-HHMMSS
+MONITORING_HOST_COUNT=7
+MONITORING_SERVICE_COUNT=21
+FAULT_EPOCH=$(date +%s)   # đặt trước fault drill; với incident thật dùng thời điểm bắt đầu recovery
+```
+
+Việc tạo/xóa VM, volume, port hoặc fixed IP thuộc lớp hạ tầng/OpenStack, không thuộc tool này. Operator phải
+provision VM Ubuntu sạch, bảo đảm SSH/passwordless sudo và cập nhật `ansible_host` nếu IP thay đổi. Giữ nguyên
+logical inventory name và thứ tự topology. Không chạy `deploy` lên node DB sạch trước bước restore được chỉ
+định bên dưới.
+
+#### Node tạm thời unavailable — không phải mất node
+
+Nếu master hoặc Galera VM còn toàn bộ disk/state, khởi động/sửa đúng node cũ rồi cho nó rejoin. Một Galera
+crash vẫn để hai survivor ở `Primary`; hai Galera crash làm survivor 1/3 về `non-Primary` để chống
+split-brain. Chỉ dùng `recovery_mode=recover-cluster` khi **tất cả datadir gốc còn tồn tại và truy cập được**;
+flow này chạy `wsrep-recover`, yêu cầu history UUID chiếm đa số và chọn seqno cao nhất trước khi bootstrap.
+
+#### Mất vĩnh viễn `master[0]`/CA host
+
+Master còn lại tiếp tục thực thi check đã được config-sync. Tạo VM sạch với cùng logical inventory name,
+chạy `bootstrap-servers`, restore archive endpoint/CA bằng `restore-node-state`, restore Web, `deploy` toàn
+inventory rồi `restore-director`. Không tạo CA mới, không promote bằng cách chỉ reorder `[master]`, và không
+dùng `remove-master` để xử lý CA đã mất. Director daemon là singleton trên CA host; VIP/load balancer cho
+Web nằm ngoài phạm vi tool.
+
+Ví dụ CA host có logical inventory name `master1`:
+
+```bash
+LOST_MASTER=master1
+
+# Trong khi VM thay thế chưa sẵn sàng, xác minh master peer vẫn tạo result mới.
+./tools/icinga-ansible verify-monitoring -i "$INV" --limit master2 \
+  -e monitoring_expected_host_count="$MONITORING_HOST_COUNT" \
+  -e monitoring_expected_service_count="$MONITORING_SERVICE_COUNT" \
+  -e monitoring_verify_not_before_epoch="$FAULT_EPOCH"
+
+# Sau khi operator đã tạo VM sạch và SSH tới được đúng inventory host.
+./tools/icinga-ansible bootstrap-servers -i "$INV" --limit "$LOST_MASTER"
+./tools/icinga-ansible restore-node-state -i "$INV" \
+  --limit "localhost,$LOST_MASTER" \
+  -e restore_mode=clean -e restore_backup_ts="$BACKUP_TS" \
+  -e confirm=yes-i-really-really-mean-it
+./tools/icinga-ansible pull -i "$INV" --limit "$LOST_MASTER"
+
+# Deploy đầu dựng runtime từ đúng PKI/identity đã restore.
+./tools/icinga-ansible deploy -i "$INV"
+./tools/icinga-ansible restore-web -i "$INV" \
+  -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
+./tools/icinga-ansible deploy -i "$INV"
+./tools/icinga-ansible restore-director -i "$INV" -e confirm=yes
+```
+
+#### Mất vĩnh viễn master không phải CA (ví dụ `master2`)
+
+Đây là **thay node theo lifecycle**, không bắt buộc restore backup. Giữ nguyên entry và logical inventory name
+trong suốt sự cố; tạo VM Ubuntu sạch, dùng lại IP cũ hoặc chỉ sửa `ansible_host` nếu IP mới khác. Không reorder
+`[master]` và không xóa endpoint khỏi topology. `add-master` sẽ enroll lại đúng endpoint name bằng certificate
+mới do CA hiện hữu ký, đồng thời sao CA hiện hữu sang master mới để khôi phục CA HA.
+
+VM sạch phải có sẵn đường ra package repository bằng mirror/proxy do operator quản lý. Các biến `docker_*_proxy`
+chỉ cấu hình Docker daemon/container, không cấu hình APT hoặc `get_url` của host.
+
+```bash
+LOST_MASTER=master2
+
+# Trong lúc master2 đã mất, chứng minh master1 vẫn sinh result mới.
+./tools/icinga-ansible verify-monitoring -i "$INV" --limit master1 \
+  -e monitoring_expected_host_count="$MONITORING_HOST_COUNT" \
+  -e monitoring_expected_service_count="$MONITORING_SERVICE_COUNT" \
+  -e monitoring_verify_not_before_epoch="$FAULT_EPOCH"
+
+# Chạy sau khi operator đã tạo VM sạch và SSH tới được đúng inventory host.
+./tools/icinga-ansible bootstrap-servers -i "$INV" --limit "$LOST_MASTER"
+./tools/icinga-ansible prechecks         -i "$INV"
+
+# NGOÀI lifecycle tool, trước khi cho master mới tham gia scheduler: user phải pre-stage mọi
+# plugin/key/credential mà service check của mình cần lên executor mới. Nếu bỏ bước này, cluster vẫn
+# healthy nhưng check được gán sang master mới sẽ UNKNOWN cho tới khi user content được phân phối.
+
+# Không dùng --limit: add-master reconcile toàn topology và consumer liên quan.
+./tools/icinga-ansible add-master -i "$INV"
+./tools/icinga-ansible check -i "$INV"
+
+# NGOÀI lifecycle tool: reconcile/validate monitoring content bằng pipeline của user.
+# Ví dụ riêng cho monitoring demo đi kèm repository này:
+ansible-playbook -i "$INV" monitoring/openstack-director/provision-targets.yml
+ansible-playbook -i "$INV" monitoring/openstack-file/stage-static-config.yml
+
+RESTORED_EPOCH=$(date +%s)
+./tools/icinga-ansible verify-monitoring -i "$INV" \
+  -e monitoring_expected_host_count="$MONITORING_HOST_COUNT" \
+  -e monitoring_expected_service_count="$MONITORING_SERVICE_COUNT" \
+  -e monitoring_verify_not_before_epoch="$RESTORED_EPOCH"
+```
+
+Chỉ dùng `restore-node-state -e restore_mode=clean` thay flow trên khi yêu cầu là phục hồi **đúng identity/state
+cũ** từ full backup. Không trộn `restore-node-state` và `add-master` trong cùng một lần thay node.
+
+#### Mất vĩnh viễn một Galera
+
+Tạo VM sạch với cùng logical inventory name/address, chạy `bootstrap-servers`, `pull`, rồi `deploy` toàn
+inventory. Datadir mới phải nhận SST từ hai survivor; không restore backup và không bootstrap cluster mới.
+Chỉ PASS khi node mới `Synced`, cluster size trở lại 3 và fresh host/service checks đều OK.
+
+```bash
+LOST_GALERA=galera3
+
+# Chạy sau khi operator đã tạo VM sạch cho đúng logical host.
+./tools/icinga-ansible bootstrap-servers -i "$INV" --limit "$LOST_GALERA"
+./tools/icinga-ansible pull              -i "$INV" --limit "$LOST_GALERA"
+
+# Full deploy giữ node đầu hiện hữu làm donor; node sạch join bằng SST.
+./tools/icinga-ansible deploy -i "$INV"
+./tools/icinga-ansible check  -i "$INV"
+```
+
+#### Mất vĩnh viễn hai Galera
+
+Hai VM sạch không có `grastate.dat`; `recover-cluster` phải fail closed và không được force survivor 1/3
+thành Primary. Restore một full backup nhất quán lên cả ba node, bao gồm ghi đè survivor, rồi reconcile các
+consumer và publish lại Director:
+
+```bash
+# Chạy sau khi operator đã tạo hai VM sạch và inventory SSH tới được cả hai.
+LOST_GALERA_LIMIT=galera2,galera3
+./tools/icinga-ansible bootstrap-servers -i "$INV" --limit "$LOST_GALERA_LIMIT"
+./tools/icinga-ansible pull              -i "$INV" --limit "$LOST_GALERA_LIMIT"
+
+# Không chạy recover-cluster: hai datadir gốc đã mất nên không còn majority history để chứng minh.
+./tools/icinga-ansible mariadb-recovery -i "$INV" \
+  -e recovery_mode=restore-backup -e restore_backup_tag=full \
+  -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
+./tools/icinga-ansible deploy -i "$INV"
+./tools/icinga-ansible restore-director -i "$INV" -e confirm=yes
+```
+
+RPO là timestamp backup. Icinga 2 vẫn có thể thực thi checks, nhưng Icinga DB/Web ingestion và truy vấn lịch
+sử bị gián đoạn cho tới khi database được phục hồi.
+
+#### Mất vĩnh viễn cả ba Galera
+
+Tạo ba VM sạch và chạy `bootstrap-servers`/`pull`. `restore-backup` phải stage artifact từ deployment node
+hoặc external backup storage vì không còn bản nào trên Galera, sau đó chạy cùng chuỗi `deploy` và
+`restore-director` ở trên. Không chạy một lượt deploy fresh trước restore DB và không dùng `recover-cluster`
+để đoán lịch sử transaction.
+
+```bash
+# Sau khi operator đã tạo đủ ba VM sạch và đặt DB backup trên deployment node.
+./tools/icinga-ansible bootstrap-servers -i "$INV" --limit galera
+./tools/icinga-ansible pull              -i "$INV" --limit galera
+
+./tools/icinga-ansible mariadb-recovery -i "$INV" \
+  -e recovery_mode=restore-backup -e restore_backup_tag=full \
+  -e restore_backup_ts="$BACKUP_TS" -e confirm=yes
+./tools/icinga-ansible deploy -i "$INV"
+./tools/icinga-ansible restore-director -i "$INV" -e confirm=yes
+```
+
+Sau mọi case, lấy một mốc mới ngay trước kiểm tra cuối và chạy `verify-monitoring` với cả expected
+host/service count cùng `monitoring_verify_not_before_epoch`. Chỉ đóng incident khi full `check` PASS,
+Galera đủ size và mọi result có timestamp mới hơn mốc kiểm tra đó.
+
+```bash
+# Có thể đặt VERIFY_EPOCH mới ngay trước check cuối để loại toàn bộ result cũ trong thời gian recovery.
+VERIFY_EPOCH=$(date +%s)
+./tools/icinga-ansible check -i "$INV"
+./tools/icinga-ansible verify-monitoring -i "$INV" \
+  -e monitoring_expected_host_count="$MONITORING_HOST_COUNT" \
+  -e monitoring_expected_service_count="$MONITORING_SERVICE_COUNT" \
+  -e monitoring_verify_not_before_epoch="$VERIFY_EPOCH"
+```
 
 ## 7. Backup, destroy và khôi phục
 

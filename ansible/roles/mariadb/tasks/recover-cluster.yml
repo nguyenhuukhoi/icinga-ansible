@@ -23,10 +23,16 @@
     mariadb_etc: "{{ icinga_etc_dir }}/mariadb"
     mariadb_data: "{{ icinga_base_dir }}/mariadb/data"
 
+- name: Kiểm tra container mariadb có tồn tại trước khi dừng
+  community.docker.docker_container_info:
+    name: mariadb
+  register: _mariadb_recovery_container
+
 - name: Dừng container mariadb (mọi node galera, nếu còn chạy)
   community.docker.docker_container:
     name: mariadb
     state: stopped
+  when: _mariadb_recovery_container.exists
 
 - name: Kiểm tra grastate.dat tồn tại trên từng node (trước khi đọc)
   ansible.builtin.stat:

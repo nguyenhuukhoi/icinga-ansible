@@ -122,6 +122,25 @@ inventory hiện tại trước khi bootstrap DB; sau node-state phải restore 
 environment ID và Web đúng thứ tự trước deploy/check cuối. Quy trình thao tác từng bước nằm ở mục 7
 trong `QUICKSTART.md`.
 
+### 10.1. Failure model
+
+Trong project này, “mất node” chỉ trạng thái VM và toàn bộ boot/data disk hoặc state local đã mất vĩnh
+viễn, không thể đưa node cũ trở lại và bắt buộc phải provision VM sạch. Container/service dừng, VM
+power-off, reboot, mất mạng, network partition hoặc lỗi host nhưng disk còn phục hồi được chỉ là
+“temporarily unavailable”, không phải mất node. VM thay thế dùng lại cùng IP/name vẫn là recovery từ một
+node đã mất.
+
+Mất một Icinga master không được làm dừng check engine trên master peer; Director vẫn là singleton trên
+`ca_host`. Kết quả failover phải được xác minh bằng execution timestamp sau thời điểm lỗi, không chỉ state
+đang lưu trong API. Thay CA host bị mất vĩnh viễn phải restore đúng PKI/identity từ full backup hoặc theo
+một kế hoạch CA migration riêng; việc reorder inventory đơn thuần không phải recovery.
+
+Galera ba node chịu được một crash. Hai crash làm component còn lại mất Primary/quorum; shutdown có trật
+tự có thể thu nhỏ membership mà vẫn Primary nên không dùng để kết luận behavior crash. Khi datadir còn
+nguyên, `recover-cluster` chỉ bootstrap sau khi `wsrep-recover` tìm được history UUID chiếm đa số và chọn
+node có seqno cao nhất. Khi không chứng minh được history an toàn hoặc disk đã mất, recovery bắt buộc đi
+từ backup thay vì force bootstrap.
+
 ## 13. Upgrade
 
 Version đích nằm trong `icinga_image_versions`. `upgrade-plan` kiểm tra image và migration;

@@ -18,6 +18,10 @@ rule hay file nguồn. Hai operator package tách biệt trong [`monitoring/`](m
 khai đúng baseline OpenStack của dự án khi người vận hành chủ động chạy chúng. Đặt file dưới
 `/etc/icinga-ansible/config/icinga2/zones.d` trên deployment node không có tác dụng.
 
+Trong tài liệu vận hành, **mất node** nghĩa là VM cùng boot/data disk và state local đã mất vĩnh viễn,
+không thể khởi động lại node cũ và phải provision VM sạch. Power-off, reboot, mất mạng hoặc service/container
+dừng nhưng disk còn phục hồi được chỉ là node tạm thời unavailable, không phải mất node.
+
 Với static HA, operator có thể đặt file trực tiếp trong `zones.d/<ZoneName>` trên master đầu tiên;
 Icinga tự config-sync sang master peer. Đây là đồng bộ nội bộ của Icinga, không phải deployment node
 ghi đè `zones.d`.
@@ -105,10 +109,12 @@ satellite
 | `prechecks` | Kiểm tra inventory, topology, version và DB |
 | `deploy` / `reconfigure` | Triển khai hoặc áp dụng lại cấu hình hạ tầng |
 | `check` | Kiểm tra container, API, Web, Icinga DB, Redis và Galera |
+| `verify-monitoring` | Kiểm tra host/service state và tùy chọn bắt buộc result mới sau một mốc failover |
 | `add-master` / `add-node` | Thêm master hoặc satellite/client đã có trong inventory |
 | `remove-master` / `remove-node` | Xoá runtime của node được chỉ định |
 | `backup-full` | Backup inventory/topology, desired config, DB/PKI/Web và state từng Icinga endpoint |
 | `restore-node-state` | Restore CA, config, cert và identity endpoint lên cụm hiện tại hoặc VM sạch |
+| `mariadb-recovery` | Phục hồi Galera mất quorum/toàn cụm bằng vị trí transaction thật, hoặc restore backup |
 | `upgrade-plan` / `upgrade` / `rollback` | Lập kế hoạch, nâng cấp và rollback |
 | `destroy` | Xoá container/data/config runtime, giữ config/secrets trên deployment node |
 
