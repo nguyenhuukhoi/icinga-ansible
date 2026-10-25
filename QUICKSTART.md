@@ -320,9 +320,10 @@ mật nằm trong [`monitoring/README.md`](monitoring/README.md).
 
 ## 6. Thêm, sửa và xoá node
 
-Các lệnh trong phần này chỉ quản lý **node hạ tầng** chạy container Icinga. Chúng không tạo, sửa hay
-xóa Host/Service/CheckCommand của operator, không triển khai `zones.d` và không import object vào
-Director.
+Các lệnh trong phần này chỉ quản lý **node hạ tầng** chạy container Icinga. Deploy tạo sẵn thư mục
+rỗng `zones.d/<zone>` theo topology trên `ca_host`, nhưng không tạo, sửa hay xóa file monitoring,
+Host/Service/CheckCommand của operator và không import object vào Director. Deploy lặp lại không đè
+nội dung trong thư mục; zone cũ cũng không bị tự động xóa.
 
 Quy ước ví dụ:
 

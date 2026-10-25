@@ -136,6 +136,28 @@
     group: "{{ ic_uid }}"
     mode: "0700"
   when: inventory_hostname in groups['master']
+
+# Đây chỉ là scaffolding topology trên node authoring. Role không tạo, render, đồng bộ hoặc xoá
+# monitoring content trong các thư mục này. Không dùng recurse và không prune zone cũ: một thư mục
+# đã tồn tại cùng mọi file .conf do operator đặt bên trong phải được giữ nguyên qua mọi lần deploy.
+- name: Xây danh sách thư mục zones.d từ topology
+  ansible.builtin.set_fact:
+    _ic_zone_scaffold_names: >-
+      {{ ([icinga_master_zone_name, 'global-templates', 'director-global']
+          + (satellite_zones | default([]) | map(attribute='name') | list)
+          + (groups['client'] | default([]))) | unique | list }}
+  when: inventory_hostname == ca_host
+
+- name: Tạo scaffolding zones.d trên CA host (không đè nội dung operator)
+  ansible.builtin.file:
+    path: "{{ ic_config_dir }}/zones.d/{{ item }}"
+    state: directory
+    owner: "{{ ic_uid }}"
+    group: "{{ ic_uid }}"
+    mode: "0750"
+  loop: "{{ _ic_zone_scaffold_names }}"
+  when: inventory_hostname == ca_host
+
 # ---------- Base config skeleton (toàn bộ /etc/icinga2 image ship kèm) — seed 1 LẦN ra node ---------
 # Mục tiêu (theo yêu cầu người dùng — giống hệt kolla /etc/kolla/<svc>, KHÔNG lồng thêm thư mục con
 # nào kiểu "base/"): MỌI file trong /etc/icinga2 đều là file THẬT nằm PHẲNG ngay dưới

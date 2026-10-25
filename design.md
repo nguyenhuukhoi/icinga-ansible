@@ -41,9 +41,10 @@ Input archive chỉ dùng để restore vẫn giữ read-only theo nguyên tắc
 cố ý che cây config cũ. Deploy đầu tiên sau nâng cấp chỉ migrate file còn thiếu từ cây cũ, không ghi
 đè file đã có dưới `/etc/icinga-ansible`.
 
-Role không render hoặc reconcile `zones.d`. Luồng direct-to-core do operator tự phân phối; FileShipper
-chỉ thêm file vào package Director khi operator chủ động deploy. Thư mục có mặt trong container vì
-toàn bộ cây config host được bind-mount RW. Trước khi thay đổi runtime, role chạy `icinga2 daemon -C` trên config
+Role chỉ tạo các thư mục rỗng `zones.d/<zone>` theo topology trên `ca_host`; không render, reconcile
+hoặc xóa file bên trong. Luồng direct-to-core do operator tự phân phối; FileShipper chỉ thêm file vào
+package Director khi operator chủ động deploy. Thư mục có mặt trong container vì toàn bộ cây config
+host được bind-mount RW. Trước khi thay đổi runtime, role chạy `icinga2 daemon -C` trên config
 hiệu lực, nên lỗi cú pháp operator vẫn dừng deploy an toàn. Migration layout cũ chỉ copy cục bộ một
 lần trên chính node để tránh mất dữ liệu. `remove-*`/`destroy` xóa nguyên config của target được chỉ
 định; nội dung operator phải có backup/pipeline riêng.
@@ -87,9 +88,10 @@ PKI vẫn bắt buộc trước mọi thay đổi phá huỷ.
 
 ### 9.2. Config monitoring
 
-Role không quản lý hay đồng bộ trực tiếp `zones.d`. Operator tự triển khai static DSL lên master đầu
-tiên bằng pipeline riêng, quản lý object qua Director, hoặc dùng FileShipper để Director đóng gói
-file operator-owned. Với static HA, config đặt trong
+Role tạo sẵn thư mục cho master, satellite, client và global zone trên `ca_host`, nhưng không quản lý
+nội dung hay đồng bộ trực tiếp file trong `zones.d`; deploy lặp lại không đè file operator và zone cũ
+không bị tự động xóa. Operator tự triển khai static DSL lên master đầu tiên bằng pipeline riêng, quản
+lý object qua Director, hoặc dùng FileShipper để Director đóng gói file operator-owned. Với static HA, config đặt trong
 `zones.d/<ZoneName>` trên master đầu tiên được **Icinga** config-sync sang master peer; đây không phải
 deployment node ghi đè monitoring config. Cây config được mount nguyên thư mục chỉ bảo đảm nội dung
 đã có trên node tồn tại bền vững.
