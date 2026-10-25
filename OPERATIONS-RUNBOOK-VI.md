@@ -431,7 +431,7 @@ http://<master1-or-master2>:8080/authentication/login
 ```
 
 Nếu đã bật `icingaweb2_https_enabled`, dùng
-`https://<icingaweb2_https_server_name>:<icingaweb2_https_port>/authentication/login`; cổng 8080
+`https://<icinga_server_name>:<icingaweb2_https_port>/authentication/login`; cổng 8080
 redirect sang URL này khi `icingaweb2_https_redirect_http: true`. Cách đặt PEM và enable nằm trong
 QUICKSTART mục 4.2.
 

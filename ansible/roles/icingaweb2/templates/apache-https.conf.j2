@@ -3,7 +3,7 @@ Listen {{ icingaweb2_https_port }}
 {% endif %}
 
 <VirtualHost *:{{ icingaweb2_https_port }}>
-    ServerName {{ icingaweb2_https_server_name }}
+    ServerName {{ icinga_effective_server_name }}
     SSLEngine on
     SSLCertificateFile /data/etc/icingaweb2/tls/certificate.pem
     SSLCertificateKeyFile /data/etc/icingaweb2/tls/{{ 'certificate.pem' if icingaweb2_https_certificate_file == icingaweb2_https_private_key_file else 'private-key.pem' }}
@@ -14,7 +14,7 @@ Listen {{ icingaweb2_https_port }}
 
 {% if icingaweb2_https_redirect_http | bool %}
 <VirtualHost *:{{ icingaweb2_http_port }}>
-    ServerName {{ icingaweb2_https_server_name }}
-    Redirect permanent / https://{{ icingaweb2_https_server_name }}{% if icingaweb2_https_port | int != 443 %}:{{ icingaweb2_https_port }}{% endif %}/
+    ServerName {{ icinga_effective_server_name }}
+    Redirect permanent / https://{{ icinga_effective_server_name }}{% if icingaweb2_https_port | int != 443 %}:{{ icingaweb2_https_port }}{% endif %}/
 </VirtualHost>
 {% endif %}

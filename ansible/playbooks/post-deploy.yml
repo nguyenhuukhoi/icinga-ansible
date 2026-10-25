@@ -9,7 +9,7 @@
       ansible.builtin.debug:
         msg:
           - >-
-            Icinga Web 2: {{ icingaweb2_web_scheme }}://{{ icingaweb2_https_server_name
-            if (icingaweb2_https_enabled | bool)
+            Icinga Web 2: {{ icingaweb2_web_scheme }}://{{ icinga_effective_server_name
+            if (icinga_effective_server_name | length > 0)
             else (ansible_host | default(inventory_hostname)) }}:{{ icingaweb2_web_port }}/authentication/login
           - "Admin user: {{ icingaweb2_admin_user }}"

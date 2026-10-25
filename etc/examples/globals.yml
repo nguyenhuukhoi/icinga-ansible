@@ -8,6 +8,11 @@
 ###############################################################################
 # Chung
 ###############################################################################
+# DNS hoặc VIP mà người dùng dùng để truy cập hệ thống, tương tự external FQDN
+# của Kolla-Ansible. Không đổi hostname OS, inventory hostname hay tên Icinga Zone.
+# Khi bật HTTPS, giá trị này bắt buộc phải có trong SAN của certificate.
+icinga_server_name: ""                         # vd "icinga.example.com"
+
 # Docker Engine proxy, cùng tên biến và phạm vi với Kolla-Ansible. Chỉ Docker
 # daemon dùng các giá trị này để pull image; tool không ghi /etc/environment,
 # không cấu hình APT và không truyền proxy vào container Icinga.
@@ -134,7 +139,6 @@ icingaweb2_timezone: "Asia/Ho_Chi_Minh"           # timezone hiển thị mặc 
 icingaweb2_https_enabled: false
 icingaweb2_https_port: 443
 icingaweb2_https_redirect_http: true
-icingaweb2_https_server_name: "icinga.example.com"
 icingaweb2_https_certificate_file: "server.pem"
 icingaweb2_https_private_key_file: "server.pem"
 

@@ -228,7 +228,7 @@
           -outform DER | sha256sum | awk '{print $1}')
         served=$(timeout 10 openssl s_client \
           -connect 127.0.0.1:{{ icingaweb2_https_port }} \
-          -servername {{ icingaweb2_https_server_name | quote }} </dev/null 2>/dev/null |
+          -servername {{ icinga_effective_server_name | quote }} </dev/null 2>/dev/null |
           openssl x509 -outform DER | sha256sum | awk '{print $1}')
         test -n "$expected"
         test "$expected" = "$served"
@@ -252,7 +252,7 @@
         that:
           - >-
             _web_https_redirect.location.startswith(
-              'https://' ~ icingaweb2_https_server_name ~
+              'https://' ~ icinga_effective_server_name ~
               ((':' ~ (icingaweb2_https_port | string)) if icingaweb2_https_port | int != 443 else '') ~ '/')
       when:
         - icingaweb2_https_enabled | bool

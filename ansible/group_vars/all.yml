@@ -99,13 +99,25 @@ satellite_zones: []
 # Default cho user Việt Nam — override trong globals.yml nếu cần múi giờ khác.
 icingaweb2_timezone: "Asia/Ho_Chi_Minh"
 
+# --- Tên dịch vụ truy cập từ người dùng ------------------------------------
+# Tương tự external FQDN của Kolla-Ansible: đây là DNS/VIP dùng để truy cập
+# Icinga Web, không phải hostname OS, inventory hostname hay Icinga Zone.
+icinga_server_name: ""
+
 # --- HTTPS cho Icinga Web 2 -------------------------------------------------
 # Certificate/key là input trên deployment node dưới controller_config_dir/config/icingaweb2/tls.
 # Một PEM gộp được hỗ trợ bằng cách khai cùng tên cho certificate_file và private_key_file.
 icingaweb2_https_enabled: false
 icingaweb2_https_port: 443
 icingaweb2_https_redirect_http: true
+# Alias cũ để cluster đã triển khai có thể nâng cấp không gián đoạn. Cấu hình
+# mới chỉ cần khai icinga_server_name trong globals.yml; nếu cả hai có giá trị,
+# icinga_server_name được ưu tiên.
 icingaweb2_https_server_name: ""
+icinga_effective_server_name: >-
+  {{ (icinga_server_name | default('', true) | string | trim)
+     if (icinga_server_name | default('', true) | string | trim | length > 0)
+     else (icingaweb2_https_server_name | default('', true) | string | trim) }}
 icingaweb2_https_certificate_file: "server.pem"
 icingaweb2_https_private_key_file: "server.pem"
 icingaweb2_https_source_dir: "{{ controller_config_dir }}/config/icingaweb2/tls"

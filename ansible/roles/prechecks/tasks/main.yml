@@ -109,21 +109,29 @@
       icingadb_db_name=icingadb. Đổi các giá trị này trước đây chỉ đổi client URL nhưng không đổi
       listener/toàn bộ SQL, nên bị chặn để tránh deploy nửa vời.
 
+- name: Kiểm tra server name dùng để truy cập hệ thống
+  ansible.builtin.assert:
+    that:
+      - icinga_effective_server_name is match('^[A-Za-z0-9.-]+$')
+      - icinga_effective_server_name | length <= 253
+      - not icinga_effective_server_name.startswith('.')
+      - not icinga_effective_server_name.endswith('.')
+      - "'..' not in icinga_effective_server_name"
+    fail_msg: >-
+      icinga_server_name phải là DNS hoặc IPv4 hợp lệ để truy cập hệ thống, không kèm scheme, port hay path.
+  when: icinga_effective_server_name | length > 0
+
 - name: Kiểm tra cấu hình HTTPS Icinga Web 2
   ansible.builtin.assert:
     that:
       - icingaweb2_https_port | int >= 1
       - icingaweb2_https_port | int <= 65535
       - (icingaweb2_https_port | int) not in [(icingaweb2_http_port | int), (icinga2_api_port | int), (icingadb_redis_port | int)]
-      - icingaweb2_https_server_name is match('^[A-Za-z0-9.-]+$')
-      - icingaweb2_https_server_name | length <= 253
-      - not icingaweb2_https_server_name.startswith('.')
-      - not icingaweb2_https_server_name.endswith('.')
-      - "'..' not in icingaweb2_https_server_name"
+      - icinga_effective_server_name | length > 0
       - icingaweb2_https_certificate_file is match('^[A-Za-z0-9_.-]+$')
       - icingaweb2_https_private_key_file is match('^[A-Za-z0-9_.-]+$')
     fail_msg: >-
-      HTTPS cần port không xung đột, server_name hợp lệ và tên file certificate/key chỉ là basename an toàn.
+      HTTPS cần icinga_server_name, port không xung đột và tên file certificate/key chỉ là basename an toàn.
   when: icingaweb2_https_enabled | bool
 
 - name: Kiểm tra certificate và private key nguồn trên deployment node
@@ -164,7 +172,7 @@
     cert={{ icingaweb2_https_certificate_source | quote }}
     key={{ icingaweb2_https_private_key_source | quote }}
     openssl x509 -in "$cert" -noout -checkend 86400
-    name={{ icingaweb2_https_server_name | quote }}
+    name={{ icinga_effective_server_name | quote }}
     if [[ "$name" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
       openssl x509 -in "$cert" -noout -checkip "$name"
     else

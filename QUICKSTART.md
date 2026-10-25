@@ -29,6 +29,7 @@ chmod 600 /etc/icinga-ansible/passwords.yml
 Sửa `/etc/icinga-ansible/globals.yml`, tối thiểu kiểm tra:
 
 - `icinga_image_versions`;
+- `icinga_server_name` (DNS/VIP người dùng truy cập, tương tự external FQDN của Kolla-Ansible);
 - `icinga_master_zone_name` (chỉ đổi trước deploy đầu tiên);
 - `icinga_database_type` và `managed_db`/`external_db`;
 - `enable_icingaweb2_modules`;
@@ -88,7 +89,7 @@ source /path/to/venv/bin/activate
 ```
 
 Web mặc định tại `http://<master>:8080/authentication/login`. Khi bật HTTPS, URL chuyển sang
-`https://<icingaweb2_https_server_name>:443/authentication/login`. User và password nằm trong
+`https://<icinga_server_name>:443/authentication/login`. User và password nằm trong
 `/etc/icinga-ansible/passwords.yml`.
 
 Sau deploy, nên chạy lại `reconfigure` một lần để kiểm tra idempotency và `check` lần nữa.
@@ -157,10 +158,10 @@ sudo nano /etc/icinga-ansible/globals.yml
 Với một PEM gộp:
 
 ```yaml
+icinga_server_name: "icinga.example.com"
 icingaweb2_https_enabled: true
 icingaweb2_https_port: 443
 icingaweb2_https_redirect_http: true
-icingaweb2_https_server_name: "icinga.example.com"
 icingaweb2_https_certificate_file: "server.pem"
 icingaweb2_https_private_key_file: "server.pem"
 ```
@@ -172,8 +173,11 @@ icingaweb2_https_certificate_file: "fullchain.pem"
 icingaweb2_https_private_key_file: "private-key.pem"
 ```
 
-`icingaweb2_https_server_name` phải có trong SAN của certificate. Với HA/VIP, dùng DNS mà người dùng
+`icinga_server_name` phải có trong SAN của certificate. Với HA/VIP, dùng DNS mà người dùng
 thực sự truy cập và certificate bao phủ DNS đó. Sau đó áp dụng cho cụm mới hoặc cụm đang chạy:
+
+Cụm đã dùng biến cũ `icingaweb2_https_server_name` vẫn hoạt động để nâng cấp không gián đoạn. Nên
+chuyển giá trị đó sang `icinga_server_name`; nếu tạm thời khai cả hai, `icinga_server_name` được ưu tiên.
 
 ```bash
 INV=ansible/inventory/my-cluster
